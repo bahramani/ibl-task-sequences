@@ -982,54 +982,46 @@ def plot_single_neuron(
 
 
 def plot_sequence_raster(
-    sl, spikes, clusters, cluster_acronyms, df_res, config_plot, save_flag, path_fig, pid, trial_idx
+    sl,
+    spikes,
+    clusters,
+    cluster_acronyms,
+    df_res,
+    config_plot,
+    save_flag,
+    path_fig,
+    pid,
+    trial_idx,
+    region_acronyms=None,
 ):
-    """Plot a VISp raster sorted by delay for a single trial."""
+    """Plot region rasters sorted by delay for a single trial."""
+    if region_acronyms is None:
+        region_acronyms = ["VISp"]
+    elif isinstance(region_acronyms, str):
+        region_acronyms = [region_acronyms]
+    else:
+        region_acronyms = list(region_acronyms)
+
+    if len(region_acronyms) == 0:
+        print("No regions provided for plot_sequence_raster.")
+        return
+
     window_pre = config_plot["SEQUENCE_WINDOW_PRE"]
     window_post = config_plot["SEQUENCE_WINDOW_POST"]
     align_to_stim = config_plot["SEQUENCE_ALIGN_TO_STIM"]
 
     try:
-        visp_mask = np.char.startswith(cluster_acronyms.astype(str), "VISp")
         if hasattr(clusters, "metrics") and "label" in clusters.metrics.columns:
             quality_mask = clusters.metrics.label == 1
         elif hasattr(clusters, "label"):
             quality_mask = clusters.label == 1
         else:
             quality_mask = np.ones(len(clusters.acronym), dtype=bool)
-
-        if config_plot["PLOT_ONLY_GOOD_UNITS"]:
-            final_mask = visp_mask & quality_mask
-        else:
-            final_mask = visp_mask
-        visp_cluster_ids = np.where(final_mask)[0]
-        label_text = "Good Neurons" if config_plot["PLOT_ONLY_GOOD_UNITS"] else "Neurons"
-        print(f"Found {len(visp_cluster_ids)} {label_text} in VISp layers.")
     except AttributeError:
         print("Error: clusters data incomplete.")
-        visp_cluster_ids = []
+        quality_mask = np.ones(len(cluster_acronyms), dtype=bool)
 
-    df_visp = pd.DataFrame(
-        {
-            "cluster_id": visp_cluster_ids,
-            "acronym": cluster_acronyms[visp_cluster_ids],
-            "depth": clusters.depths[visp_cluster_ids],
-        }
-    )
-
-    if df_res is not None:
-        df_visp = df_visp.merge(df_res[["cluster_id", "delay"]], on="cluster_id", how="left")
-    else:
-        print("Warning: df_res not found. Sorting by depth instead.")
-        df_visp["delay"] = np.nan
-
-    df_sorted = df_visp.sort_values(by="delay", ascending=True, na_position="first").reset_index(
-        drop=True
-    )
-
-    n_responsive = df_sorted["delay"].notna().sum()
-    n_nan = df_sorted["delay"].isna().sum()
-    print(f"Sorting Complete: {n_responsive} sequenced, {n_nan} unresponsive (bottom).")
+    cluster_acronyms_str = cluster_acronyms.astype(str)
 
     t_stim = sl.trials["stimOn_times"][trial_idx]
     t_move = sl.trials["firstMovement_times"][trial_idx]
@@ -1039,90 +1031,162 @@ def plot_sequence_raster(
     t_end = t_stim + window_post
     t_offset = t_stim if align_to_stim else 0
 
-    mask_spikes = (np.isin(spikes.clusters, visp_cluster_ids)) & (
-        spikes.times >= t_start
-    ) & (spikes.times <= t_end)
+    fig, axes = plt.subplots(
+        len(region_acronyms), 1, figsize=(10, 6 * len(region_acronyms)), sharex=True
+    )
+    if len(region_acronyms) == 1:
+        axes = [axes]
 
-    relevant_spikes = spikes.times[mask_spikes]
-    relevant_clusters = spikes.clusters[mask_spikes]
+    label_text = "Good Neurons" if config_plot["PLOT_ONLY_GOOD_UNITS"] else "Neurons"
 
-    fig, ax_raster = plt.subplots(figsize=(10, 8))
-    for y_idx, row in df_sorted.iterrows():
-        cid = row["cluster_id"]
-        delay = row["delay"]
-        unit_spikes = relevant_spikes[relevant_clusters == cid]
-
-        if len(unit_spikes) > 0:
-            spike_times_aligned = unit_spikes - t_offset
-            if pd.isna(delay):
-                color = "lightgray"
-                lw = 0.5
+    for ax_raster, region in zip(axes, region_acronyms):
+        try:
+            region_mask = np.char.startswith(cluster_acronyms_str, region)
+            if config_plot["PLOT_ONLY_GOOD_UNITS"]:
+                final_mask = region_mask & quality_mask
             else:
-                color = "black"
-                lw = 0.8
+                final_mask = region_mask
+            region_cluster_ids = np.where(final_mask)[0]
+            print(f"Found {len(region_cluster_ids)} {label_text} in {region}.")
+        except AttributeError:
+            print(f"Error: clusters data incomplete for {region}.")
+            region_cluster_ids = []
 
-            ax_raster.vlines(
-                spike_times_aligned,
-                y_idx - 0.45,
-                y_idx + 0.45,
-                color=color,
-                linewidth=lw,
+        if len(region_cluster_ids) > 0:
+            df_region = pd.DataFrame(
+                {
+                    "cluster_id": region_cluster_ids,
+                    "acronym": cluster_acronyms[region_cluster_ids],
+                    "depth": clusters.depths[region_cluster_ids],
+                }
+            )
+        else:
+            df_region = pd.DataFrame(columns=["cluster_id", "acronym", "depth"])
+
+        if df_res is not None and len(df_region) > 0:
+            df_region = df_region.merge(
+                df_res[["cluster_id", "delay"]], on="cluster_id", how="left"
+            )
+        else:
+            df_region["delay"] = np.nan
+
+        df_sorted = df_region.sort_values(
+            by="delay", ascending=True, na_position="first"
+        ).reset_index(drop=True)
+
+        n_responsive = df_sorted["delay"].notna().sum()
+        n_nan = df_sorted["delay"].isna().sum()
+        print(
+            f"Sorting Complete ({region}): {n_responsive} sequenced, {n_nan} unresponsive (bottom)."
+        )
+
+        mask_spikes = (np.isin(spikes.clusters, region_cluster_ids)) & (
+            spikes.times >= t_start
+        ) & (spikes.times <= t_end)
+
+        relevant_spikes = spikes.times[mask_spikes]
+        relevant_clusters = spikes.clusters[mask_spikes]
+
+        if len(df_sorted) == 0:
+            ax_raster.text(
+                0.5,
+                0.5,
+                f"No units found for {region}",
+                transform=ax_raster.transAxes,
+                ha="center",
+                va="center",
+            )
+            ax_raster.set_xlim(t_start - t_offset, t_end - t_offset)
+            ax_raster.set_ylim(0, 1)
+        else:
+            for y_idx, row in df_sorted.iterrows():
+                cid = row["cluster_id"]
+                delay = row["delay"]
+                unit_spikes = relevant_spikes[relevant_clusters == cid]
+
+                if len(unit_spikes) > 0:
+                    spike_times_aligned = unit_spikes - t_offset
+                    if pd.isna(delay):
+                        color = "lightgray"
+                        lw = 0.5
+                    else:
+                        color = "black"
+                        lw = 0.8
+
+                    ax_raster.vlines(
+                        spike_times_aligned,
+                        y_idx - 0.45,
+                        y_idx + 0.45,
+                        color=color,
+                        linewidth=lw,
+                    )
+
+            ax_raster.set_xlim(t_start - t_offset, t_end - t_offset)
+            ax_raster.set_ylim(-1, len(df_sorted))
+
+            if n_nan > 0:
+                ax_raster.axhline(n_nan, color="red", linestyle="--", linewidth=1, alpha=0.7)
+                ax_raster.text(
+                    (t_start - t_offset) + 0.05,
+                    n_nan / 2,
+                    "Unresponsive / Untuned",
+                    color="gray",
+                    fontsize=10,
+                    va="center",
+                    fontweight="bold",
+                )
+                ax_raster.text(
+                    (t_start - t_offset) + 0.05,
+                    n_nan + (n_responsive / 2),
+                    "Sequenced Activity",
+                    color="black",
+                    fontsize=10,
+                    va="center",
+                    fontweight="bold",
+                )
+
+        ax_raster.set_ylabel(
+            f"{region} {label_text} (n={len(df_sorted)})\nSorted by Delay (NaN bottom)",
+            fontsize=12,
+        )
+        ax_raster.set_title(
+            f"Trial {trial_idx} | {region} Sequence ({label_text})",
+            fontsize=14,
+        )
+
+        ax_raster.axvline(0, color="blue", linewidth=2, label="Stim On")
+        if not np.isnan(t_move):
+            ax_raster.axvline(
+                t_move - t_offset,
+                color="green",
+                linewidth=2,
+                linestyle="--",
+                label="Move",
+            )
+        if not np.isnan(t_feed):
+            ax_raster.axvline(
+                t_feed - t_offset,
+                color="red",
+                linewidth=2,
+                linestyle="--",
+                label="Feedback",
             )
 
-    ax_raster.set_xlim(t_start - t_offset, t_end - t_offset)
-    ax_raster.set_ylim(-1, len(df_sorted))
-    ax_raster.set_ylabel(
-        f"VISp Neurons (n={len(df_sorted)})\nSorted by Delay (NaN bottom)",
-        fontsize=12,
-    )
-    ax_raster.set_xlabel("Time from Stimulus Onset (s)", fontsize=12)
-    ax_raster.set_title(
-        f"Trial {trial_idx} | VISp Sequence (Good Units Only)", fontsize=14
-    )
+        ax_raster.legend(loc="upper left", frameon=False, ncol=3)
+        ax_raster.spines["top"].set_visible(False)
+        ax_raster.spines["right"].set_visible(False)
 
-    if n_nan > 0:
-        ax_raster.axhline(n_nan, color="red", linestyle="--", linewidth=1, alpha=0.7)
-        ax_raster.text(
-            (t_start - t_offset) + 0.05,
-            n_nan / 2,
-            "Unresponsive / Untuned",
-            color="gray",
-            fontsize=10,
-            va="center",
-            fontweight="bold",
-        )
-        ax_raster.text(
-            (t_start - t_offset) + 0.05,
-            n_nan + (n_responsive / 2),
-            "Sequenced Activity",
-            color="black",
-            fontsize=10,
-            va="center",
-            fontweight="bold",
-        )
-
-    ax_raster.axvline(0, color="blue", linewidth=2, label="Stim On")
-    if not np.isnan(t_move):
-        ax_raster.axvline(
-            t_move - t_offset, color="green", linewidth=2, linestyle="--", label="Move"
-        )
-    if not np.isnan(t_feed):
-        ax_raster.axvline(
-            t_feed - t_offset,
-            color="red",
-            linewidth=2,
-            linestyle="--",
-            label="Feedback",
-        )
-
-    ax_raster.legend(loc="upper left", frameon=False, ncol=3)
-    ax_raster.spines["top"].set_visible(False)
-    ax_raster.spines["right"].set_visible(False)
+    axes[-1].set_xlabel("Time from Stimulus Onset (s)", fontsize=12)
 
     plt.tight_layout()
 
     if save_flag:
-        save_path = path_fig / f"{pid}_trial_{trial_idx}_sequence.png"
+        if len(region_acronyms) == 1:
+            file_name = f"{pid}_trial_{trial_idx}_sequence.png"
+        else:
+            region_tag = "_".join(region_acronyms)
+            file_name = f"{pid}_trial_{trial_idx}_sequence_{region_tag}.png"
+        save_path = path_fig / file_name
         fig.savefig(save_path, dpi=300, bbox_inches="tight")
         print(f"Sequence raster saved to: {save_path}")
 
@@ -1130,9 +1194,29 @@ def plot_sequence_raster(
 
 
 def plot_population_sorted(
-    sl, spikes, clusters, cluster_acronyms, df_res, config_plot, save_flag, path_fig, pid
+    sl,
+    spikes,
+    clusters,
+    cluster_acronyms,
+    df_res,
+    config_plot,
+    save_flag,
+    path_fig,
+    pid,
+    region_acronyms=None,
 ):
-    """Plot a population heatmap sorted by delay with delay markers."""
+    """Plot population heatmaps sorted by delay with delay markers."""
+    if region_acronyms is None:
+        region_acronyms = ["VISp"]
+    elif isinstance(region_acronyms, str):
+        region_acronyms = [region_acronyms]
+    else:
+        region_acronyms = list(region_acronyms)
+
+    if len(region_acronyms) == 0:
+        print("No regions provided for plot_population_sorted.")
+        return
+
     window_pre = config_plot["POP_WINDOW_PRE"]
     window_post = config_plot["POP_WINDOW_POST"]
     bin_size = config_plot["POP_BIN_SIZE"]
@@ -1141,108 +1225,149 @@ def plot_population_sorted(
     normalize = config_plot["POP_NORMALIZE"]
 
     try:
-        visp_mask = np.char.startswith(cluster_acronyms.astype(str), "VISp")
         if hasattr(clusters, "metrics") and "label" in clusters.metrics.columns:
             quality_mask = clusters.metrics.label == 1
         elif hasattr(clusters, "label"):
             quality_mask = clusters.label == 1
         else:
             quality_mask = np.ones(len(clusters.acronym), dtype=bool)
-
-        if config_plot["PLOT_ONLY_GOOD_UNITS"]:
-            final_mask = visp_mask & quality_mask
-        else:
-            final_mask = visp_mask
-        visp_ids = np.where(final_mask)[0]
-        label_text = "Good Neurons" if config_plot["PLOT_ONLY_GOOD_UNITS"] else "Neurons"
-        print(f"Found {len(visp_ids)} {label_text} in VISp.")
     except AttributeError:
-        visp_ids = []
         print("Error: Cluster data incomplete.")
+        quality_mask = np.ones(len(cluster_acronyms), dtype=bool)
 
-    df_visp = pd.DataFrame({"cluster_id": visp_ids})
-
-    if df_res is not None:
-        df_visp = df_visp.merge(df_res[["cluster_id", "delay"]], on="cluster_id", how="left")
-    else:
-        print("Warning: df_res not found. Latencies will be NaN.")
-        df_visp["delay"] = np.nan
-
-    df_sorted = df_visp.sort_values(by="delay", ascending=True, na_position="first").reset_index(
-        drop=True
-    )
+    cluster_acronyms_str = cluster_acronyms.astype(str)
+    label_text = "Good Neurons" if config_plot["PLOT_ONLY_GOOD_UNITS"] else "Neurons"
+    stim_times = sl.trials["stimOn_times"][~np.isnan(sl.trials["stimOn_times"])]
 
     bins = np.arange(-window_pre, window_post + bin_size, bin_size)
     bin_centers = (bins[:-1] + bins[1:]) / 2
     n_bins = len(bin_centers)
-    n_neurons = len(df_sorted)
 
-    psth_matrix = np.zeros((n_neurons, n_bins))
-    stim_times = sl.trials["stimOn_times"][~np.isnan(sl.trials["stimOn_times"])]
+    fig, axes = plt.subplots(
+        len(region_acronyms), 1, figsize=(10, 6 * len(region_acronyms)), sharex=True
+    )
+    if len(region_acronyms) == 1:
+        axes = [axes]
 
-    for row_idx, row in df_sorted.iterrows():
-        cid = row["cluster_id"]
-        unit_spikes = spikes.times[spikes.clusters == cid]
-        if len(unit_spikes) == 0:
+    for ax, region in zip(axes, region_acronyms):
+        try:
+            region_mask = np.char.startswith(cluster_acronyms_str, region)
+            if config_plot["PLOT_ONLY_GOOD_UNITS"]:
+                final_mask = region_mask & quality_mask
+            else:
+                final_mask = region_mask
+            region_ids = np.where(final_mask)[0]
+            print(f"Found {len(region_ids)} {label_text} in {region}.")
+        except AttributeError:
+            region_ids = []
+            print(f"Error: Cluster data incomplete for {region}.")
+
+        df_region = pd.DataFrame({"cluster_id": region_ids})
+
+        if df_res is not None and len(df_region) > 0:
+            df_region = df_region.merge(
+                df_res[["cluster_id", "delay"]], on="cluster_id", how="left"
+            )
+        else:
+            if df_res is None:
+                print("Warning: df_res not found. Latencies will be NaN.")
+            df_region["delay"] = np.nan
+
+        df_sorted = df_region.sort_values(
+            by="delay", ascending=True, na_position="first"
+        ).reset_index(drop=True)
+
+        n_neurons = len(df_sorted)
+        if n_neurons == 0:
+            ax.text(
+                0.5,
+                0.5,
+                f"No units found for {region}",
+                transform=ax.transAxes,
+                ha="center",
+                va="center",
+            )
+            ax.set_xlim(-window_pre, window_post)
+            ax.set_ylim(0, 1)
+            ax.set_ylabel("Neurons (Sorted by Latency)\nTotal: 0", fontsize=12)
+            title_str = "Normalized " if normalize else "Raw "
+            ax.set_title(
+                f"{title_str}Average Response (PSTH) Heatmap | {region} Units", fontsize=14
+            )
             continue
 
-        all_rel_spikes = []
-        t_min = stim_times.min() - window_pre
-        t_max = stim_times.max() + window_post
-        subset = unit_spikes[(unit_spikes >= t_min) & (unit_spikes <= t_max)]
+        psth_matrix = np.zeros((n_neurons, n_bins))
 
-        for t_stim in stim_times:
-            t0 = t_stim - window_pre
-            t1 = t_stim + window_post
-            in_window = subset[(subset >= t0) & (subset <= t1)]
-            all_rel_spikes.append(in_window - t_stim)
+        for row_idx, row in df_sorted.iterrows():
+            cid = row["cluster_id"]
+            unit_spikes = spikes.times[spikes.clusters == cid]
+            if len(unit_spikes) == 0:
+                continue
 
-        if len(all_rel_spikes) > 0:
-            flat_spikes = np.concatenate(all_rel_spikes)
-            counts, _ = np.histogram(flat_spikes, bins=bins)
-            fr = counts / len(stim_times) / bin_size
-            fr_smooth = gaussian_filter1d(fr, sigma=smooth_sigma)
-            if normalize:
-                peak = np.max(fr_smooth)
-                if peak > 0:
-                    fr_smooth = fr_smooth / peak
-            psth_matrix[row_idx, :] = fr_smooth
+            all_rel_spikes = []
+            t_min = stim_times.min() - window_pre
+            t_max = stim_times.max() + window_post
+            subset = unit_spikes[(unit_spikes >= t_min) & (unit_spikes <= t_max)]
 
-    fig, ax = plt.subplots(figsize=(10, 10))
-    im = ax.imshow(
-        psth_matrix,
-        aspect="auto",
-        origin="lower",
-        extent=[-window_pre, window_post, 0, n_neurons],
-        cmap=cmap_name,
-        interpolation="nearest",
-    )
+            for t_stim in stim_times:
+                t0 = t_stim - window_pre
+                t1 = t_stim + window_post
+                in_window = subset[(subset >= t0) & (subset <= t1)]
+                all_rel_spikes.append(in_window - t_stim)
 
-    valid_delays = df_sorted.dropna(subset=["delay"])
-    y_positions = valid_delays.index + 0.5
-    x_positions = valid_delays["delay"]
-    ax.scatter(x_positions, y_positions, color="black", s=10, marker="o", label="Delay")
+            if len(all_rel_spikes) > 0:
+                flat_spikes = np.concatenate(all_rel_spikes)
+                counts, _ = np.histogram(flat_spikes, bins=bins)
+                fr = counts / len(stim_times) / bin_size
+                fr_smooth = gaussian_filter1d(fr, sigma=smooth_sigma)
+                if normalize:
+                    peak = np.max(fr_smooth)
+                    if peak > 0:
+                        fr_smooth = fr_smooth / peak
+                psth_matrix[row_idx, :] = fr_smooth
 
-    ax.axvline(0, color="black", linestyle="--", linewidth=1, label="Stim On")
-    ax.set_xlabel("Time from Stimulus Onset (s)", fontsize=12)
-    ax.set_ylabel(f"Neurons (Sorted by Latency)\nTotal: {n_neurons}", fontsize=12)
-    title_str = "Normalized " if normalize else "Raw "
-    ax.set_title(f"{title_str}Average Response (PSTH) Heatmap | VISp Units", fontsize=14)
+        im = ax.imshow(
+            psth_matrix,
+            aspect="auto",
+            origin="lower",
+            extent=[-window_pre, window_post, 0, n_neurons],
+            cmap=cmap_name,
+            interpolation="nearest",
+        )
 
-    cbar = plt.colorbar(im, ax=ax)
-    cbar.set_label(
-        "Normalized Firing Rate" if normalize else "Firing Rate (Hz)",
-        rotation=270,
-        labelpad=15,
-    )
+        valid_delays = df_sorted.dropna(subset=["delay"])
+        y_positions = valid_delays.index + 0.5
+        x_positions = valid_delays["delay"]
+        ax.scatter(x_positions, y_positions, color="black", s=10, marker="o", label="Delay")
 
-    ax.set_xlim(-window_pre, window_post)
-    ax.set_ylim(0, n_neurons)
+        ax.axvline(0, color="black", linestyle="--", linewidth=1, label="Stim On")
+        ax.set_ylabel(f"Neurons (Sorted by Latency)\nTotal: {n_neurons}", fontsize=12)
+        title_str = "Normalized " if normalize else "Raw "
+        ax.set_title(
+            f"{title_str}Average Response (PSTH) Heatmap | {region} Units", fontsize=14
+        )
+
+        cbar = plt.colorbar(im, ax=ax)
+        cbar.set_label(
+            "Normalized Firing Rate" if normalize else "Firing Rate (Hz)",
+            rotation=270,
+            labelpad=15,
+        )
+
+        ax.set_xlim(-window_pre, window_post)
+        ax.set_ylim(0, n_neurons)
+
+    axes[-1].set_xlabel("Time from Stimulus Onset (s)", fontsize=12)
 
     plt.tight_layout()
 
     if save_flag:
-        save_path = path_fig / f"{pid}_population_sorted.png"
+        if len(region_acronyms) == 1:
+            file_name = f"{pid}_population_sorted.png"
+        else:
+            region_tag = "_".join(region_acronyms)
+            file_name = f"{pid}_population_sorted_{region_tag}.png"
+        save_path = path_fig / file_name
         fig.savefig(save_path, dpi=300, bbox_inches="tight")
         print(f"Population heatmap saved to: {save_path}")
 
