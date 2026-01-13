@@ -996,7 +996,7 @@ def plot_sequence_raster(
 ):
     """Plot region rasters sorted by delay for a single trial."""
     if region_acronyms is None:
-        region_acronyms = ["VISp"]
+        region_acronyms = config_plot.get("PLOT_REGIONS", ["VISp"])
     elif isinstance(region_acronyms, str):
         region_acronyms = [region_acronyms]
     else:
@@ -1207,7 +1207,7 @@ def plot_population_sorted(
 ):
     """Plot population heatmaps sorted by delay with delay markers."""
     if region_acronyms is None:
-        region_acronyms = ["VISp"]
+        region_acronyms = config_plot.get("PLOT_REGIONS", ["VISp"])
     elif isinstance(region_acronyms, str):
         region_acronyms = [region_acronyms]
     else:
@@ -1408,6 +1408,8 @@ CONFIG_PLOT = {
     "ATLAS_MAPPING": "Beryl",
     # Plot only good units (label == 1) or all units
     "PLOT_ONLY_GOOD_UNITS": False,
+    # Regions to plot when region_acronyms is not provided
+    "PLOT_REGIONS": ["VISp"],
     # Raster plot window around trial events (seconds)
     "RASTER_WINDOW_PRE": 1,
     "RASTER_WINDOW_POST": 2,
@@ -1495,6 +1497,7 @@ df_reliability = calculate_delay_reliability(
 
 trial_idx = 210
 single_neuron_id = 656
+regions_to_plot = CONFIG_PLOT["PLOT_REGIONS"]
 
 # %% Plot Single Trial Raster
 
@@ -1548,6 +1551,7 @@ plot_sequence_raster(
     path_fig=path_fig,
     pid=pid,
     trial_idx=trial_idx,
+    region_acronyms=regions_to_plot,
 )
 
 
@@ -1561,4 +1565,5 @@ plot_population_sorted(
     save_flag=True,
     path_fig=path_fig,
     pid=pid,
+    region_acronyms=regions_to_plot,
 )
