@@ -1250,7 +1250,7 @@ def plot_population_sorted(
 
 # %% Parameters
 
-    CONFIG_CALC = {
+CONFIG_CALC = {
     # Which atlas to use when assigning brain regions ("Beryl" or "Allen")
     "ATLAS_MAPPING": "Beryl",
     # Run calculations only on good units (label == 1) or on all units
