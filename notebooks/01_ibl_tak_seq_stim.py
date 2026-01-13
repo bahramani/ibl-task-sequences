@@ -23,7 +23,7 @@ from scipy import stats
 from scipy.ndimage import gaussian_filter1d
 from scipy.signal import butter, filtfilt
 
-# %% Functions
+# %% Init Functions
 
 def setup_paths(base_path):
     """Create the main project folders and return their paths."""
@@ -223,6 +223,7 @@ def calculate_delay(
     delay = np.sum(resp_fr * resp_time) / sum_fr
     return delay, True
 
+# %% Main Calculation Functions
 
 def calculate_delays(
     spikes,
@@ -405,6 +406,7 @@ def calculate_delay_reliability(
     )
     return df_reliability
 
+# %% Main Plotting Functions
 
 def plot_trial_raster(
     spikes,
@@ -1369,7 +1371,7 @@ df_reliability = calculate_delay_reliability(
 trial_idx = 210
 single_neuron_id = 656
 
-# %% Plots
+# %% Plot Single Trial Raster
 
 plot_trial_raster(
     spikes,
@@ -1384,6 +1386,8 @@ plot_trial_raster(
     save_figure=True,
     trial_idx=trial_idx,
 )
+
+# %% Plot delay histogram and reliability
 
 plot_delay_histogram(
     df_res, CONFIG_CALC, CONFIG_PLOT, save_flag=True, path_fig=path_fig, pid=pid
@@ -1405,6 +1409,8 @@ plot_single_neuron(
     pid=pid,
     cluster_id=single_neuron_id,
 )
+
+# %% Sequence Plots
 
 plot_sequence_raster(
     sl,
