@@ -1,6 +1,7 @@
 # Data (usually don't commit raw data)
 data/raw/
 data/processed/
+results/
 
 # Results (optional: keep if you want)
 # results/
