@@ -1379,9 +1379,9 @@ CONFIG_CALC = {
     # Which atlas to use when assigning brain regions ("Beryl" or "Allen")
     "ATLAS_MAPPING": "Beryl",
     # Run calculations only on good units (label == 1) or on all units
-    "CALC_ONLY_GOOD_UNITS": False,
+    "CALC_ONLY_GOOD_UNITS": True,
     # Delay calculation method: "center_of_mass", "psth_peak", or "tfs"
-    "DELAY_METHOD": "psth_peak",
+    "DELAY_METHOD": "center_of_mass",
     # Values treated as 100% contrast for the TFS method
     "FULL_CONTRAST_VALUES": (1.0, 100.0),
     # PSTH bin width (seconds)
@@ -1407,9 +1407,9 @@ CONFIG_PLOT = {
     # Which atlas to use for plots ("Beryl" or "Allen")
     "ATLAS_MAPPING": "Beryl",
     # Plot only good units (label == 1) or all units
-    "PLOT_ONLY_GOOD_UNITS": False,
+    "PLOT_ONLY_GOOD_UNITS": True,
     # Regions to plot when region_acronyms is not provided
-    "PLOT_REGIONS": ["VISp"],
+    "PLOT_REGIONS": ["VISp", 'ENTm'],
     # Raster plot window around trial events (seconds)
     "RASTER_WINDOW_PRE": 1,
     "RASTER_WINDOW_POST": 2,
@@ -1424,11 +1424,11 @@ CONFIG_PLOT = {
     "SEQUENCE_WINDOW_POST": 1.0,
     "SEQUENCE_ALIGN_TO_STIM": True,
     # Population heatmap window and style
-    "POP_WINDOW_PRE": 1,
-    "POP_WINDOW_POST": 1,
+    "POP_WINDOW_PRE": 0.5,
+    "POP_WINDOW_POST": 0.5,
     "POP_BIN_SIZE": 0.005,
     "POP_SMOOTH_SIGMA": 2,
-    # Heatmap colormap (examples: "Greys", "viridis", "plasma", "magma", "cividis")
+    # Heatmap colormap (examples: "Greys", "viridis", "RdGy", "magma", "cividis")
     "POP_CMAP_NAME": "bwr",
     "POP_NORMALIZE": True,
 }
@@ -1497,7 +1497,6 @@ df_reliability = calculate_delay_reliability(
 
 trial_idx = 210
 single_neuron_id = 656
-regions_to_plot = CONFIG_PLOT["PLOT_REGIONS"]
 
 # %% Plot Single Trial Raster
 
@@ -1540,19 +1539,26 @@ plot_single_neuron(
 
 # %% Sequence Plots
 
-plot_sequence_raster(
-    sl,
-    spikes,
-    clusters,
-    cluster_acronyms_plot,
-    df_res,
-    CONFIG_PLOT,
-    save_flag=True,
-    path_fig=path_fig,
-    pid=pid,
-    trial_idx=trial_idx,
-    region_acronyms=regions_to_plot,
-)
+CONFIG_PLOT.update(
+    {
+        "PLOT_REGIONS": ["VISp", 'ENTm'],
+    })
+
+regions_to_plot = CONFIG_PLOT["PLOT_REGIONS"]
+
+# plot_sequence_raster(
+#     sl,
+#     spikes,
+#     clusters,
+#     cluster_acronyms_plot,
+#     df_res,
+#     CONFIG_PLOT,
+#     save_flag=True,
+#     path_fig=path_fig,
+#     pid=pid,
+#     trial_idx=trial_idx,
+#     region_acronyms=regions_to_plot,
+# )
 
 
 plot_population_sorted(
