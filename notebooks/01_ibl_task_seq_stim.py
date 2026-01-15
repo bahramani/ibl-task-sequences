@@ -1643,7 +1643,8 @@ hier_df = pd.read_csv(hier_file)
 area_to_hier_score = dict(zip(hier_df["areas"], hier_df["CC+TC+CT iterated"]))
 hier_scores = np.array([area_to_hier_score.get(region, np.nan) for region in beryl_acronyms])
 
-# Great for CP and MOp: '26118c10-35dd-4ab1-9f0f-b9a89a1da070'
+# Great for CP and MOp: 
+# pid = '26118c10-35dd-4ab1-9f0f-b9a89a1da070'
 
 pid = '3d3d5a5e-df26-43ee-80b6-2d72d85668a5' # "c9664185-d3fd-4e0e-89cf-77c402038938"
 print(f"\nProcessing PID: {pid}")
@@ -1786,3 +1787,4 @@ plot_population_PSTH_sorted(
     pid=pid,
     region_acronyms=regions_to_plot,
 )
+
