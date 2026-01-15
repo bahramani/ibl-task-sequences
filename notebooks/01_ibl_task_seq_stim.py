@@ -23,7 +23,7 @@ from scipy import stats
 from scipy.ndimage import gaussian_filter1d
 from scipy.signal import butter, filtfilt
 
-# %% Init Functions
+# %% Init Functions #################################################################
 
 def setup_paths(base_path):
     """Create the main project folders and return their paths."""
@@ -1135,15 +1135,7 @@ def plot_sequence_raster(
                     va="center",
                     fontweight="bold",
                 )
-                ax_raster.text(
-                    (t_start - t_offset) + 0.05,
-                    n_nan + (n_responsive / 2),
-                    "Sequenced Activity",
-                    color="black",
-                    fontsize=10,
-                    va="center",
-                    fontweight="bold",
-                )
+
 
         ax_raster.set_ylabel(
             f"{region} {label_text} (n={len(df_sorted)})\nSorted by Delay (NaN bottom)",
@@ -1373,6 +1365,203 @@ def plot_population_sorted(
 
     plt.show()
 
+
+def plot_population_PSTH_sorted(
+    sl,
+    spikes,
+    clusters,
+    cluster_acronyms,
+    df_res,
+    config_plot,
+    save_flag,
+    path_fig,
+    pid,
+    region_acronyms=None,
+):
+    """Plot stacked PSTHs sorted by delay for each neuron."""
+    if region_acronyms is None:
+        region_acronyms = config_plot.get("PLOT_REGIONS", ["VISp"])
+    elif isinstance(region_acronyms, str):
+        region_acronyms = [region_acronyms]
+    else:
+        region_acronyms = list(region_acronyms)
+
+    if len(region_acronyms) == 0:
+        print("No regions provided for plot_population_PSTH_sorted.")
+        return
+
+    window_pre = config_plot["POP_WINDOW_PRE"]
+    window_post = config_plot["POP_WINDOW_POST"]
+    bin_size = config_plot["POP_BIN_SIZE"]
+    smooth_sigma = config_plot["POP_SMOOTH_SIGMA"]
+    normalize = config_plot["POP_NORMALIZE"]
+
+    try:
+        if hasattr(clusters, "metrics") and "label" in clusters.metrics.columns:
+            quality_mask = clusters.metrics.label == 1
+        elif hasattr(clusters, "label"):
+            quality_mask = clusters.label == 1
+        else:
+            quality_mask = np.ones(len(clusters.acronym), dtype=bool)
+    except AttributeError:
+        print("Error: Cluster data incomplete.")
+        quality_mask = np.ones(len(cluster_acronyms), dtype=bool)
+
+    cluster_acronyms_str = cluster_acronyms.astype(str)
+    label_text = "Good Neurons" if config_plot["PLOT_ONLY_GOOD_UNITS"] else "Neurons"
+    stim_times = sl.trials["stimOn_times"][~np.isnan(sl.trials["stimOn_times"])]
+
+    bins = np.arange(-window_pre, window_post + bin_size, bin_size)
+    bin_centers = (bins[:-1] + bins[1:]) / 2
+
+    fig, axes = plt.subplots(
+        len(region_acronyms), 1, figsize=(10, 6 * len(region_acronyms)), sharex=True
+    )
+    if len(region_acronyms) == 1:
+        axes = [axes]
+
+    for ax, region in zip(axes, region_acronyms):
+        try:
+            region_mask = np.char.startswith(cluster_acronyms_str, region)
+            if config_plot["PLOT_ONLY_GOOD_UNITS"]:
+                final_mask = region_mask & quality_mask
+            else:
+                final_mask = region_mask
+            region_ids = np.where(final_mask)[0]
+            print(f"Found {len(region_ids)} {label_text} in {region}.")
+        except AttributeError:
+            region_ids = []
+            print(f"Error: Cluster data incomplete for {region}.")
+
+        df_region = pd.DataFrame({"cluster_id": region_ids})
+
+        if df_res is not None and len(df_region) > 0:
+            df_region = df_region.merge(
+                df_res[["cluster_id", "delay"]], on="cluster_id", how="left"
+            )
+        else:
+            if df_res is None:
+                print("Warning: df_res not found. Latencies will be NaN.")
+            df_region["delay"] = np.nan
+
+        df_sorted = df_region.sort_values(
+            by="delay", ascending=True, na_position="first"
+        ).reset_index(drop=True)
+
+        n_neurons = len(df_sorted)
+        if n_neurons == 0:
+            ax.text(
+                0.5,
+                0.5,
+                f"No units found for {region}",
+                transform=ax.transAxes,
+                ha="center",
+                va="center",
+            )
+            ax.set_xlim(-window_pre, window_post)
+            ax.set_ylim(0, 1)
+            ax.set_ylabel("Neurons (Sorted by Latency)\nTotal: 0", fontsize=12)
+            title_str = "Normalized " if normalize else "Raw "
+            ax.set_title(
+                f"{title_str}Average PSTHs | {region} Units", fontsize=14
+            )
+            continue
+
+        psth_list = []
+        t_min = stim_times.min() - window_pre
+        t_max = stim_times.max() + window_post
+
+        for _, row in df_sorted.iterrows():
+            cid = row["cluster_id"]
+            unit_spikes = spikes.times[spikes.clusters == cid]
+            if len(unit_spikes) == 0:
+                psth_list.append(None)
+                continue
+
+            all_rel_spikes = []
+            subset = unit_spikes[(unit_spikes >= t_min) & (unit_spikes <= t_max)]
+
+            for t_stim in stim_times:
+                t0 = t_stim - window_pre
+                t1 = t_stim + window_post
+                in_window = subset[(subset >= t0) & (subset <= t1)]
+                all_rel_spikes.append(in_window - t_stim)
+
+            if len(all_rel_spikes) == 0:
+                psth_list.append(None)
+                continue
+
+            flat_spikes = np.concatenate(all_rel_spikes)
+            counts, _ = np.histogram(flat_spikes, bins=bins)
+            fr = counts / len(stim_times) / bin_size
+            fr_smooth = gaussian_filter1d(fr, sigma=smooth_sigma)
+            if normalize:
+                peak = np.max(fr_smooth)
+                if peak > 0:
+                    fr_smooth = fr_smooth / peak
+            psth_list.append(fr_smooth)
+
+        valid_psths = [p for p in psth_list if p is not None and len(p) > 0]
+        if len(valid_psths) == 0:
+            ax.text(
+                0.5,
+                0.5,
+                f"No PSTHs available for {region}",
+                transform=ax.transAxes,
+                ha="center",
+                va="center",
+            )
+            ax.set_xlim(-window_pre, window_post)
+            ax.set_ylim(0, 1)
+            ax.set_ylabel("Neurons (Sorted by Latency)\nTotal: 0", fontsize=12)
+            title_str = "Normalized " if normalize else "Raw "
+            ax.set_title(
+                f"{title_str}Average PSTHs | {region} Units", fontsize=14
+            )
+            continue
+
+        if normalize:
+            scale = 0.9
+        else:
+            global_peak = max(np.max(psth) for psth in valid_psths)
+            scale = 0.9 / global_peak if global_peak > 0 else 1.0
+
+        for row_idx, psth in enumerate(psth_list):
+            if psth is None:
+                continue
+            y_vals = psth * scale + row_idx
+            ax.plot(bin_centers, y_vals, color="black", linewidth=0.8, alpha=0.6)
+
+        valid_delays = df_sorted.dropna(subset=["delay"])
+        y_positions = valid_delays.index + 0.5
+        x_positions = valid_delays["delay"]
+        ax.scatter(x_positions, y_positions, color="black", s=10, marker="o", label="Delay")
+
+        ax.axvline(0, color="black", linestyle="--", linewidth=1, label="Stim On")
+        ax.set_ylabel(f"Neurons (Sorted by Latency)\nTotal: {n_neurons}", fontsize=12)
+        title_str = "Normalized " if normalize else "Raw "
+        ax.set_title(
+            f"{title_str}Average PSTHs | {region} Units", fontsize=14
+        )
+        ax.set_xlim(-window_pre, window_post)
+        ax.set_ylim(0, n_neurons)
+
+    axes[-1].set_xlabel("Time from Stimulus Onset (s)", fontsize=12)
+
+    plt.tight_layout()
+
+    if save_flag:
+        if len(region_acronyms) == 1:
+            file_name = f"{pid}_population_psth_sorted.png"
+        else:
+            region_tag = "_".join(region_acronyms)
+            file_name = f"{pid}_population_psth_sorted_{region_tag}.png"
+        save_path = path_fig / file_name
+        fig.savefig(save_path, dpi=300, bbox_inches="tight")
+        print(f"Population PSTH plot saved to: {save_path}")
+
+    plt.show()
+
 # %% Parameters
 
 CONFIG_CALC = {
@@ -1454,7 +1643,7 @@ hier_df = pd.read_csv(hier_file)
 area_to_hier_score = dict(zip(hier_df["areas"], hier_df["CC+TC+CT iterated"]))
 hier_scores = np.array([area_to_hier_score.get(region, np.nan) for region in beryl_acronyms])
 
-pid = "c9664185-d3fd-4e0e-89cf-77c402038938"
+pid = '3d3d5a5e-df26-43ee-80b6-2d72d85668a5' # "c9664185-d3fd-4e0e-89cf-77c402038938"
 print(f"\nProcessing PID: {pid}")
 
 ssl, spikes, clusters, sl = load_session_data(pid, one, ba)
@@ -1495,6 +1684,8 @@ df_reliability = calculate_delay_reliability(
     pid,
 )
 
+# %% Select Trial and Unit to Plot
+
 trial_idx = 210
 single_neuron_id = 656
 
@@ -1524,6 +1715,10 @@ plot_delay_reliability(
     df_reliability, CONFIG_CALC, CONFIG_PLOT, save_flag=True, path_fig=path_fig, pid=pid
 )
 
+# %% Single Neuron Plots
+
+single_neuron_id = 725
+
 plot_single_neuron(
     sl,
     spikes,
@@ -1539,26 +1734,29 @@ plot_single_neuron(
 
 # %% Sequence Plots
 
+trial_idx = 843
+
 CONFIG_PLOT.update(
     {
         "PLOT_REGIONS": ["VISp", 'ENTm'],
+        'PLOT_ONLY_GOOD_UNITS': True,
     })
 
 regions_to_plot = CONFIG_PLOT["PLOT_REGIONS"]
 
-# plot_sequence_raster(
-#     sl,
-#     spikes,
-#     clusters,
-#     cluster_acronyms_plot,
-#     df_res,
-#     CONFIG_PLOT,
-#     save_flag=True,
-#     path_fig=path_fig,
-#     pid=pid,
-#     trial_idx=trial_idx,
-#     region_acronyms=regions_to_plot,
-# )
+plot_sequence_raster(
+    sl,
+    spikes,
+    clusters,
+    cluster_acronyms_plot,
+    df_res,
+    CONFIG_PLOT,
+    save_flag=True,
+    path_fig=path_fig,
+    pid=pid,
+    trial_idx=trial_idx,
+    region_acronyms=regions_to_plot,
+)
 
 
 plot_population_sorted(
