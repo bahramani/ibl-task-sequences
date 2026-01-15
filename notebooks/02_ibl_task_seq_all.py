@@ -22,6 +22,11 @@ from one.api import ONE
 from scipy import stats
 from scipy.ndimage import gaussian_filter1d
 from scipy.signal import butter, filtfilt
+try:
+    from tqdm.auto import tqdm
+except ImportError:  # Graceful fallback if tqdm is unavailable.
+    def tqdm(iterable, **kwargs):
+        return iterable
 
 # %% Init Functions #################################################################
 
@@ -99,47 +104,151 @@ def load_pupil_data(sl):
         print(f"Could not load pupil data: {exc}")
     return None, None
 
-def get_psth_data(neuron_spikes, event_times, config):
-    """Compute a smoothed PSTH for a neuron given event times."""
-    # Guard against missing inputs early to keep downstream logic simple.
-    if len(neuron_spikes) == 0 or len(event_times) == 0:
-        return None, None
+def build_cluster_id_map(clusters):
+    """Return (cluster_ids, cid_to_idx) for safe cluster-id indexing."""
+    if hasattr(clusters, "cluster_id"):
+        cluster_ids = np.asarray(clusters.cluster_id)
+    elif "cluster_id" in clusters:
+        cluster_ids = np.asarray(clusters["cluster_id"])
+    else:
+        cluster_ids = np.arange(len(clusters.acronym))
+    cid_to_idx = {int(cid): idx for idx, cid in enumerate(cluster_ids)}
+    return cluster_ids, cid_to_idx
 
-    # Define the PSTH bins around stimulus onset.
-    bins = np.arange(
-        config["PSTH_WINDOW_START"],
-        config["PSTH_WINDOW_END"] + config["BIN_SIZE"],
-        config["BIN_SIZE"],
-    )
+
+def get_cluster_label(clusters, idx):
+    """Fetch a unit quality label using a safe cluster index."""
+    if hasattr(clusters, "metrics") and "label" in clusters.metrics.columns:
+        return clusters.metrics.label[idx]
+    if hasattr(clusters, "label"):
+        return clusters.label[idx]
+    return 1
+
+
+def get_trial_contrasts(sl):
+    """Return per-trial contrasts (abs max of left/right), NaNs -> 0."""
+    contrast_left = np.abs(sl.trials.contrastLeft)
+    contrast_right = np.abs(sl.trials.contrastRight)
+    trial_contrasts = np.nanmax(np.vstack([contrast_left, contrast_right]), axis=0)
+    return np.where(np.isnan(trial_contrasts), 0, trial_contrasts)
+
+
+def build_event_dicts(sl, event_names, min_trials):
+    """Build per-event arrays of valid event times and aligned contrasts."""
+    events_by_name = {}
+    contrasts_by_name = {}
+    trial_contrasts = get_trial_contrasts(sl)
+    for event_name in event_names:
+        if event_name not in sl.trials.keys():
+            print(f"Warning: Event '{event_name}' not found in trials.")
+            events_by_name[event_name] = np.array([])
+            contrasts_by_name[event_name] = np.array([])
+            continue
+        events_all = np.asarray(sl.trials[event_name])
+        valid_mask = ~np.isnan(events_all)
+        events = events_all[valid_mask]
+        contrasts = trial_contrasts[valid_mask]
+        if len(events) < min_trials:
+            print(
+                f"Warning: {event_name} has only {len(events)} trials "
+                f"(min {min_trials})."
+            )
+        events_by_name[event_name] = events
+        contrasts_by_name[event_name] = contrasts
+    return events_by_name, contrasts_by_name
+
+
+def get_event_time(sl, event_name, trial_idx):
+    """Return a single-trial event time (NaN if missing)."""
+    if event_name not in sl.trials.keys():
+        return np.nan
+    events = np.asarray(sl.trials[event_name])
+    if trial_idx < 0 or trial_idx >= len(events):
+        return np.nan
+    return events[trial_idx]
+
+
+def event_label(event_name):
+    """Human-readable labels for event names."""
+    label_map = {
+        "stimOn_times": "Stim On",
+        "firstMovement_times": "First Move",
+        "response_times": "Response",
+        "feedback_times": "Feedback",
+    }
+    return label_map.get(event_name, event_name)
+
+
+def delay_column_name(event_name):
+    return f"delay_{event_name}"
+
+
+def responsive_column_name(event_name):
+    return f"responsive_{event_name}"
+
+
+def reliability_column_names(event_name):
+    return f"delay_h1_{event_name}", f"delay_h2_{event_name}"
+
+
+def compute_psth_for_clusters(
+    spikes,
+    cluster_ids,
+    event_times,
+    window_start,
+    window_end,
+    bin_size,
+    smooth_sigma,
+    show_progress=False,
+    desc="PSTH",
+):
+    """Compute raw/smoothed PSTHs for multiple clusters and event times."""
+    if event_times is None or len(event_times) == 0 or len(cluster_ids) == 0:
+        return {}, None
+
+    bins = np.arange(window_start, window_end + bin_size, bin_size)
     bin_centers = (bins[:-1] + bins[1:]) / 2
 
-    # Limit spikes to the global min/max window across all trials for efficiency.
-    s_min = event_times.min() + config["PSTH_WINDOW_START"]
-    s_max = event_times.max() + config["PSTH_WINDOW_END"]
-    subset_spikes = neuron_spikes[(neuron_spikes >= s_min) & (neuron_spikes <= s_max)]
-    if len(subset_spikes) == 0:
-        return None, None
+    s_min = event_times.min() + window_start
+    s_max = event_times.max() + window_end
+    mask = (spikes.times >= s_min) & (spikes.times <= s_max)
+    times_window = spikes.times[mask]
+    clusters_window = spikes.clusters[mask]
 
-    # Collect trial-aligned spikes so we can compute the pooled PSTH.
-    relative_spikes = []
-    for t_ev in event_times:
-        t0 = t_ev + config["PSTH_WINDOW_START"]
-        t1 = t_ev + config["PSTH_WINDOW_END"]
-        in_trial = subset_spikes[(subset_spikes >= t0) & (subset_spikes <= t1)]
-        relative_spikes.append(in_trial - t_ev)
+    psth_by_cluster = {}
+    iterator = tqdm(cluster_ids, desc=desc, unit="cluster") if show_progress else cluster_ids
+    for cid in iterator:
+        neuron_spikes = times_window[clusters_window == cid]
+        if len(neuron_spikes) == 0:
+            continue
 
-    if len(relative_spikes) == 0:
-        return None, None
+        relative_spikes = []
+        for t_ev in event_times:
+            t0 = t_ev + window_start
+            t1 = t_ev + window_end
+            in_trial = neuron_spikes[(neuron_spikes >= t0) & (neuron_spikes <= t1)]
+            if len(in_trial) > 0:
+                relative_spikes.append(in_trial - t_ev)
 
-    # Histogram and smooth to obtain the PSTH.
-    all_rel_spikes = np.concatenate(relative_spikes)
-    counts, _ = np.histogram(all_rel_spikes, bins=bins)
-    fr = counts / len(event_times) / config["BIN_SIZE"]
-    fr_smooth = gaussian_filter1d(fr, sigma=config["SMOOTH_SIGMA"])
-    return fr_smooth, bin_centers
+        if len(relative_spikes) == 0:
+            fr_raw = np.zeros(len(bin_centers))
+        else:
+            all_rel_spikes = np.concatenate(relative_spikes)
+            counts, _ = np.histogram(all_rel_spikes, bins=bins)
+            fr_raw = counts / len(event_times) / bin_size
+
+        if smooth_sigma and smooth_sigma > 0:
+            fr_smooth = gaussian_filter1d(fr_raw, sigma=smooth_sigma)
+        else:
+            fr_smooth = fr_raw.copy()
+
+        psth_by_cluster[cid] = {"fr_raw": fr_raw, "fr_smooth": fr_smooth}
+
+    return psth_by_cluster, bin_centers
 
 
 def calculate_delay(
+    fr_raw,
     fr_smooth,
     bin_centers,
     config,
@@ -154,7 +263,7 @@ def calculate_delay(
     Supported methods:
     - "center_of_mass": PSTH center of mass within the responsive window.
     - "psth_peak": peak time of the PSTH within the responsive window.
-    - "tfs": time to first spike after stimulus onset (100% contrast trials only).
+    - "tfs": time to first spike after event onset (100% contrast trials only).
     """
     # Default to the configured delay method if none is provided explicitly.
     method = method or config.get("DELAY_METHOD", "center_of_mass")
@@ -191,12 +300,12 @@ def calculate_delay(
         return float(np.mean(first_spike_offsets)), True
 
     # From here on we rely on the PSTH representation.
-    if fr_smooth is None or bin_centers is None:
+    if fr_raw is None or bin_centers is None:
         return np.nan, False
 
-    # Compute a baseline threshold to define responsiveness.
+    # Compute a baseline threshold from the unsmoothed PSTH to avoid smoothing bias.
     idx_baseline = (bin_centers >= -config["BASELINE_PRE"]) & (bin_centers < 0)
-    baseline_fr = fr_smooth[idx_baseline]
+    baseline_fr = fr_raw[idx_baseline]
     if len(baseline_fr) == 0:
         return np.nan, False
 
@@ -205,11 +314,11 @@ def calculate_delay(
         bin_centers <= config["RESPONSIVE_WINDOW_END"]
     )
 
-    responsive_mask = idx_responsive & (fr_smooth > threshold)
+    responsive_mask = idx_responsive & (fr_raw > threshold)
     if not np.any(responsive_mask):
         return np.nan, False
 
-    resp_fr = fr_smooth[responsive_mask]
+    resp_fr = fr_smooth[responsive_mask] if fr_smooth is not None else fr_raw[responsive_mask]
     resp_time = bin_centers[responsive_mask]
     if method == "psth_peak":
         # Peak time is the bin center at maximum firing rate within the window.
@@ -229,72 +338,98 @@ def calculate_delays(
     spikes,
     clusters,
     cluster_acronyms,
-    events,
-    trial_contrasts,
+    events_by_name,
+    contrasts_by_name,
     config,
     path_data_processed,
     pid,
+    cid_to_idx,
 ):
-    """Compute delays for all clusters and save results to processed data."""
-    n_trials = len(events)
-    print(f"Processing {n_trials} trials...")
-    if n_trials < config["MIN_TRIALS"]:
-        print("Not enough trials for delay calculation.")
+    """Compute delays for all clusters across multiple events."""
+    event_names = config.get("EVENT_NAMES", list(events_by_name.keys()))
+    if len(event_names) == 0:
+        print("No events provided for delay calculation.")
         return pd.DataFrame()
 
-    # Loop over each unit, compute its PSTH, and extract a delay metric.
     cluster_ids = np.unique(spikes.clusters)
+    cluster_ids = [cid for cid in cluster_ids if cid in cid_to_idx]
     print(f"Found {len(cluster_ids)} clusters.")
 
     results = []
+    selected_cluster_ids = []
     for cid in cluster_ids:
-        neuron_spikes = spikes.times[spikes.clusters == cid]
-        if len(neuron_spikes) == 0:
+        idx = cid_to_idx.get(cid)
+        if idx is None:
             continue
-
-        # PSTH-based delay methods use the smoothed firing rate.
-        fr_smooth, bin_centers = get_psth_data(neuron_spikes, events, config)
-        delay, is_responsive = calculate_delay(
-            fr_smooth,
-            bin_centers,
-            config,
-            method=config.get("DELAY_METHOD"),
-            neuron_spikes=neuron_spikes,
-            event_times=events,
-            trial_contrasts=trial_contrasts,
-        )
-
-        # Map the cluster to its region acronym for downstream grouping.
-        try:
-            acronym = cluster_acronyms[cid]
-        except Exception:
-            acronym = "Unknown"
-
-        # Determine if the unit is "good" based on available labels.
-        try:
-            if hasattr(clusters, "metrics") and "label" in clusters.metrics.columns:
-                label = clusters.metrics.label[cid]
-            elif hasattr(clusters, "label"):
-                label = clusters.label[cid]
-            else:
-                label = 1
-        except Exception:
-            label = 1
-
+        label = get_cluster_label(clusters, idx)
         if config["CALC_ONLY_GOOD_UNITS"] and label != 1:
             continue
-
         results.append(
             {
                 "cluster_id": cid,
-                "acronym": acronym,
+                "acronym": cluster_acronyms[idx],
                 "label": label,
-                "delay": delay,
-                "responsive": is_responsive,
             }
         )
+        selected_cluster_ids.append(cid)
 
     df_res = pd.DataFrame(results)
+    if df_res.empty:
+        print("No clusters met the selection criteria.")
+        return df_res
+
+    spike_times_by_cluster = {
+        cid: spikes.times[spikes.clusters == cid] for cid in selected_cluster_ids
+    }
+
+    for event_name in event_names:
+        events = events_by_name.get(event_name, np.array([]))
+        contrasts = contrasts_by_name.get(event_name, np.array([]))
+        delay_col = delay_column_name(event_name)
+        resp_col = responsive_column_name(event_name)
+
+        if events is None or len(events) < config["MIN_TRIALS"]:
+            df_res[delay_col] = np.nan
+            df_res[resp_col] = False
+            continue
+
+        psth_by_cluster, bin_centers = compute_psth_for_clusters(
+            spikes,
+            selected_cluster_ids,
+            events,
+            config["PSTH_WINDOW_START"],
+            config["PSTH_WINDOW_END"],
+            config["BIN_SIZE"],
+            config["SMOOTH_SIGMA"],
+            show_progress=True,
+            desc=f"PSTH ({event_name})",
+        )
+
+        delays = []
+        responsive_flags = []
+        for cid in tqdm(selected_cluster_ids, desc=f"Delays ({event_name})", unit="cluster"):
+            neuron_spikes = spike_times_by_cluster.get(cid, np.array([]))
+            psth_entry = psth_by_cluster.get(cid)
+            fr_raw = psth_entry["fr_raw"] if psth_entry else None
+            fr_smooth = psth_entry["fr_smooth"] if psth_entry else None
+
+            delay, is_responsive = calculate_delay(
+                fr_raw,
+                fr_smooth,
+                bin_centers,
+                config,
+                method=config.get("DELAY_METHOD"),
+                neuron_spikes=neuron_spikes,
+                event_times=events,
+                trial_contrasts=contrasts,
+            )
+
+            delays.append(delay)
+            responsive_flags.append(is_responsive)
+
+        df_res[delay_col] = delays
+        df_res[resp_col] = responsive_flags
+
     output_path = path_data_processed / f"{pid}_delay_results.csv"
     df_res.to_csv(output_path, index=False)
     print(f"Computed delays for {len(df_res)} neurons. Saved to {output_path}.")
@@ -305,100 +440,146 @@ def calculate_delay_reliability(
     spikes,
     clusters,
     cluster_acronyms,
-    events,
-    trial_contrasts,
+    events_by_name,
+    contrasts_by_name,
     config,
     path_data_processed,
     pid,
+    cid_to_idx,
+    df_res=None,
 ):
-    """Compute split-half delay reliability and save results to processed data."""
-    n_total = len(events)
-    if n_total < config["MIN_TRIALS"]:
-        print("Not enough trials for reliability calculation.")
+    """Compute split-half delay reliability across multiple events."""
+    event_names = config.get("EVENT_NAMES", list(events_by_name.keys()))
+    if len(event_names) == 0:
+        print("No events provided for reliability calculation.")
         return pd.DataFrame()
 
-    # Split trials into two halves to compute reliability across conditions.
-    mid_idx = n_total // 2
-    events_h1 = events[:mid_idx]
-    events_h2 = events[mid_idx:]
-    contrasts_h1 = trial_contrasts[:mid_idx]
-    contrasts_h2 = trial_contrasts[mid_idx:]
-
     cluster_ids = np.unique(spikes.clusters)
+    cluster_ids = [cid for cid in cluster_ids if cid in cid_to_idx]
+
     results = []
-
+    selected_cluster_ids = []
     for cid in cluster_ids:
-        try:
-            acronym = cluster_acronyms[cid]
-            if hasattr(clusters, "metrics") and "label" in clusters.metrics.columns:
-                label = clusters.metrics.label[cid]
-            elif hasattr(clusters, "label"):
-                label = clusters.label[cid]
-            else:
-                label = 1
-        except Exception:
-            acronym = "Unknown"
-            label = 1
-
+        idx = cid_to_idx.get(cid)
+        if idx is None:
+            continue
+        label = get_cluster_label(clusters, idx)
         if config["CALC_ONLY_GOOD_UNITS"] and label != 1:
             continue
-
-        neuron_spikes = spikes.times[spikes.clusters == cid]
-        # Only retain units that are responsive in the full dataset.
-        fr_all, bins_all = get_psth_data(neuron_spikes, events, config)
-        _, is_responsive = calculate_delay(
-            fr_all,
-            bins_all,
-            config,
-            method=config.get("DELAY_METHOD"),
-            neuron_spikes=neuron_spikes,
-            event_times=events,
-            trial_contrasts=trial_contrasts,
-        )
-        if not is_responsive:
-            continue
-
-        fr_h1, bins_h1 = get_psth_data(neuron_spikes, events_h1, config)
-        delay_h1, _ = calculate_delay(
-            fr_h1,
-            bins_h1,
-            {
-                **config,
-                "RESPONSIVE_WINDOW_START": config["RELIABILITY_WINDOW_START"],
-                "RESPONSIVE_WINDOW_END": config["RELIABILITY_WINDOW_END"],
-            },
-            method=config.get("DELAY_METHOD"),
-            neuron_spikes=neuron_spikes,
-            event_times=events_h1,
-            trial_contrasts=contrasts_h1,
-        )
-
-        fr_h2, bins_h2 = get_psth_data(neuron_spikes, events_h2, config)
-        delay_h2, _ = calculate_delay(
-            fr_h2,
-            bins_h2,
-            {
-                **config,
-                "RESPONSIVE_WINDOW_START": config["RELIABILITY_WINDOW_START"],
-                "RESPONSIVE_WINDOW_END": config["RELIABILITY_WINDOW_END"],
-            },
-            method=config.get("DELAY_METHOD"),
-            neuron_spikes=neuron_spikes,
-            event_times=events_h2,
-            trial_contrasts=contrasts_h2,
-        )
-
-        if not np.isnan(delay_h1) and not np.isnan(delay_h2):
-            results.append(
-                {
-                    "cluster_id": cid,
-                    "acronym": acronym,
-                    "delay_h1": delay_h1,
-                    "delay_h2": delay_h2,
-                }
-            )
+        results.append({"cluster_id": cid, "acronym": cluster_acronyms[idx]})
+        selected_cluster_ids.append(cid)
 
     df_reliability = pd.DataFrame(results)
+    if df_reliability.empty:
+        print("No clusters met the selection criteria.")
+        return df_reliability
+
+    spike_times_by_cluster = {
+        cid: spikes.times[spikes.clusters == cid] for cid in selected_cluster_ids
+    }
+
+    for event_name in event_names:
+        events = events_by_name.get(event_name, np.array([]))
+        contrasts = contrasts_by_name.get(event_name, np.array([]))
+        col_h1, col_h2 = reliability_column_names(event_name)
+        df_reliability[col_h1] = np.nan
+        df_reliability[col_h2] = np.nan
+
+        if events is None or len(events) < config["MIN_TRIALS"]:
+            continue
+
+        mid_idx = len(events) // 2
+        events_h1 = events[:mid_idx]
+        events_h2 = events[mid_idx:]
+        contrasts_h1 = contrasts[:mid_idx]
+        contrasts_h2 = contrasts[mid_idx:]
+
+        psth_h1, bin_centers_h1 = compute_psth_for_clusters(
+            spikes,
+            selected_cluster_ids,
+            events_h1,
+            config["PSTH_WINDOW_START"],
+            config["PSTH_WINDOW_END"],
+            config["BIN_SIZE"],
+            config["SMOOTH_SIGMA"],
+            show_progress=True,
+            desc=f"PSTH H1 ({event_name})",
+        )
+        psth_h2, bin_centers_h2 = compute_psth_for_clusters(
+            spikes,
+            selected_cluster_ids,
+            events_h2,
+            config["PSTH_WINDOW_START"],
+            config["PSTH_WINDOW_END"],
+            config["BIN_SIZE"],
+            config["SMOOTH_SIGMA"],
+            show_progress=True,
+            desc=f"PSTH H2 ({event_name})",
+        )
+
+        if df_res is not None and responsive_column_name(event_name) in df_res.columns:
+            resp_lookup = dict(
+                zip(df_res["cluster_id"].values, df_res[responsive_column_name(event_name)].values)
+            )
+            responsive_mask = np.array(
+                [resp_lookup.get(cid, False) for cid in selected_cluster_ids], dtype=bool
+            )
+        else:
+            responsive_mask = np.ones(len(selected_cluster_ids), dtype=bool)
+
+        delays_h1 = []
+        delays_h2 = []
+        rel_config = {
+            **config,
+            "RESPONSIVE_WINDOW_START": config["RELIABILITY_WINDOW_START"],
+            "RESPONSIVE_WINDOW_END": config["RELIABILITY_WINDOW_END"],
+        }
+
+        for cid, is_resp in tqdm(
+            list(zip(selected_cluster_ids, responsive_mask)),
+            desc=f"Reliability ({event_name})",
+            unit="cluster",
+        ):
+            if not is_resp:
+                delays_h1.append(np.nan)
+                delays_h2.append(np.nan)
+                continue
+
+            neuron_spikes = spike_times_by_cluster.get(cid, np.array([]))
+            psth_entry_h1 = psth_h1.get(cid)
+            psth_entry_h2 = psth_h2.get(cid)
+            fr_raw_h1 = psth_entry_h1["fr_raw"] if psth_entry_h1 else None
+            fr_smooth_h1 = psth_entry_h1["fr_smooth"] if psth_entry_h1 else None
+            fr_raw_h2 = psth_entry_h2["fr_raw"] if psth_entry_h2 else None
+            fr_smooth_h2 = psth_entry_h2["fr_smooth"] if psth_entry_h2 else None
+
+            delay_h1, _ = calculate_delay(
+                fr_raw_h1,
+                fr_smooth_h1,
+                bin_centers_h1,
+                rel_config,
+                method=config.get("DELAY_METHOD"),
+                neuron_spikes=neuron_spikes,
+                event_times=events_h1,
+                trial_contrasts=contrasts_h1,
+            )
+            delay_h2, _ = calculate_delay(
+                fr_raw_h2,
+                fr_smooth_h2,
+                bin_centers_h2,
+                rel_config,
+                method=config.get("DELAY_METHOD"),
+                neuron_spikes=neuron_spikes,
+                event_times=events_h2,
+                trial_contrasts=contrasts_h2,
+            )
+
+            delays_h1.append(delay_h1)
+            delays_h2.append(delay_h2)
+
+        df_reliability[col_h1] = delays_h1
+        df_reliability[col_h2] = delays_h2
+
     output_path = path_data_processed / f"{pid}_delay_reliability.csv"
     df_reliability.to_csv(output_path, index=False)
     print(
@@ -411,6 +592,7 @@ def calculate_delay_reliability(
 def plot_trial_raster(
     spikes,
     clusters,
+    cluster_ids,
     cluster_acronyms,
     sl,
     pupil_features,
@@ -422,16 +604,27 @@ def plot_trial_raster(
     trial_idx,
 ):
     """Plot a trial-aligned raster with wheel, paw, and pupil traces."""
-    t_stim_on = sl.trials["stimOn_times"][trial_idx]
-    t_first_move = sl.trials["firstMovement_times"][trial_idx]
-    t_feedback = sl.trials["feedback_times"][trial_idx]
+    t_stim_on = get_event_time(sl, "stimOn_times", trial_idx)
+    t_first_move = get_event_time(sl, "firstMovement_times", trial_idx)
+    t_feedback = get_event_time(sl, "feedback_times", trial_idx)
 
-    t_start = t_stim_on - config_plot["RASTER_WINDOW_PRE"]
-    t_end = t_feedback + config_plot["RASTER_WINDOW_POST"]
+    align_event = config_plot.get("PLOT_EVENT", "stimOn_times")
+    if align_event not in sl.trials.keys():
+        print(f"Warning: Event '{align_event}' not found. Falling back to stimOn_times.")
+        align_event = "stimOn_times"
+    t_align = get_event_time(sl, align_event, trial_idx)
+    if np.isnan(t_align):
+        t_align = t_stim_on
 
-    if config_plot["RASTER_ALIGN_TO_STIM_ON"]:
-        t_offset = t_stim_on
-        xlabel_text = "Time from Stim On (s)"
+    t_start = t_align - config_plot["RASTER_WINDOW_PRE"]
+    t_end = t_align + config_plot["RASTER_WINDOW_POST"]
+
+    align_to_event = config_plot.get(
+        "RASTER_ALIGN_TO_EVENT", config_plot.get("RASTER_ALIGN_TO_STIM_ON", True)
+    )
+    if align_to_event:
+        t_offset = t_align
+        xlabel_text = f"Time from {event_label(align_event)} (s)"
     else:
         t_offset = 0
         xlabel_text = "Time in session (s)"
@@ -462,17 +655,22 @@ def plot_trial_raster(
     )
 
     if config_plot["PLOT_ONLY_GOOD_UNITS"]:
-        target_indices = np.where(clusters.label == 1)[0]
-        ylabel_text = f"Good Units (n={len(target_indices)})"
+        if hasattr(clusters, "label"):
+            quality_mask = clusters.label == 1
+        elif hasattr(clusters, "metrics") and "label" in clusters.metrics.columns:
+            quality_mask = clusters.metrics.label == 1
+        else:
+            quality_mask = np.ones(len(cluster_ids), dtype=bool)
+        ylabel_text = f"Good Units (n={np.sum(quality_mask)})"
     else:
-        target_indices = np.arange(len(clusters.label))
-        ylabel_text = f"All Units (n={len(target_indices)})"
+        quality_mask = np.ones(len(cluster_ids), dtype=bool)
+        ylabel_text = f"All Units (n={np.sum(quality_mask)})"
 
     df_units = pd.DataFrame(
         {
-            "id": target_indices,
-            "acronym": cluster_acronyms[target_indices],
-            "depth": clusters.depths[target_indices],
+            "cluster_id": cluster_ids[quality_mask],
+            "acronym": cluster_acronyms[quality_mask],
+            "depth": clusters.depths[quality_mask],
         }
     )
     df_units = df_units.sort_values(by="depth", ascending=True).reset_index(drop=True)
@@ -536,7 +734,7 @@ def plot_trial_raster(
 
     ax_raster = fig.add_subplot(gs[0, 0])
     for y_idx, row in df_units.iterrows():
-        unit_spike_times = window_spike_times[window_spike_clusters == row["id"]]
+        unit_spike_times = window_spike_times[window_spike_clusters == row["cluster_id"]]
         if len(unit_spike_times) > 0:
             ax_raster.vlines(
                 unit_spike_times - t_offset,
@@ -637,7 +835,12 @@ def plot_trial_raster(
 
 def plot_delay_histogram(df_res, config_calc, config_plot, save_flag, path_fig, pid):
     """Plot delay histogram stacked by region."""
-    df_plot = df_res.dropna(subset=["delay"]).copy()
+    event_name = config_plot.get("PLOT_EVENT", "stimOn_times")
+    delay_col = delay_column_name(event_name)
+    if delay_col not in df_res.columns:
+        print(f"Delay column '{delay_col}' not found.")
+        return
+    df_plot = df_res.dropna(subset=[delay_col]).copy()
 
     title_suffix = ""
     if config_plot["PLOT_ONLY_GOOD_UNITS"]:
@@ -663,7 +866,9 @@ def plot_delay_histogram(df_res, config_calc, config_plot, save_flag, path_fig, 
         ["Other"] if "Other" in unique_regions else []
     )
 
-    data_to_plot = [df_plot[df_plot["plot_region"] == r]["delay"].values for r in unique_regions]
+    data_to_plot = [
+        df_plot[df_plot["plot_region"] == r][delay_col].values for r in unique_regions
+    ]
 
     fig, ax = plt.subplots(figsize=(10, 6))
     hist_bins = np.linspace(
@@ -682,7 +887,7 @@ def plot_delay_histogram(df_res, config_calc, config_plot, save_flag, path_fig, 
     ax.set_xlabel("Response Delay (s)")
     ax.set_ylabel("Number of Neurons")
     ax.set_title(
-        f"Distribution of Response Delays {title_suffix}\n"
+        f"Distribution of Response Delays ({event_label(event_name)}) {title_suffix}\n"
         f"(Window: {config_calc['RESPONSIVE_WINDOW_START']}-{config_calc['RESPONSIVE_WINDOW_END']}s)"
     )
     ax.legend(title="Region")
@@ -699,13 +904,18 @@ def plot_delay_histogram(df_res, config_calc, config_plot, save_flag, path_fig, 
     plt.show()
 
     print("\nSummary Statistics by Region:")
-    print(df_plot.groupby("plot_region")["delay"].describe()[["count", "mean", "std"]])
+    print(df_plot.groupby("plot_region")[delay_col].describe()[["count", "mean", "std"]])
 
 
 def plot_delay_reliability(df_reliability, config_calc, config_plot, save_flag, path_fig, pid):
     """Plot split-half delay reliability scatter by region."""
     if len(df_reliability) == 0:
         print("No neurons met the reliability criteria.")
+        return
+    event_name = config_plot.get("PLOT_EVENT", "stimOn_times")
+    col_h1, col_h2 = reliability_column_names(event_name)
+    if col_h1 not in df_reliability.columns or col_h2 not in df_reliability.columns:
+        print(f"Reliability columns '{col_h1}'/'{col_h2}' not found.")
         return
 
     top_n = 9
@@ -727,13 +937,13 @@ def plot_delay_reliability(df_reliability, config_calc, config_plot, save_flag, 
     if "Other" in palette_dict:
         palette_dict["Other"] = "gray"
 
-    r_val, p_val = stats.pearsonr(df_reliability["delay_h1"], df_reliability["delay_h2"])
+    r_val, p_val = stats.pearsonr(df_reliability[col_h1], df_reliability[col_h2])
 
     fig, ax = plt.subplots(figsize=(8, 8))
     sns.scatterplot(
         data=df_reliability,
-        x="delay_h1",
-        y="delay_h2",
+        x=col_h1,
+        y=col_h2,
         hue="plot_region",
         palette=palette_dict,
         marker="o",
@@ -745,14 +955,14 @@ def plot_delay_reliability(df_reliability, config_calc, config_plot, save_flag, 
     )
 
     lims = [
-        min(df_reliability["delay_h1"].min(), df_reliability["delay_h2"].min()),
-        max(df_reliability["delay_h1"].max(), df_reliability["delay_h2"].max()),
+        min(df_reliability[col_h1].min(), df_reliability[col_h2].min()),
+        max(df_reliability[col_h1].max(), df_reliability[col_h2].max()),
     ]
     ax.plot(lims, lims, color="black", linestyle="--", alpha=0.5, label="Identity")
 
     unit_type = "Good Units" if config_plot["PLOT_ONLY_GOOD_UNITS"] else "All Units"
-    ax.set_xlabel("Delay (s) - First Half")
-    ax.set_ylabel("Delay (s) - Second Half")
+    ax.set_xlabel(f"Delay (s) - First Half ({event_label(event_name)})")
+    ax.set_ylabel(f"Delay (s) - Second Half ({event_label(event_name)})")
     ax.set_title(
         f"Reliability of Response Delays ({unit_type})\n"
         f"Pearson r = {r_val:.2f}, p = {p_val:.2e}\n"
@@ -772,25 +982,39 @@ def plot_delay_reliability(df_reliability, config_calc, config_plot, save_flag, 
 
 
 def plot_single_neuron(
-    sl, spikes, clusters, cluster_acronyms, df_res, config_plot, save_flag, path_fig, pid, cluster_id
+    sl,
+    spikes,
+    clusters,
+    cluster_acronyms,
+    cid_to_idx,
+    df_res,
+    config_plot,
+    save_flag,
+    path_fig,
+    pid,
+    cluster_id,
 ):
     """Plot PSTHs and rasters for a single neuron, plus global PSTH."""
     target_cluster_id = cluster_id
-    if target_cluster_id >= len(clusters.acronym):
-        print(
-            f"Error: Cluster ID {target_cluster_id} is out of bounds "
-            f"(Max ID: {len(clusters.acronym) - 1})."
-        )
-        target_cluster_id = 0
+    if target_cluster_id not in cid_to_idx:
+        fallback_id = next(iter(cid_to_idx), None)
+        print(f"Error: Cluster ID {target_cluster_id} not found. Using {fallback_id}.")
+        if fallback_id is None:
+            return
+        target_cluster_id = fallback_id
 
-    target_acronym = cluster_acronyms[target_cluster_id]
+    target_idx = cid_to_idx[target_cluster_id]
+    target_acronym = cluster_acronyms[target_idx]
     print(f"Analyzing Cluster ID: {target_cluster_id} | Region: {target_acronym}")
 
+    align_event = config_plot.get("PLOT_EVENT", "stimOn_times")
+    delay_col = delay_column_name(align_event)
     unit_delay = np.nan
     if df_res is not None:
         match = df_res[df_res["cluster_id"] == target_cluster_id]
         if not match.empty:
-            unit_delay = match.iloc[0]["delay"]
+            if delay_col in match.columns:
+                unit_delay = match.iloc[0][delay_col]
             print(f"Global Delay found: {unit_delay:.4f} s")
         else:
             print(f"Cluster {target_cluster_id} not found in df_res.")
@@ -829,35 +1053,32 @@ def plot_single_neuron(
             else:
                 contrast_arr = sl.trials.contrastRight
 
-            mask = (contrast_arr == cont) & (~np.isnan(sl.trials.stimOn_times))
-            events = sl.trials.stimOn_times[mask]
+            event_series = np.asarray(sl.trials[align_event])
+            mask = (contrast_arr == cont) & (~np.isnan(event_series))
+            events = event_series[mask]
 
             if len(events) == 0:
                 continue
 
-            psth_spikes_concat = []
-            for event_t in events:
-                t_start = event_t - config_plot["SINGLE_NEURON_RASTER_PRE"]
-                t_end = event_t + config_plot["SINGLE_NEURON_RASTER_POST"]
-                in_window = neuron_spikes[(neuron_spikes >= t_start) & (neuron_spikes <= t_end)]
-                psth_spikes_concat.append(in_window - event_t)
-
-            psth_bins = np.arange(
+            psth_by_cluster, bin_centers = compute_psth_for_clusters(
+                spikes,
+                [target_cluster_id],
+                events,
                 -config_plot["SINGLE_NEURON_RASTER_PRE"],
-                config_plot["SINGLE_NEURON_RASTER_POST"] + config_plot["SINGLE_NEURON_BIN_SIZE"],
+                config_plot["SINGLE_NEURON_RASTER_POST"],
                 config_plot["SINGLE_NEURON_BIN_SIZE"],
+                config_plot["SINGLE_NEURON_SMOOTH_SIGMA"],
+                show_progress=False,
             )
-
-            if len(psth_spikes_concat) > 0:
-                all_spikes = np.concatenate(psth_spikes_concat)
-                counts, _ = np.histogram(all_spikes, bins=psth_bins)
-                firing_rate = counts / len(events) / config_plot["SINGLE_NEURON_BIN_SIZE"]
+            psth_entry = psth_by_cluster.get(target_cluster_id)
+            if psth_entry and bin_centers is not None:
+                firing_rate = psth_entry["fr_smooth"]
             else:
-                firing_rate = np.zeros(len(psth_bins) - 1)
+                firing_rate = np.zeros(len(bin_centers) if bin_centers is not None else 0)
 
             color_val = contrast_colors.get(cont, (0, 0, 0, 1))
             label_text = f"{cont * 100:.0f}%" if cont > 0 else "0%"
-            ax_psth.plot(psth_bins[:-1], firing_rate, color=color_val, linewidth=2, label=label_text)
+            ax_psth.plot(bin_centers, firing_rate, color=color_val, linewidth=2, label=label_text)
 
             block_start_y = current_raster_y
             for event_t in events:
@@ -907,33 +1128,27 @@ def plot_single_neuron(
             ax_psth.set_ylabel("Firing Rate (Hz)")
             ax_rast.set_ylabel("Trials (Sorted)")
 
-    all_events = sl.trials.stimOn_times[~np.isnan(sl.trials.stimOn_times)]
+    all_event_series = np.asarray(sl.trials[align_event])
+    all_events = all_event_series[~np.isnan(all_event_series)]
     if len(all_events) > 0:
-        psth_spikes_global = []
-        bins_global = np.arange(
+        psth_by_cluster, bin_centers = compute_psth_for_clusters(
+            spikes,
+            [target_cluster_id],
+            all_events,
             -config_plot["SINGLE_NEURON_RASTER_PRE"],
-            config_plot["SINGLE_NEURON_RASTER_POST"] + config_plot["SINGLE_NEURON_BIN_SIZE"],
-            0.01,
+            config_plot["SINGLE_NEURON_RASTER_POST"],
+            config_plot["SINGLE_NEURON_BIN_SIZE"],
+            config_plot["SINGLE_NEURON_SMOOTH_SIGMA"],
+            show_progress=False,
         )
 
-        s_min = all_events.min() - config_plot["SINGLE_NEURON_RASTER_PRE"]
-        s_max = all_events.max() + config_plot["SINGLE_NEURON_RASTER_POST"]
-        subset_spikes = neuron_spikes[(neuron_spikes >= s_min) & (neuron_spikes <= s_max)]
-
-        for t_ev in all_events:
-            t0 = t_ev - config_plot["SINGLE_NEURON_RASTER_PRE"]
-            t1 = t_ev + config_plot["SINGLE_NEURON_RASTER_POST"]
-            in_trial = subset_spikes[(subset_spikes >= t0) & (subset_spikes <= t1)]
-            psth_spikes_global.append(in_trial - t_ev)
-
-        if len(psth_spikes_global) > 0:
-            all_spikes_global = np.concatenate(psth_spikes_global)
-            counts_g, _ = np.histogram(all_spikes_global, bins=bins_global)
-            fr_global = counts_g / len(all_events) / 0.01
-            fr_global_smooth = gaussian_filter1d(fr_global, sigma=2)
-
-            bin_centers = (bins_global[:-1] + bins_global[1:]) / 2
-            ax_global.plot(bin_centers, fr_global, color="k", linewidth=2, label="Global Response")
+        psth_entry = psth_by_cluster.get(target_cluster_id)
+        if psth_entry and bin_centers is not None:
+            fr_global = psth_entry["fr_raw"]
+            fr_global_smooth = psth_entry["fr_smooth"]
+            ax_global.plot(
+                bin_centers, fr_global_smooth, color="k", linewidth=2, label="Global Response"
+            )
             ax_global.fill_between(bin_centers, fr_global, color="gray", alpha=0.2)
 
             if not np.isnan(unit_delay):
@@ -954,10 +1169,18 @@ def plot_single_neuron(
                         fontsize=10,
                         fontweight="bold",
                     )
+        else:
+            ax_global.text(0.5, 0.5, "No spikes in window", ha="center")
 
-        ax_global.axvline(0, color="blue", linestyle="--", linewidth=1, label="Stim On")
+        ax_global.axvline(
+            0,
+            color="blue",
+            linestyle="--",
+            linewidth=1,
+            label=event_label(align_event),
+        )
         ax_global.set_ylabel("Firing Rate (Hz)")
-        ax_global.set_xlabel("Time from Stimulus Onset (s)")
+        ax_global.set_xlabel(f"Time from {event_label(align_event)} (s)")
         ax_global.set_title("Global PSTH (All Trials)")
         ax_global.legend(loc="upper right", frameon=False)
         ax_global.spines["top"].set_visible(False)
@@ -985,6 +1208,7 @@ def plot_sequence_raster(
     sl,
     spikes,
     clusters,
+    cluster_ids,
     cluster_acronyms,
     df_res,
     config_plot,
@@ -1008,7 +1232,15 @@ def plot_sequence_raster(
 
     window_pre = config_plot["SEQUENCE_WINDOW_PRE"]
     window_post = config_plot["SEQUENCE_WINDOW_POST"]
-    align_to_stim = config_plot["SEQUENCE_ALIGN_TO_STIM"]
+    align_to_event = config_plot.get(
+        "SEQUENCE_ALIGN_TO_EVENT", config_plot.get("SEQUENCE_ALIGN_TO_STIM", True)
+    )
+
+    align_event = config_plot.get("PLOT_EVENT", "stimOn_times")
+    if align_event not in sl.trials.keys():
+        print(f"Warning: Event '{align_event}' not found. Falling back to stimOn_times.")
+        align_event = "stimOn_times"
+    delay_col = delay_column_name(align_event)
 
     try:
         if hasattr(clusters, "metrics") and "label" in clusters.metrics.columns:
@@ -1023,13 +1255,16 @@ def plot_sequence_raster(
 
     cluster_acronyms_str = cluster_acronyms.astype(str)
 
-    t_stim = sl.trials["stimOn_times"][trial_idx]
-    t_move = sl.trials["firstMovement_times"][trial_idx]
-    t_feed = sl.trials["feedback_times"][trial_idx]
+    t_stim = get_event_time(sl, "stimOn_times", trial_idx)
+    t_move = get_event_time(sl, "firstMovement_times", trial_idx)
+    t_feed = get_event_time(sl, "feedback_times", trial_idx)
+    t_align = get_event_time(sl, align_event, trial_idx)
+    if np.isnan(t_align):
+        t_align = t_stim
 
-    t_start = t_stim - window_pre
-    t_end = t_stim + window_post
-    t_offset = t_stim if align_to_stim else 0
+    t_start = t_align - window_pre
+    t_end = t_align + window_post
+    t_offset = t_align if align_to_event else 0
 
     fig, axes = plt.subplots(
         len(region_acronyms), 1, figsize=(10, 6 * len(region_acronyms)), sharex=True
@@ -1046,7 +1281,7 @@ def plot_sequence_raster(
                 final_mask = region_mask & quality_mask
             else:
                 final_mask = region_mask
-            region_cluster_ids = np.where(final_mask)[0]
+            region_cluster_ids = cluster_ids[final_mask]
             print(f"Found {len(region_cluster_ids)} {label_text} in {region}.")
         except AttributeError:
             print(f"Error: clusters data incomplete for {region}.")
@@ -1056,22 +1291,27 @@ def plot_sequence_raster(
             df_region = pd.DataFrame(
                 {
                     "cluster_id": region_cluster_ids,
-                    "acronym": cluster_acronyms[region_cluster_ids],
-                    "depth": clusters.depths[region_cluster_ids],
+                    "acronym": cluster_acronyms[final_mask],
+                    "depth": clusters.depths[final_mask],
                 }
             )
         else:
             df_region = pd.DataFrame(columns=["cluster_id", "acronym", "depth"])
 
         if df_res is not None and len(df_region) > 0:
-            df_region = df_region.merge(
-                df_res[["cluster_id", "delay"]], on="cluster_id", how="left"
-            )
+            if delay_col in df_res.columns:
+                df_region = df_region.merge(
+                    df_res[["cluster_id", delay_col]].rename(columns={delay_col: "delay"}),
+                    on="cluster_id",
+                    how="left",
+                )
+            else:
+                df_region["delay"] = np.nan
         else:
             df_region["delay"] = np.nan
 
         df_sorted = df_region.sort_values(
-            by="delay", ascending=True, na_position="first"
+            by="delay", ascending=True, na_position="last"
         ).reset_index(drop=True)
 
         n_responsive = df_sorted["delay"].notna().sum()
@@ -1122,13 +1362,14 @@ def plot_sequence_raster(
                     )
 
             ax_raster.set_xlim(t_start - t_offset, t_end - t_offset)
-            ax_raster.set_ylim(-1, len(df_sorted))
+            ax_raster.set_ylim(len(df_sorted), -1)
 
             if n_nan > 0:
-                ax_raster.axhline(n_nan, color="red", linestyle="--", linewidth=1, alpha=0.7)
+                sep_y = n_responsive
+                ax_raster.axhline(sep_y, color="red", linestyle="--", linewidth=1, alpha=0.7)
                 ax_raster.text(
                     (t_start - t_offset) + 0.05,
-                    n_nan / 2,
+                    sep_y + n_nan / 2,
                     "Unresponsive / Untuned",
                     color="gray",
                     fontsize=10,
@@ -1146,7 +1387,7 @@ def plot_sequence_raster(
             fontsize=14,
         )
 
-        ax_raster.axvline(0, color="blue", linewidth=2, label="Stim On")
+        ax_raster.axvline(0, color="blue", linewidth=2, label=event_label(align_event))
         if not np.isnan(t_move):
             ax_raster.axvline(
                 t_move - t_offset,
@@ -1168,7 +1409,7 @@ def plot_sequence_raster(
         ax_raster.spines["top"].set_visible(False)
         ax_raster.spines["right"].set_visible(False)
 
-    axes[-1].set_xlabel("Time from Stimulus Onset (s)", fontsize=12)
+    axes[-1].set_xlabel(f"Time from {event_label(align_event)} (s)", fontsize=12)
 
     plt.tight_layout()
 
@@ -1189,6 +1430,7 @@ def plot_population_sorted(
     sl,
     spikes,
     clusters,
+    cluster_ids,
     cluster_acronyms,
     df_res,
     config_plot,
@@ -1229,11 +1471,13 @@ def plot_population_sorted(
 
     cluster_acronyms_str = cluster_acronyms.astype(str)
     label_text = "Good Neurons" if config_plot["PLOT_ONLY_GOOD_UNITS"] else "Neurons"
-    stim_times = sl.trials["stimOn_times"][~np.isnan(sl.trials["stimOn_times"])]
-
-    bins = np.arange(-window_pre, window_post + bin_size, bin_size)
-    bin_centers = (bins[:-1] + bins[1:]) / 2
-    n_bins = len(bin_centers)
+    align_event = config_plot.get("PLOT_EVENT", "stimOn_times")
+    if align_event not in sl.trials.keys():
+        print(f"Warning: Event '{align_event}' not found. Falling back to stimOn_times.")
+        align_event = "stimOn_times"
+    delay_col = delay_column_name(align_event)
+    event_series = np.asarray(sl.trials[align_event])
+    stim_times = event_series[~np.isnan(event_series)]
 
     fig, axes = plt.subplots(
         len(region_acronyms), 1, figsize=(10, 6 * len(region_acronyms)), sharex=True
@@ -1248,7 +1492,7 @@ def plot_population_sorted(
                 final_mask = region_mask & quality_mask
             else:
                 final_mask = region_mask
-            region_ids = np.where(final_mask)[0]
+            region_ids = cluster_ids[final_mask]
             print(f"Found {len(region_ids)} {label_text} in {region}.")
         except AttributeError:
             region_ids = []
@@ -1257,16 +1501,22 @@ def plot_population_sorted(
         df_region = pd.DataFrame({"cluster_id": region_ids})
 
         if df_res is not None and len(df_region) > 0:
-            df_region = df_region.merge(
-                df_res[["cluster_id", "delay"]], on="cluster_id", how="left"
-            )
+            if delay_col in df_res.columns:
+                df_region = df_region.merge(
+                    df_res[["cluster_id", delay_col]].rename(columns={delay_col: "delay"}),
+                    on="cluster_id",
+                    how="left",
+                )
+            else:
+                print(f"Warning: {delay_col} not found. Latencies will be NaN.")
+                df_region["delay"] = np.nan
         else:
             if df_res is None:
                 print("Warning: df_res not found. Latencies will be NaN.")
             df_region["delay"] = np.nan
 
         df_sorted = df_region.sort_values(
-            by="delay", ascending=True, na_position="first"
+            by="delay", ascending=True, na_position="last"
         ).reset_index(drop=True)
 
         n_neurons = len(df_sorted)
@@ -1288,35 +1538,44 @@ def plot_population_sorted(
             )
             continue
 
+        if len(stim_times) == 0:
+            ax.text(
+                0.5,
+                0.5,
+                f"No valid {align_event} events for {region}",
+                transform=ax.transAxes,
+                ha="center",
+                va="center",
+            )
+            ax.set_xlim(-window_pre, window_post)
+            ax.set_ylim(0, 1)
+            continue
+
+        psth_by_cluster, bin_centers = compute_psth_for_clusters(
+            spikes,
+            df_sorted["cluster_id"].values,
+            stim_times,
+            -window_pre,
+            window_post,
+            bin_size,
+            smooth_sigma,
+            show_progress=True,
+            desc=f"PSTH ({region})",
+        )
+        n_bins = len(bin_centers) if bin_centers is not None else 0
         psth_matrix = np.zeros((n_neurons, n_bins))
 
         for row_idx, row in df_sorted.iterrows():
             cid = row["cluster_id"]
-            unit_spikes = spikes.times[spikes.clusters == cid]
-            if len(unit_spikes) == 0:
+            psth_entry = psth_by_cluster.get(cid)
+            if not psth_entry:
                 continue
-
-            all_rel_spikes = []
-            t_min = stim_times.min() - window_pre
-            t_max = stim_times.max() + window_post
-            subset = unit_spikes[(unit_spikes >= t_min) & (unit_spikes <= t_max)]
-
-            for t_stim in stim_times:
-                t0 = t_stim - window_pre
-                t1 = t_stim + window_post
-                in_window = subset[(subset >= t0) & (subset <= t1)]
-                all_rel_spikes.append(in_window - t_stim)
-
-            if len(all_rel_spikes) > 0:
-                flat_spikes = np.concatenate(all_rel_spikes)
-                counts, _ = np.histogram(flat_spikes, bins=bins)
-                fr = counts / len(stim_times) / bin_size
-                fr_smooth = gaussian_filter1d(fr, sigma=smooth_sigma)
-                if normalize:
-                    peak = np.max(fr_smooth)
-                    if peak > 0:
-                        fr_smooth = fr_smooth / peak
-                psth_matrix[row_idx, :] = fr_smooth
+            fr_smooth = psth_entry["fr_smooth"]
+            if normalize:
+                peak = np.max(fr_smooth)
+                if peak > 0:
+                    fr_smooth = fr_smooth / peak
+            psth_matrix[row_idx, :] = fr_smooth
 
         im = ax.imshow(
             psth_matrix,
@@ -1332,7 +1591,7 @@ def plot_population_sorted(
         x_positions = valid_delays["delay"]
         ax.scatter(x_positions, y_positions, color="black", s=10, marker="o", label="Delay")
 
-        ax.axvline(0, color="black", linestyle="--", linewidth=1, label="Stim On")
+        ax.axvline(0, color="black", linestyle="--", linewidth=1, label=event_label(align_event))
         ax.set_ylabel(f"Neurons (Sorted by Latency)\nTotal: {n_neurons}", fontsize=12)
         title_str = "Normalized " if normalize else "Raw "
         ax.set_title(
@@ -1347,9 +1606,9 @@ def plot_population_sorted(
         )
 
         ax.set_xlim(-window_pre, window_post)
-        ax.set_ylim(0, n_neurons)
+        ax.set_ylim(n_neurons, 0)
 
-    axes[-1].set_xlabel("Time from Stimulus Onset (s)", fontsize=12)
+    axes[-1].set_xlabel(f"Time from {event_label(align_event)} (s)", fontsize=12)
 
     plt.tight_layout()
 
@@ -1369,6 +1628,7 @@ def plot_population_PSTH_sorted(
     sl,
     spikes,
     clusters,
+    cluster_ids,
     cluster_acronyms,
     df_res,
     config_plot,
@@ -1408,7 +1668,13 @@ def plot_population_PSTH_sorted(
 
     cluster_acronyms_str = cluster_acronyms.astype(str)
     label_text = "Good Neurons" if config_plot["PLOT_ONLY_GOOD_UNITS"] else "Neurons"
-    stim_times = sl.trials["stimOn_times"][~np.isnan(sl.trials["stimOn_times"])]
+    align_event = config_plot.get("PLOT_EVENT", "stimOn_times")
+    if align_event not in sl.trials.keys():
+        print(f"Warning: Event '{align_event}' not found. Falling back to stimOn_times.")
+        align_event = "stimOn_times"
+    delay_col = delay_column_name(align_event)
+    event_series = np.asarray(sl.trials[align_event])
+    stim_times = event_series[~np.isnan(event_series)]
 
     bins = np.arange(-window_pre, window_post + bin_size, bin_size)
     bin_centers = (bins[:-1] + bins[1:]) / 2
@@ -1426,7 +1692,7 @@ def plot_population_PSTH_sorted(
                 final_mask = region_mask & quality_mask
             else:
                 final_mask = region_mask
-            region_ids = np.where(final_mask)[0]
+            region_ids = cluster_ids[final_mask]
             print(f"Found {len(region_ids)} {label_text} in {region}.")
         except AttributeError:
             region_ids = []
@@ -1435,16 +1701,22 @@ def plot_population_PSTH_sorted(
         df_region = pd.DataFrame({"cluster_id": region_ids})
 
         if df_res is not None and len(df_region) > 0:
-            df_region = df_region.merge(
-                df_res[["cluster_id", "delay"]], on="cluster_id", how="left"
-            )
+            if delay_col in df_res.columns:
+                df_region = df_region.merge(
+                    df_res[["cluster_id", delay_col]].rename(columns={delay_col: "delay"}),
+                    on="cluster_id",
+                    how="left",
+                )
+            else:
+                print(f"Warning: {delay_col} not found. Latencies will be NaN.")
+                df_region["delay"] = np.nan
         else:
             if df_res is None:
                 print("Warning: df_res not found. Latencies will be NaN.")
             df_region["delay"] = np.nan
 
         df_sorted = df_region.sort_values(
-            by="delay", ascending=True, na_position="first"
+            by="delay", ascending=True, na_position="last"
         ).reset_index(drop=True)
 
         n_neurons = len(df_sorted)
@@ -1466,34 +1738,40 @@ def plot_population_PSTH_sorted(
             )
             continue
 
-        psth_list = []
-        t_min = stim_times.min() - window_pre
-        t_max = stim_times.max() + window_post
+        if len(stim_times) == 0:
+            ax.text(
+                0.5,
+                0.5,
+                f"No valid {align_event} events for {region}",
+                transform=ax.transAxes,
+                ha="center",
+                va="center",
+            )
+            ax.set_xlim(-window_pre, window_post)
+            ax.set_ylim(0, 1)
+            ax.set_ylabel("Neurons (Sorted by Latency)\nTotal: 0", fontsize=12)
+            continue
 
+        psth_by_cluster, bin_centers = compute_psth_for_clusters(
+            spikes,
+            df_sorted["cluster_id"].values,
+            stim_times,
+            -window_pre,
+            window_post,
+            bin_size,
+            smooth_sigma,
+            show_progress=True,
+            desc=f"PSTH ({region})",
+        )
+
+        psth_list = []
         for _, row in df_sorted.iterrows():
             cid = row["cluster_id"]
-            unit_spikes = spikes.times[spikes.clusters == cid]
-            if len(unit_spikes) == 0:
+            psth_entry = psth_by_cluster.get(cid)
+            if not psth_entry:
                 psth_list.append(None)
                 continue
-
-            all_rel_spikes = []
-            subset = unit_spikes[(unit_spikes >= t_min) & (unit_spikes <= t_max)]
-
-            for t_stim in stim_times:
-                t0 = t_stim - window_pre
-                t1 = t_stim + window_post
-                in_window = subset[(subset >= t0) & (subset <= t1)]
-                all_rel_spikes.append(in_window - t_stim)
-
-            if len(all_rel_spikes) == 0:
-                psth_list.append(None)
-                continue
-
-            flat_spikes = np.concatenate(all_rel_spikes)
-            counts, _ = np.histogram(flat_spikes, bins=bins)
-            fr = counts / len(stim_times) / bin_size
-            fr_smooth = gaussian_filter1d(fr, sigma=smooth_sigma)
+            fr_smooth = psth_entry["fr_smooth"]
             if normalize:
                 peak = np.max(fr_smooth)
                 if peak > 0:
@@ -1536,16 +1814,16 @@ def plot_population_PSTH_sorted(
         x_positions = valid_delays["delay"]
         ax.scatter(x_positions, y_positions, color="black", s=10, marker="o", label="Delay")
 
-        ax.axvline(0, color="black", linestyle="--", linewidth=1, label="Stim On")
+        ax.axvline(0, color="black", linestyle="--", linewidth=1, label=event_label(align_event))
         ax.set_ylabel(f"Neurons (Sorted by Latency)\nTotal: {n_neurons}", fontsize=12)
         title_str = "Normalized " if normalize else "Raw "
         ax.set_title(
             f"{title_str}Average PSTHs | {region} Units", fontsize=14
         )
         ax.set_xlim(-window_pre, window_post)
-        ax.set_ylim(0, n_neurons)
+        ax.set_ylim(n_neurons, 0)
 
-    axes[-1].set_xlabel("Time from Stimulus Onset (s)", fontsize=12)
+    axes[-1].set_xlabel(f"Time from {event_label(align_event)} (s)", fontsize=12)
 
     plt.tight_layout()
 
@@ -1569,27 +1847,29 @@ CONFIG_CALC = {
     "ATLAS_MAPPING": "Beryl",
     # Run calculations only on good units (label == 1) or on all units
     "CALC_ONLY_GOOD_UNITS": True,
+    # Events to compute delays for
+    "EVENT_NAMES": ["stimOn_times", "firstMovement_times", "response_times", "feedback_times"],
     # Delay calculation method: "center_of_mass", "psth_peak", or "tfs"
     "DELAY_METHOD": "psth_peak",
     # Values treated as 100% contrast for the TFS method
     "FULL_CONTRAST_VALUES": (1.0, 100.0),
     # PSTH bin width (seconds)
     "BIN_SIZE": 0.005,
-    # Baseline window duration before stimulus onset (seconds)
+    # Baseline window duration before the event (seconds)
     "BASELINE_PRE": 0.2,
-    # PSTH window start/end relative to stimulus onset (seconds)
+    # PSTH window start/end relative to the chosen event (seconds)
     "PSTH_WINDOW_START": -0.2,
     "PSTH_WINDOW_END": 0.35,
-    # Responsive window for delay (center of mass) after stimulus onset (seconds)
+    # Responsive window for delay relative to the event (seconds)
     "RESPONSIVE_WINDOW_START": 0.02,
-    "RESPONSIVE_WINDOW_END": 0.350,
+    "RESPONSIVE_WINDOW_END": 0.15,
     # Gaussian smoothing sigma for PSTH (in bins)
     "SMOOTH_SIGMA": 1,
     # Minimum trials required to include a unit
     "MIN_TRIALS": 50,
     # Reliability window for split-half delay (seconds)
     "RELIABILITY_WINDOW_START": 0.01,
-    "RELIABILITY_WINDOW_END": 0.3,
+    "RELIABILITY_WINDOW_END": 0.15,
 }
 
 CONFIG_PLOT = {
@@ -1597,11 +1877,14 @@ CONFIG_PLOT = {
     "ATLAS_MAPPING": "Beryl",
     # Plot only good units (label == 1) or all units
     "PLOT_ONLY_GOOD_UNITS": True,
+    # Event to use for alignment and sorting
+    "PLOT_EVENT": "stimOn_times",
     # Regions to plot when region_acronyms is not provided
     "PLOT_REGIONS": ["VISp", 'ENTm'],
     # Raster plot window around trial events (seconds)
     "RASTER_WINDOW_PRE": 1,
     "RASTER_WINDOW_POST": 2,
+    "RASTER_ALIGN_TO_EVENT": True,
     "RASTER_ALIGN_TO_STIM_ON": True,
     # Single-neuron plot windows and PSTH bin size (seconds)
     "SINGLE_NEURON_RASTER_PRE": 0.5,
@@ -1611,6 +1894,7 @@ CONFIG_PLOT = {
     # Sequence raster window (seconds)
     "SEQUENCE_WINDOW_PRE": 0.5,
     "SEQUENCE_WINDOW_POST": 1.0,
+    "SEQUENCE_ALIGN_TO_EVENT": True,
     "SEQUENCE_ALIGN_TO_STIM": True,
     # Population heatmap window and style
     "POP_WINDOW_PRE": 0.5,
@@ -1652,17 +1936,17 @@ print(f"\nProcessing PID: {pid}")
 ssl, spikes, clusters, sl = load_session_data(pid, one, ba)
 pupil_features, pupil_times = load_pupil_data(sl)
 
-# Align trial-level arrays by filtering to valid stimulus onset times.
-valid_trial_mask = ~np.isnan(sl.trials.stimOn_times)
-events = sl.trials.stimOn_times[valid_trial_mask]
-contrast_left = np.abs(sl.trials.contrastLeft[valid_trial_mask])
-contrast_right = np.abs(sl.trials.contrastRight[valid_trial_mask])
-trial_contrasts = np.nanmax(np.vstack([contrast_left, contrast_right]), axis=0)
-trial_contrasts = np.where(np.isnan(trial_contrasts), 0, trial_contrasts)
+# Resolve cluster IDs for safe indexing.
+cluster_ids, cid_to_idx = build_cluster_id_map(clusters)
 
 # Map acronyms once for calculations and for plots (can be different atlas choices)
 cluster_acronyms_calc = map_acronyms(clusters, br, CONFIG_CALC["ATLAS_MAPPING"])
 cluster_acronyms_plot = map_acronyms(clusters, br, CONFIG_PLOT["ATLAS_MAPPING"])
+
+# Build event-aligned arrays for each requested event.
+events_by_name, contrasts_by_name = build_event_dicts(
+    sl, CONFIG_CALC["EVENT_NAMES"], CONFIG_CALC["MIN_TRIALS"]
+)
 
 # %% Calculations ###########################################################################
 
@@ -1670,21 +1954,24 @@ df_res = calculate_delays(
     spikes,
     clusters,
     cluster_acronyms_calc,
-    events,
-    trial_contrasts,
+    events_by_name,
+    contrasts_by_name,
     CONFIG_CALC,
     path_data_processed,
     pid,
+    cid_to_idx,
 )
 df_reliability = calculate_delay_reliability(
     spikes,
     clusters,
     cluster_acronyms_calc,
-    events,
-    trial_contrasts,
+    events_by_name,
+    contrasts_by_name,
     CONFIG_CALC,
     path_data_processed,
     pid,
+    cid_to_idx,
+    df_res=df_res,
 )
 
 # %% Select Trial and Unit to Plot ###########################################################
@@ -1697,6 +1984,7 @@ single_neuron_id = 559
 plot_trial_raster(
     spikes,
     clusters,
+    cluster_ids,
     cluster_acronyms_plot,
     sl,
     pupil_features,
@@ -1727,6 +2015,7 @@ plot_single_neuron(
     spikes,
     clusters,
     cluster_acronyms_plot,
+    cid_to_idx,
     df_res,
     CONFIG_PLOT,
     save_flag=True,
@@ -1751,6 +2040,7 @@ plot_sequence_raster(
     sl,
     spikes,
     clusters,
+    cluster_ids,
     cluster_acronyms_plot,
     df_res,
     CONFIG_PLOT,
@@ -1766,6 +2056,7 @@ plot_population_sorted(
     sl,
     spikes,
     clusters,
+    cluster_ids,
     cluster_acronyms_plot,
     df_res,
     CONFIG_PLOT,
@@ -1779,6 +2070,7 @@ plot_population_PSTH_sorted(
     sl,
     spikes,
     clusters,
+    cluster_ids,
     cluster_acronyms_plot,
     df_res,
     CONFIG_PLOT,
