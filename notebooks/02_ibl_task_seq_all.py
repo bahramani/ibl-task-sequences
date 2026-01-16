@@ -210,7 +210,7 @@ plot_utils.plot_delay_reliability(
 
 # %% Single Neuron Plots ###########################################################################
 
-# single_neuron_id = 725
+single_neuron_id = 201
 
 plot_utils.plot_single_neuron(
     sl,
