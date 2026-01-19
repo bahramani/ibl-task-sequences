@@ -911,6 +911,9 @@ def plot_population_sorted(
     if len(region_acronyms) == 1:
         axes = [axes]
 
+    # Store sorted cluster information for each region
+    region_sorted_info = {}
+
     for ax, region in zip(axes, region_acronyms):
         try:
             region_mask = np.char.startswith(cluster_acronyms_str, region)
@@ -1034,6 +1037,9 @@ def plot_population_sorted(
         ax.set_xlim(-window_pre, window_post)
         ax.set_ylim(n_neurons, 0)
 
+        # Store sorted cluster information for this region
+        region_sorted_info[region] = df_sorted
+
     axes[-1].set_xlabel(f"Time from {event_label(align_event)} (s)", fontsize=12)
 
     plt.tight_layout()
@@ -1049,6 +1055,24 @@ def plot_population_sorted(
         print(f"Population heatmap saved to: {save_path}")
 
     plt.show()
+
+    # Print sorted cluster IDs for each region
+    print("\n" + "="*80)
+    print("SORTED CLUSTER IDs BY REGION (sorted by delay)")
+    print("="*80)
+    for region, df_sorted in region_sorted_info.items():
+        print(f"\n{region} ({len(df_sorted)} neurons):")
+        print("-" * 80)
+        if len(df_sorted) > 0:
+            for idx, row in df_sorted.iterrows():
+                delay_val = row["delay"]
+                if pd.notna(delay_val):
+                    print(f"  Position {idx:3d}: Cluster ID {int(row['cluster_id']):5d} | Delay: {delay_val*1000:6.2f} ms")
+                else:
+                    print(f"  Position {idx:3d}: Cluster ID {int(row['cluster_id']):5d} | Delay: N/A (unresponsive)")
+        else:
+            print("  No neurons found")
+    print("="*80 + "\n")
 
 def plot_population_PSTH_sorted(
     sl,
