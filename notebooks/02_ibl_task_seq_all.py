@@ -1,42 +1,5 @@
 # %% Imports
-import sys
-import os
-from pathlib import Path
 
-# --- ROBUST PATH SETUP ---
-# 1. Get the folder containing THIS file (notebooks/)
-# This handles both "Run as Script" (__file__) and "Run as Notebook" cases
-# try:
-#     script_dir = Path(__file__).resolve().parent
-# except NameError:
-#     script_dir = Path.cwd()
-#
-# # 2. Go up one level to the project root (SeqProject2026/)
-# project_root = script_dir.parent
-#
-# # 3. Add to sys.path if not already there
-# if str(project_root) not in sys.path:
-#     sys.path.append(str(project_root))
-#     print(f"Project root added to path: {project_root}")
-#
-# # Double check that 'utils' is actually found there
-# if not (project_root / "utils").exists():
-#     print("WARNING: 'utils' folder not found at the calculated path!")
-# -------------------------
-
-# Enable autoreload
-# try:
-#     from IPython import get_ipython
-#     if get_ipython() is not None:
-#         %load_ext autoreload
-#         %autoreload 2
-# except ImportError:
-#     pass
-
-import numpy as np
-from iblatlas.atlas import AllenAtlas
-
-# Now these will work
 import utils.io as io_utils
 import utils.analysis as ana_utils
 import utils.plotting as plot_utils

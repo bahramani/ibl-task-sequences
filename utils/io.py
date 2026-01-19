@@ -25,6 +25,7 @@ def init_one(ibl_cache):
             base_url="https://openalyx.internationalbrainlab.org",
             password="international",
             silent=True,
+            mode='remote',
             cache_dir=ibl_cache,
         )
         print("ONE API initialized.")
