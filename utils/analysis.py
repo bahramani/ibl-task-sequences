@@ -495,6 +495,7 @@ def compute_population_coupling(
                 "region",
                 "coupling_delay_ms",
                 "coupling_strength",
+                "stpr_curve",
                 "sorting_number",
             ]
         )
@@ -541,7 +542,7 @@ def compute_population_coupling(
         smooth_sigma_bins = 0
 
     results = []
-    for cid in cluster_ids:
+    for cid in tqdm(cluster_ids, desc="stPR coupling", unit="cluster"):
         neuron_spikes = spike_times[spike_clusters == cid]
         if len(neuron_spikes) == 0:
             results.append(
@@ -550,6 +551,7 @@ def compute_population_coupling(
                     "region": region_lookup.get(cid, "NA"),
                     "coupling_delay_ms": np.nan,
                     "coupling_strength": np.nan,
+                    "stpr_curve": [],
                 }
             )
             continue
@@ -582,6 +584,7 @@ def compute_population_coupling(
                     "region": region_lookup.get(cid, "NA"),
                     "coupling_delay_ms": np.nan,
                     "coupling_strength": np.nan,
+                    "stpr_curve": [],
                 }
             )
             continue
@@ -592,8 +595,12 @@ def compute_population_coupling(
 
         stpr_z = (stpr - pop_mean) / pop_std
         peak_idx = int(np.argmax(stpr_z))
-        coupling_delay_ms = float(lags_ms[peak_idx])
         coupling_strength = float(stpr_z[peak_idx])
+        stpr_sum = np.sum(stpr_z)
+        if stpr_sum != 0:
+            coupling_delay_ms = float(np.sum(lags_ms * stpr_z) / stpr_sum)
+        else:
+            coupling_delay_ms = float(lags_ms[peak_idx])
 
         results.append(
             {
@@ -601,6 +608,7 @@ def compute_population_coupling(
                 "region": region_lookup.get(cid, "NA"),
                 "coupling_delay_ms": coupling_delay_ms,
                 "coupling_strength": coupling_strength,
+                "stpr_curve": stpr_z.tolist(),
             }
         )
 

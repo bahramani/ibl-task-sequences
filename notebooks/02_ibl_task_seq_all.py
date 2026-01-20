@@ -5,11 +5,6 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path.cwd().parent))  # if notebook is in /notebooks/
 
-import importlib
-
-if not hasattr(ana_utils, "compute_population_coupling"):
-    ana_utils = importlib.reload(ana_utils)
-
 from utils.io import setup_paths, init_one, prepare_region_dirs, map_acronyms, load_session_data, build_cluster_id_map, load_pupil_data
 import utils.analysis as ana_utils
 import utils.plotting as plot_utils
@@ -31,6 +26,8 @@ from one.api import ONE
 from brainbox.io.one import SpikeSortingLoader, SessionLoader
 from iblatlas.atlas import AllenAtlas
 from iblatlas.regions import BrainRegions
+
+
 
 # %% Parameters ##############################################################################
 
@@ -216,7 +213,6 @@ df_reliability = ana_utils.calculate_delay_reliability(
     df_res=df_res,
 )
 # %%
-from utils.analysis import compute_population_coupling
 if CONFIG_CALC["CALC_SPONT"] and spikes_spont is not None:
     coupling_cluster_ids = (
         good_cluster_ids if CONFIG_CALC["CALC_ONLY_GOOD_UNITS"] else cluster_ids
@@ -230,7 +226,6 @@ if CONFIG_CALC["CALC_SPONT"] and spikes_spont is not None:
     )
 
 # %% Select Trial and Unit to Plot ###########################################################
-
 trial_idx = 79
 single_neuron_id = 559
 
