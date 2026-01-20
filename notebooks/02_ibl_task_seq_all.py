@@ -1,17 +1,11 @@
 # %% Imports
-import os
 from pathlib import Path
-import pandas as pd
-import numpy as np
+
 
 import utils.io as io_utils
 import utils.analysis as ana_utils
 import utils.plotting as plot_utils
 
-from one.api import ONE
-from brainbox.io.one import SpikeSortingLoader, SessionLoader
-from iblatlas.atlas import AllenAtlas
-from iblatlas.regions import BrainRegions
 
 # %% Parameters ##############################################################################
 
@@ -20,17 +14,12 @@ CONFIG_CALC = {
     "ATLAS_MAPPING": "Beryl",
     # Run calculations only on good units (label == 1) or on all units
     "CALC_ONLY_GOOD_UNITS": True,
-    # Download the spontaneous data
-    "CALC_SPONT": True,
-    "LOAD_PUPIL": True,
-    "LOAD_WHEEL": True,
-    "LOAD_POSE": True,
     # Events to compute delays for
     "EVENT_NAMES": ["stimOn_times", "firstMovement_times", "response_times", "feedback_times"],
     # Delay calculation method: "center_of_mass", "psth_peak", or "tfs"
     "DELAY_METHOD": "center_of_mass",
     # Values treated as 100% contrast for the TFS method
-    #"FULL_CONTRAST_VALUES": (1.0, 100.0),
+    "FULL_CONTRAST_VALUES": (1.0, 100.0),
     # PSTH bin width (seconds)
     "BIN_SIZE": 0.005,
     # Baseline window duration before the event (seconds)
@@ -89,16 +78,14 @@ CONFIG_PLOT = {
 base_path = Path(r"C:/Users/Experiment/Documents/Amirreza/SeqProject2026")
 path_data, path_fig, path_data_processed, ibl_cache = io_utils.setup_paths(base_path)
 print(f"Directories ready. Cache: {ibl_cache}")
-# %%
-one = ONE(
-    base_url='https://openalyx.internationalbrainlab.org',
-    password="international",
-    silent=True,
-    mode='remote',
-    cache_dir=ibl_cache,
-)
 
-# Great for CP and MOp: 
+one = io_utils.init_one(ibl_cache)
+
+
+ba, br, beryl_acronyms, hier_scores = io_utils.prepare_region_dirs(path_data)
+
+
+# Great for CP and MOp:
 # pid = '26118c10-35dd-4ab1-9f0f-b9a89a1da070'
 
 # Main one for VISp and EnTm:
@@ -106,14 +93,17 @@ pid = "c9664185-d3fd-4e0e-89cf-77c402038938"
 
 # The one that is not working well:
 # pid = # '3d3d5a5e-df26-43ee-80b6-2d72d85668a5'
-
 print(f"\nProcessing PID: {pid}")
 
-data = io_utils.load_session_data(one, pid, CONFIG_CALC)
+ssl, spikes, clusters, sl = io_utils.load_session_data(pid, one, ba)
+pupil_features, pupil_times = io_utils.load_pupil_data(sl)
 
+# Resolve cluster IDs for safe indexing.
+cluster_ids, cid_to_idx = io_utils.build_cluster_id_map(clusters)
 
-
-# %%
+# Map acronyms once for calculations and for plots (can be different atlas choices)
+cluster_acronyms_calc = io_utils.map_acronyms(clusters, br, CONFIG_CALC["ATLAS_MAPPING"])
+cluster_acronyms_plot = io_utils.map_acronyms(clusters, br, CONFIG_PLOT["ATLAS_MAPPING"])
 
 # Build event-aligned arrays for each requested event.
 events_by_name, contrasts_by_name = ana_utils.build_event_dicts(
