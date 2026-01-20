@@ -864,6 +864,7 @@ def plot_population_sorted(
     path_fig,
     pid,
     df_coupling=None,
+    df_rastermap=None,
     region_acronyms=None,
 ):
     """Plot population heatmaps sorted by delay with delay markers."""
@@ -885,6 +886,7 @@ def plot_population_sorted(
     cmap_name = config_plot["POP_CMAP_NAME"]
     normalize = config_plot["POP_NORMALIZE"]
     sort_by_spont = config_plot.get("SORT_BY_SPONT", False)
+    sort_by_rastermap = config_plot.get("SORT_BY_RASTERMAP", False)
 
     try:
         if hasattr(clusters, "metrics") and "label" in clusters.metrics.columns:
@@ -947,7 +949,23 @@ def plot_population_sorted(
             df_region["delay"] = np.nan
 
         sort_label = "Latency"
-        if sort_by_spont:
+        if sort_by_rastermap:
+            if df_rastermap is None or len(df_rastermap) == 0:
+                print(
+                    "Warning: df_rastermap not found. Falling back to latency sorting."
+                )
+            elif "rastermap_sort" not in df_rastermap.columns:
+                print(
+                    "Warning: rastermap_sort not found in df_rastermap. Falling back to latency sorting."
+                )
+            else:
+                df_region = df_region.merge(
+                    df_rastermap[["cluster_id", "rastermap_sort"]],
+                    on="cluster_id",
+                    how="left",
+                )
+                sort_label = "Rastermap"
+        elif sort_by_spont:
             if df_coupling is None or len(df_coupling) == 0:
                 print(
                     "Warning: df_coupling not found. Falling back to latency sorting."
@@ -964,7 +982,11 @@ def plot_population_sorted(
                 )
                 sort_label = "Spontaneous Coupling"
 
-        if sort_label == "Spontaneous Coupling":
+        if sort_label == "Rastermap":
+            df_sorted = df_region.sort_values(
+                by="rastermap_sort", ascending=True, na_position="last"
+            ).reset_index(drop=True)
+        elif sort_label == "Spontaneous Coupling":
             df_sorted = df_region.sort_values(
                 by="sorting_number", ascending=True, na_position="last"
             ).reset_index(drop=True)
@@ -1084,7 +1106,9 @@ def plot_population_sorted(
 
     # Print sorted cluster IDs for each region
     print("\n" + "="*80)
-    if sort_by_spont and df_coupling is not None and "sorting_number" in df_coupling:
+    if sort_by_rastermap and df_rastermap is not None and "rastermap_sort" in df_rastermap:
+        print("SORTED CLUSTER IDs BY REGION (sorted by Rastermap)")
+    elif sort_by_spont and df_coupling is not None and "sorting_number" in df_coupling:
         print("SORTED CLUSTER IDs BY REGION (sorted by spontaneous coupling)")
     else:
         print("SORTED CLUSTER IDs BY REGION (sorted by delay)")
@@ -1262,6 +1286,7 @@ def plot_time_window_raster(
         sort_mode="default",
         df_res=None,
         df_coupling=None,
+        df_rastermap=None,
 ):
     """Plot a session-time raster for a specified time window with behavioral signals."""
     if t_start >= t_end:
@@ -1357,6 +1382,21 @@ def plot_time_window_raster(
                 by="sorting_number", ascending=True, na_position="last"
             ).reset_index(drop=True)
             sort_label = "Spontaneous Coupling"
+    elif sort_mode_normalized == "rastermap":
+        if df_rastermap is None or "rastermap_sort" not in df_rastermap.columns:
+            print(
+                "Rastermap sorting unavailable. Falling back to depth sorting."
+            )
+        else:
+            df_units = df_units.merge(
+                df_rastermap[["cluster_id", "rastermap_sort"]],
+                on="cluster_id",
+                how="left",
+            )
+            df_units = df_units.sort_values(
+                by="rastermap_sort", ascending=True, na_position="last"
+            ).reset_index(drop=True)
+            sort_label = "Rastermap"
     else:
         if sort_mode_normalized != "default":
             print(f"Unknown sort mode '{sort_mode}'. Falling back to depth sorting.")
