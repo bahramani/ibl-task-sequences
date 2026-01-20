@@ -6,6 +6,23 @@ from utils.io import setup_paths, init_one, prepare_region_dirs, map_acronyms, l
 import utils.analysis as ana_utils
 import utils.plotting as plot_utils
 
+import sys
+import os
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+from scipy.signal import butter, filtfilt
+from scipy.ndimage import gaussian_filter1d
+
+import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
+from matplotlib.ticker import MaxNLocator
+
+from one.api import ONE
+from brainbox.io.one import SpikeSortingLoader, SessionLoader
+from iblatlas.atlas import AllenAtlas
+from iblatlas.regions import BrainRegions
 
 # %% Parameters ##############################################################################
 
@@ -14,6 +31,8 @@ CONFIG_CALC = {
     "ATLAS_MAPPING": "Beryl",
     # Run calculations only on good units (label == 1) or on all units
     "CALC_ONLY_GOOD_UNITS": True,
+    # Load spontaneous data
+    "CALC_SPONT": True,
     # Events to compute delays for
     "EVENT_NAMES": ["stimOn_times", "firstMovement_times", "response_times", "feedback_times"],
     # Delay calculation method: "center_of_mass", "psth_peak", or "tfs"
@@ -108,6 +127,53 @@ cluster_acronyms_plot = map_acronyms(clusters, br, CONFIG_PLOT["ATLAS_MAPPING"])
 events_by_name, contrasts_by_name = ana_utils.build_event_dicts(
     sl, CONFIG_CALC["EVENT_NAMES"], CONFIG_CALC["MIN_TRIALS"]
 )
+
+eid = one.pid2eid(pid)[0]
+
+# %% Load spontaneous activity periods
+if CONFIG_CALC["CALC_SPONT"]:
+    print("\nLoading spontaneous activity period...")
+    try:
+        passive_times = one.load_dataset(eid, '*passivePeriods*', collection='alf')
+        spont_intervals = np.array([[passive_times['spontaneousActivity'][0],
+                                     passive_times['spontaneousActivity'][1]]])
+        spont_duration_sec = spont_intervals[0][1] - spont_intervals[0][0]
+        spont_duration_min = spont_duration_sec / 60
+        print(f"Spontaneous interval: {spont_intervals[0][0]:.2f}s to {spont_intervals[0][1]:.2f}s "
+              f"(duration: {spont_duration_sec:.2f}s = {spont_duration_min:.2f} min)")
+
+        last_feedback_time = sl.trials['feedback_times'].iloc[-1]
+        print(f"Last feedback event time: {last_feedback_time:.2f}s")
+
+        # Filter spikes to only include spontaneous period
+        valid_time_mask = np.zeros(len(spikes['times']), dtype=bool)
+        for start, end in spont_intervals:
+            valid_time_mask |= ((spikes['times'] >= start) & (spikes['times'] <= end))
+
+        spikes_spont = {key: val[valid_time_mask] for key, val in spikes.items()}
+        print(f"Spontaneous spikes: {len(spikes_spont['times'])} / {len(spikes['times'])} total spikes")
+
+        # Filter for good units if specified
+        if CONFIG_CALC["CALC_ONLY_GOOD_UNITS"]:
+            good_cluster_ids = clusters['cluster_id'][clusters['label'] == 1]
+            good_spk_mask = np.isin(spikes_spont['clusters'], good_cluster_ids)
+            spikes_spont_good = {key: val[good_spk_mask] for key, val in spikes_spont.items()}
+
+            cluster_good_mask = np.isin(clusters['cluster_id'], good_cluster_ids)
+            clusters_good = pd.DataFrame({key: val[cluster_good_mask] for key, val in clusters.items()})
+
+            print(f"Good units in spontaneous period: {len(np.unique(spikes_spont_good['clusters']))} units, "
+                  f"{len(spikes_spont_good['times'])} spikes")
+        else:
+            spikes_spont_good = spikes_spont
+            clusters_good = clusters
+
+    except Exception as e:
+        print(f"Could not load spontaneous period: {e}")
+        spont_intervals = None
+        spikes_spont = None
+        spikes_spont_good = None
+
 
 # %% Calculations ###########################################################################
 
