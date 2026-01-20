@@ -80,7 +80,6 @@ path_data, path_fig, path_data_processed, ibl_cache = io_utils.setup_paths(base_
 print(f"Directories ready. Cache: {ibl_cache}")
 
 one = io_utils.init_one(ibl_cache)
-io_utils.
 
 ba, br, beryl_acronyms, hier_scores = io_utils.prepare_region_dirs(path_data)
 
