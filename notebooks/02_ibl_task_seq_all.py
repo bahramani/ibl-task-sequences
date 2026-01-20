@@ -2,7 +2,7 @@
 from pathlib import Path
 
 
-import utils.io as io_utils
+from utils.io import setup_paths, init_one, prepare_region_dirs, map_acronyms, load_session_data, build_cluster_id_map, load_pupil_data
 import utils.analysis as ana_utils
 import utils.plotting as plot_utils
 
@@ -76,12 +76,12 @@ CONFIG_PLOT = {
 # %% Loading Data ##############################################################################
 
 base_path = Path(r"C:/Users/Experiment/Documents/Amirreza/SeqProject2026")
-path_data, path_fig, path_data_processed, ibl_cache = io_utils.setup_paths(base_path)
+path_data, path_fig, path_data_processed, ibl_cache = setup_paths(base_path)
 print(f"Directories ready. Cache: {ibl_cache}")
 
-one = io_utils.init_one(ibl_cache)
+one = init_one(ibl_cache)
 
-ba, br, beryl_acronyms, hier_scores = io_utils.prepare_region_dirs(path_data)
+ba, br, beryl_acronyms, hier_scores = prepare_region_dirs(path_data)
 
 
 # Great for CP and MOp:
@@ -94,15 +94,15 @@ pid = "c9664185-d3fd-4e0e-89cf-77c402038938"
 # pid = # '3d3d5a5e-df26-43ee-80b6-2d72d85668a5'
 print(f"\nProcessing PID: {pid}")
 
-ssl, spikes, clusters, sl = io_utils.load_session_data(pid, one, ba)
-pupil_features, pupil_times = io_utils.load_pupil_data(sl)
+ssl, spikes, clusters, sl = load_session_data(pid, one, ba)
+pupil_features, pupil_times = load_pupil_data(sl)
 
 # Resolve cluster IDs for safe indexing.
-cluster_ids, cid_to_idx = io_utils.build_cluster_id_map(clusters)
+cluster_ids, cid_to_idx = build_cluster_id_map(clusters)
 
 # Map acronyms once for calculations and for plots (can be different atlas choices)
-cluster_acronyms_calc = io_utils.map_acronyms(clusters, br, CONFIG_CALC["ATLAS_MAPPING"])
-cluster_acronyms_plot = io_utils.map_acronyms(clusters, br, CONFIG_PLOT["ATLAS_MAPPING"])
+cluster_acronyms_calc = map_acronyms(clusters, br, CONFIG_CALC["ATLAS_MAPPING"])
+cluster_acronyms_plot = map_acronyms(clusters, br, CONFIG_PLOT["ATLAS_MAPPING"])
 
 # Build event-aligned arrays for each requested event.
 events_by_name, contrasts_by_name = ana_utils.build_event_dicts(
