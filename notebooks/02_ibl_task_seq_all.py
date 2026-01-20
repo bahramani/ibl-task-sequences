@@ -353,11 +353,11 @@ plot_utils.plot_time_window_raster(
     pid,
     path_fig,
     save_figure=True,
-    t_start=4949.0,
-    t_end=4955.0,
-    region_acronyms=["ENTm"],
+    t_start=4880.0,
+    t_end=4890.0,
+    region_acronyms=["VISp"],
     df_res=df_res,
     df_coupling=df_coupling,
-    sort_mode="default"
+    sort_mode="dealy"
     )
 # dealy spont default
