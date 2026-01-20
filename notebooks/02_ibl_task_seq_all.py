@@ -1,6 +1,9 @@
 # %% Imports
 from pathlib import Path
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path.cwd().parent))  # if notebook is in /notebooks/
 
 from utils.io import setup_paths, init_one, prepare_region_dirs, map_acronyms, load_session_data, build_cluster_id_map, load_pupil_data
 import utils.analysis as ana_utils
@@ -56,6 +59,12 @@ CONFIG_CALC = {
     # Reliability window for split-half delay (seconds)
     "RELIABILITY_WINDOW_START": 0.01,
     "RELIABILITY_WINDOW_END": 0.15,
+    # Spike-triggered population coupling settings
+    "STPR_BIN_SIZE": 0.001,
+    "STPR_WINDOW_MS": 80,
+    "STPR_SMOOTH_SIGMA_MS": 5,
+    # Use only good units when building population rate for stPR
+    "STPR_POP_USE_GOOD_UNITS": True,
 }
 
 CONFIG_PLOT = {
@@ -131,6 +140,7 @@ events_by_name, contrasts_by_name = ana_utils.build_event_dicts(
 eid = one.pid2eid(pid)[0]
 
 # %% Load spontaneous activity periods
+good_cluster_ids = None
 if CONFIG_CALC["CALC_SPONT"]:
     print("\nLoading spontaneous activity period...")
     try:
@@ -200,6 +210,18 @@ df_reliability = ana_utils.calculate_delay_reliability(
     cid_to_idx,
     df_res=df_res,
 )
+
+if CONFIG_CALC["CALC_SPONT"] and spikes_spont is not None:
+    coupling_cluster_ids = (
+        good_cluster_ids if CONFIG_CALC["CALC_ONLY_GOOD_UNITS"] else cluster_ids
+    )
+    df_coupling = ana_utils.compute_population_coupling(
+        spikes_spont,
+        clusters,
+        cluster_acronyms_calc,
+        CONFIG_CALC,
+        cluster_ids=coupling_cluster_ids,
+    )
 
 # %% Select Trial and Unit to Plot ###########################################################
 

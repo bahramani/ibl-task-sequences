@@ -467,3 +467,149 @@ def calculate_delay_reliability(
         f"Found {len(df_reliability)} responsive neurons (both halves). Saved to {output_path}."
     )
     return df_reliability
+
+def compute_population_coupling(
+    spikes,
+    clusters,
+    cluster_acronyms,
+    config,
+    cluster_ids=None,
+):
+    """
+    Compute spike-triggered population coupling metrics for each neuron.
+
+    The population activity is defined as the summed firing rate of all neurons
+    (optionally restricted to good units) excluding the neuron under consideration.
+    Coupling strength is the peak of the z-scored spike-triggered population rate,
+    and coupling delay is the lag (ms) at which this peak occurs.
+    """
+    bin_size = config.get("STPR_BIN_SIZE", 0.001)
+    window_ms = config.get("STPR_WINDOW_MS", 80)
+    smooth_sigma_ms = config.get("STPR_SMOOTH_SIGMA_MS", 5)
+    use_good_population = config.get("STPR_POP_USE_GOOD_UNITS", False)
+
+    if spikes is None or len(spikes.get("times", [])) == 0:
+        return pd.DataFrame(
+            columns=[
+                "cluster_id",
+                "region",
+                "coupling_delay_ms",
+                "coupling_strength",
+                "sorting_number",
+            ]
+        )
+
+    spike_times = np.asarray(spikes["times"])
+    spike_clusters = np.asarray(spikes["clusters"])
+
+    if cluster_ids is None:
+        cluster_ids = np.asarray(clusters["cluster_id"])
+    else:
+        cluster_ids = np.asarray(cluster_ids)
+
+    if use_good_population and "label" in clusters:
+        population_cluster_ids = clusters["cluster_id"][clusters["label"] == 1]
+    else:
+        population_cluster_ids = clusters["cluster_id"]
+
+    population_cluster_ids = np.asarray(population_cluster_ids)
+    population_cluster_set = set(population_cluster_ids.tolist())
+    region_lookup = dict(zip(clusters["cluster_id"], cluster_acronyms))
+
+    start_time = spike_times.min()
+    end_time = spike_times.max()
+    bin_edges = np.arange(start_time, end_time + bin_size, bin_size)
+    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+    bins_count = len(bin_centers)
+
+    cluster_to_counts = {}
+    for cid in np.unique(spike_clusters):
+        cluster_spikes = spike_times[spike_clusters == cid]
+        cluster_to_counts[cid], _ = np.histogram(cluster_spikes, bins=bin_edges)
+
+    population_counts = np.zeros(bins_count, dtype=float)
+    for cid in population_cluster_ids:
+        population_counts += cluster_to_counts.get(cid, 0)
+
+    bin_size_ms = bin_size * 1000
+    window_bins = int(round(window_ms / bin_size_ms))
+    lags_ms = np.arange(-window_bins, window_bins + 1) * bin_size_ms
+
+    if smooth_sigma_ms > 0:
+        smooth_sigma_bins = smooth_sigma_ms / bin_size_ms
+    else:
+        smooth_sigma_bins = 0
+
+    results = []
+    for cid in cluster_ids:
+        neuron_spikes = spike_times[spike_clusters == cid]
+        if len(neuron_spikes) == 0:
+            results.append(
+                {
+                    "cluster_id": cid,
+                    "region": region_lookup.get(cid, "NA"),
+                    "coupling_delay_ms": np.nan,
+                    "coupling_strength": np.nan,
+                }
+            )
+            continue
+
+        neuron_counts = cluster_to_counts.get(cid, np.zeros_like(population_counts))
+        if cid in population_cluster_set:
+            population_counts_excl = population_counts - neuron_counts
+        else:
+            population_counts_excl = population_counts
+
+        population_rate = population_counts_excl / bin_size
+        pop_mean = np.mean(population_rate)
+        pop_std = np.std(population_rate)
+        if pop_std == 0:
+            pop_std = 1.0
+
+        segments = []
+        for spike_time in neuron_spikes:
+            bin_idx = np.searchsorted(bin_edges, spike_time, side="right") - 1
+            start_idx = bin_idx - window_bins
+            end_idx = bin_idx + window_bins + 1
+            if start_idx < 0 or end_idx > bins_count:
+                continue
+            segments.append(population_rate[start_idx:end_idx])
+
+        if len(segments) == 0:
+            results.append(
+                {
+                    "cluster_id": cid,
+                    "region": region_lookup.get(cid, "NA"),
+                    "coupling_delay_ms": np.nan,
+                    "coupling_strength": np.nan,
+                }
+            )
+            continue
+
+        stpr = np.mean(np.vstack(segments), axis=0)
+        if smooth_sigma_bins > 0:
+            stpr = gaussian_filter1d(stpr, sigma=smooth_sigma_bins)
+
+        stpr_z = (stpr - pop_mean) / pop_std
+        peak_idx = int(np.argmax(stpr_z))
+        coupling_delay_ms = float(lags_ms[peak_idx])
+        coupling_strength = float(stpr_z[peak_idx])
+
+        results.append(
+            {
+                "cluster_id": cid,
+                "region": region_lookup.get(cid, "NA"),
+                "coupling_delay_ms": coupling_delay_ms,
+                "coupling_strength": coupling_strength,
+            }
+        )
+
+    df = pd.DataFrame(results)
+    valid_mask = df["coupling_delay_ms"].notna()
+    sorted_indices = df.loc[valid_mask, "coupling_delay_ms"].sort_values().index
+    sorting_numbers = pd.Series(np.arange(len(sorted_indices)), index=sorted_indices)
+    df["sorting_number"] = np.nan
+    df.loc[sorted_indices, "sorting_number"] = sorting_numbers
+    df["sorting_number"] = df["sorting_number"].astype("Int64")
+
+    return df
