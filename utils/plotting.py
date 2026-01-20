@@ -1309,9 +1309,17 @@ def plot_time_window_raster(
         print("No units found for the requested regions and quality filters.")
         return
 
+    align_event = config_plot.get("PLOT_EVENT", "stimOn_times")
+    if align_event not in sl.trials.keys():
+        print(f"Warning: Event '{align_event}' not found. Falling back to stimOn_times.")
+        align_event = "stimOn_times"
+
+    sort_mode_normalized = sort_mode.lower().strip() if isinstance(sort_mode, str) else "default"
+    if sort_mode_normalized == "dealy":
+        sort_mode_normalized = "delay"
+
     sort_label = "Depth"
-    if sort_mode == "delay":
-        align_event = config_plot.get("PLOT_EVENT", "stimOn_times")
+    if sort_mode_normalized == "delay":
         delay_col = delay_column_name(align_event)
         if df_res is None or delay_col not in df_res.columns:
             print(f"Delay column '{delay_col}' not found. Falling back to depth sorting.")
@@ -1321,11 +1329,20 @@ def plot_time_window_raster(
                 on="cluster_id",
                 how="left",
             )
-            df_units = df_units.sort_values(
-                by="delay", ascending=True, na_position="last"
-            ).reset_index(drop=True)
-            sort_label = f"Delay ({event_label(align_event)})"
-    elif sort_mode == "spont":
+            if df_units["delay"].isna().all():
+                print(
+                    f"Delay column '{delay_col}' has no values for selected units. "
+                    "Falling back to depth sorting."
+                )
+                df_units = df_units.sort_values(
+                    by="depth", ascending=True
+                ).reset_index(drop=True)
+            else:
+                df_units = df_units.sort_values(
+                    by="delay", ascending=True, na_position="last"
+                ).reset_index(drop=True)
+                sort_label = f"Delay ({event_label(align_event)})"
+    elif sort_mode_normalized == "spont":
         if df_coupling is None or "sorting_number" not in df_coupling.columns:
             print(
                 "Spontaneous coupling sorting unavailable. Falling back to depth sorting."
@@ -1341,6 +1358,8 @@ def plot_time_window_raster(
             ).reset_index(drop=True)
             sort_label = "Spontaneous Coupling"
     else:
+        if sort_mode_normalized != "default":
+            print(f"Unknown sort mode '{sort_mode}'. Falling back to depth sorting.")
         df_units = df_units.sort_values(by="depth", ascending=True).reset_index(drop=True)
 
     unique_regions = df_units["acronym"].unique()
@@ -1390,17 +1409,22 @@ def plot_time_window_raster(
             pupil_t = pt[mask_pupil]
             pupil_diam = pd_vals[mask_pupil]
 
-    stim_times = np.asarray(sl.trials.get("stimOn_times", []))
-    first_move_times = np.asarray(sl.trials.get("firstMovement_times", []))
-    feedback_times = np.asarray(sl.trials.get("feedback_times", []))
-
-    stim_window = stim_times[(stim_times >= t_start) & (stim_times <= t_end)]
-    first_move_window = first_move_times[
-        (first_move_times >= t_start) & (first_move_times <= t_end)
-        ]
-    feedback_window = feedback_times[
-        (feedback_times >= t_start) & (feedback_times <= t_end)
-        ]
+    event_style_map = {
+        "stimOn_times": ("Stim On", "blue"),
+        "firstMovement_times": ("First Move", "green"),
+        "response_times": ("Response", "purple"),
+        "feedback_times": ("Feedback", "red"),
+    }
+    event_windows = {}
+    for event_name, (label, color) in event_style_map.items():
+        if event_name not in sl.trials.keys():
+            continue
+        event_times = np.asarray(sl.trials.get(event_name, []))
+        event_windows[event_name] = (
+            event_times[(event_times >= t_start) & (event_times <= t_end)],
+            label,
+            color,
+        )
 
     fig = plt.figure(figsize=(12, 12))
     gs = gridspec.GridSpec(
@@ -1424,12 +1448,16 @@ def plot_time_window_raster(
                 linewidth=0.8,
             )
 
-    for t_event in stim_window:
-        ax_raster.axvline(t_event, color="blue", linestyle="-", linewidth=2)
-    for t_event in first_move_window:
-        ax_raster.axvline(t_event, color="green", linestyle="-", linewidth=2)
-    for t_event in feedback_window:
-        ax_raster.axvline(t_event, color="red", linestyle="-", linewidth=2)
+    for event_name, (times, _label, color) in event_windows.items():
+        is_primary = event_name == align_event
+        for t_event in times:
+            ax_raster.axvline(
+                t_event,
+                color=color,
+                linestyle="-" if is_primary else "--",
+                linewidth=2 if is_primary else 1,
+                alpha=1.0 if is_primary else 0.5,
+            )
 
     plot_title = (
         f"Window {t_start:.2f}-{t_end:.2f}s | Regions: {', '.join(region_acronyms)} | "
@@ -1464,12 +1492,15 @@ def plot_time_window_raster(
     ax_wheel = fig.add_subplot(gs[1, 0], sharex=ax_raster)
     ax_wheel.plot(wheel_t, wheel_pos, color="black")
     ax_wheel.set_ylabel("Wheel (rad)")
-    for t_event in stim_window:
-        ax_wheel.axvline(t_event, color="blue", linewidth=1.5)
-    for t_event in first_move_window:
-        ax_wheel.axvline(t_event, color="green", linewidth=1.5)
-    for t_event in feedback_window:
-        ax_wheel.axvline(t_event, color="red", linewidth=1.5)
+    for event_name, (times, _label, color) in event_windows.items():
+        is_primary = event_name == align_event
+        for t_event in times:
+            ax_wheel.axvline(
+                t_event,
+                color=color,
+                linewidth=1.5 if is_primary else 1,
+                alpha=1.0 if is_primary else 0.4,
+            )
     ax_wheel.tick_params(labelbottom=False)
 
     ax_paw = fig.add_subplot(gs[2, 0], sharex=ax_raster)
@@ -1479,12 +1510,15 @@ def plot_time_window_raster(
         ax_paw.text(0.5, 0.5, "Paw data not available", ha="center", transform=ax_paw.transAxes)
 
     ax_paw.set_ylabel("Paw (px/s)")
-    for t_event in stim_window:
-        ax_paw.axvline(t_event, color="blue", linewidth=1.5)
-    for t_event in first_move_window:
-        ax_paw.axvline(t_event, color="green", linewidth=1.5)
-    for t_event in feedback_window:
-        ax_paw.axvline(t_event, color="red", linewidth=1.5)
+    for event_name, (times, _label, color) in event_windows.items():
+        is_primary = event_name == align_event
+        for t_event in times:
+            ax_paw.axvline(
+                t_event,
+                color=color,
+                linewidth=1.5 if is_primary else 1,
+                alpha=1.0 if is_primary else 0.4,
+            )
     ax_paw.tick_params(labelbottom=False)
 
     ax_pupil = fig.add_subplot(gs[3, 0], sharex=ax_raster)
@@ -1497,27 +1531,43 @@ def plot_time_window_raster(
 
     ax_pupil.set_ylabel("Pupil (mm)")
     ax_pupil.set_xlabel("Time in session (s)")
-    for t_event in stim_window:
-        ax_pupil.axvline(t_event, color="blue", linewidth=1.5)
-    for t_event in first_move_window:
-        ax_pupil.axvline(t_event, color="green", linewidth=1.5)
-    for t_event in feedback_window:
-        ax_pupil.axvline(t_event, color="red", linewidth=1.5)
+    for event_name, (times, _label, color) in event_windows.items():
+        is_primary = event_name == align_event
+        for t_event in times:
+            ax_pupil.axvline(
+                t_event,
+                color=color,
+                linewidth=1.5 if is_primary else 1,
+                alpha=1.0 if is_primary else 0.4,
+            )
     ax_pupil.tick_params(labelbottom=True)
 
-    lines = [
-        plt.Line2D([0], [0], color="blue", linewidth=2),
-        plt.Line2D([0], [0], color="green", linewidth=2),
-        plt.Line2D([0], [0], color="red", linewidth=2),
-    ]
-    ax_raster.legend(
-        lines,
-        ["Stim On", "First Move", "Feedback"],
-        loc="upper left",
-        frameon=False,
-        bbox_to_anchor=(0, 1.15),
-        ncol=3,
-    )
+    legend_lines = []
+    legend_labels = []
+    for event_name, (times, label, color) in event_windows.items():
+        if len(times) == 0:
+            continue
+        is_primary = event_name == align_event
+        legend_lines.append(
+            plt.Line2D(
+                [0],
+                [0],
+                color=color,
+                linewidth=2 if is_primary else 1,
+                linestyle="-" if is_primary else "--",
+                alpha=1.0 if is_primary else 0.6,
+            )
+        )
+        legend_labels.append(label)
+    if legend_lines:
+        ax_raster.legend(
+            legend_lines,
+            legend_labels,
+            loc="upper left",
+            frameon=False,
+            bbox_to_anchor=(0, 1.15),
+            ncol=min(4, len(legend_lines)),
+        )
 
     if save_figure:
         region_tag = "_".join(region_acronyms)
