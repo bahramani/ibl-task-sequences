@@ -286,6 +286,7 @@ CONFIG_PLOT.update(
     {
         "PLOT_REGIONS": ['VISp', 'ENTm'],
         'PLOT_ONLY_GOOD_UNITS': True,
+        'SORT_BY_SPONT': False,
     })
 
 regions_to_plot = CONFIG_PLOT["PLOT_REGIONS"]
@@ -332,3 +333,31 @@ plot_utils.plot_population_coupling_heatmap(
     coupling_strength_thr=0.01,
     region_acronyms=regions_to_plot,
 )
+
+# %%
+CONFIG_PLOT.update(
+    {
+        'PLOT_ONLY_GOOD_UNITS': True,
+        'PLOT_EVENT': 'stimOn_times'
+    })
+
+plot_utils.plot_time_window_raster(
+    spikes,
+    clusters,
+    cluster_ids,
+    cluster_acronyms_plot,
+    sl,
+    pupil_features,
+    pupil_times,
+    CONFIG_PLOT,
+    pid,
+    path_fig,
+    save_figure=True,
+    t_start=4949.0,
+    t_end=4955.0,
+    region_acronyms=["ENTm"],
+    df_res=df_res,
+    df_coupling=df_coupling,
+    sort_mode="default"
+    )
+# dealy spont default

@@ -1243,3 +1243,287 @@ def plot_population_coupling_heatmap(
         print(f"Population coupling heatmap saved to: {save_path}")
 
     plt.show()
+
+def plot_time_window_raster(
+        spikes,
+        clusters,
+        cluster_ids,
+        cluster_acronyms,
+        sl,
+        pupil_features,
+        pupil_times,
+        config_plot,
+        pid,
+        path_fig,
+        save_figure,
+        t_start,
+        t_end,
+        region_acronyms,
+        sort_mode="default",
+        df_res=None,
+        df_coupling=None,
+):
+    """Plot a session-time raster for a specified time window with behavioral signals."""
+    if t_start >= t_end:
+        print("Invalid time window: t_start must be less than t_end.")
+        return
+
+    if region_acronyms is None:
+        region_acronyms = config_plot.get("PLOT_REGIONS", [])
+    elif isinstance(region_acronyms, str):
+        region_acronyms = [region_acronyms]
+    else:
+        region_acronyms = list(region_acronyms)
+
+    if len(region_acronyms) == 0:
+        print("No regions provided for plot_time_window_raster.")
+        return
+
+    if config_plot["PLOT_ONLY_GOOD_UNITS"]:
+        if hasattr(clusters, "label"):
+            quality_mask = clusters.label == 1
+        elif hasattr(clusters, "metrics") and "label" in clusters.metrics.columns:
+            quality_mask = clusters.metrics.label == 1
+        else:
+            quality_mask = np.ones(len(cluster_ids), dtype=bool)
+        ylabel_text = f"Good Units (n={np.sum(quality_mask)})"
+    else:
+        quality_mask = np.ones(len(cluster_ids), dtype=bool)
+        ylabel_text = f"All Units (n={np.sum(quality_mask)})"
+
+    cluster_acronyms_str = cluster_acronyms.astype(str)
+    region_mask = np.zeros(len(cluster_acronyms_str), dtype=bool)
+    for region in region_acronyms:
+        region_mask |= np.char.startswith(cluster_acronyms_str, region)
+
+    final_mask = region_mask & quality_mask
+    df_units = pd.DataFrame(
+        {
+            "cluster_id": cluster_ids[final_mask],
+            "acronym": cluster_acronyms[final_mask],
+            "depth": clusters.depths[final_mask],
+        }
+    )
+
+    if df_units.empty:
+        print("No units found for the requested regions and quality filters.")
+        return
+
+    sort_label = "Depth"
+    if sort_mode == "delay":
+        align_event = config_plot.get("PLOT_EVENT", "stimOn_times")
+        delay_col = delay_column_name(align_event)
+        if df_res is None or delay_col not in df_res.columns:
+            print(f"Delay column '{delay_col}' not found. Falling back to depth sorting.")
+        else:
+            df_units = df_units.merge(
+                df_res[["cluster_id", delay_col]].rename(columns={delay_col: "delay"}),
+                on="cluster_id",
+                how="left",
+            )
+            df_units = df_units.sort_values(
+                by="delay", ascending=True, na_position="last"
+            ).reset_index(drop=True)
+            sort_label = f"Delay ({event_label(align_event)})"
+    elif sort_mode == "spont":
+        if df_coupling is None or "sorting_number" not in df_coupling.columns:
+            print(
+                "Spontaneous coupling sorting unavailable. Falling back to depth sorting."
+            )
+        else:
+            df_units = df_units.merge(
+                df_coupling[["cluster_id", "sorting_number"]],
+                on="cluster_id",
+                how="left",
+            )
+            df_units = df_units.sort_values(
+                by="sorting_number", ascending=True, na_position="last"
+            ).reset_index(drop=True)
+            sort_label = "Spontaneous Coupling"
+    else:
+        df_units = df_units.sort_values(by="depth", ascending=True).reset_index(drop=True)
+
+    unique_regions = df_units["acronym"].unique()
+    region_colors = {reg: plt.cm.tab20(i % 20) for i, reg in enumerate(unique_regions)}
+    region_colors["void"] = "black"
+
+    mask_window = (spikes.times >= t_start) & (spikes.times <= t_end)
+    window_spike_times = spikes.times[mask_window]
+    window_spike_clusters = spikes.clusters[mask_window]
+
+    mask_wheel = (sl.wheel["times"] >= t_start) & (sl.wheel["times"] <= t_end)
+    wheel_t = sl.wheel["times"][mask_wheel]
+    wheel_pos = sl.wheel["position"][mask_wheel]
+
+    pose_t = None
+    paw_speed = None
+    if hasattr(sl, "pose") and "leftCamera" in sl.pose:
+        pose_df = sl.pose["leftCamera"]
+        if "times" in pose_df.columns:
+            pose_timestamps = pose_df["times"].values
+        else:
+            pose_timestamps = pose_df.index.values
+
+        mask_pose = (pose_timestamps >= t_start) & (pose_timestamps <= t_end)
+        pose_t = pose_timestamps[mask_pose]
+
+        paw_key = "paw_r" if "paw_r_x" in pose_df.columns else "paw_l"
+        if f"{paw_key}_x" in pose_df.columns:
+            dx = np.gradient(pose_df[f"{paw_key}_x"].values[mask_pose])
+            dy = np.gradient(pose_df[f"{paw_key}_y"].values[mask_pose])
+            dt = np.gradient(pose_t)
+            dt[dt == 0] = np.nan
+            speed_raw = np.sqrt(dx ** 2 + dy ** 2) / dt
+            paw_speed = (
+                pd.Series(speed_raw).fillna(0).rolling(window=5, center=True).mean().values
+            )
+
+    pupil_t = None
+    pupil_diam = None
+    if pupil_features is not None and pupil_times is not None:
+        diam_col = "pupilDiameter_raw"
+        if diam_col in pupil_features.columns:
+            n_frames = min(len(pupil_times), len(pupil_features))
+            pt = pupil_times[:n_frames]
+            pd_vals = pupil_features[diam_col].values[:n_frames]
+            mask_pupil = (pt >= t_start) & (pt <= t_end)
+            pupil_t = pt[mask_pupil]
+            pupil_diam = pd_vals[mask_pupil]
+
+    stim_times = np.asarray(sl.trials.get("stimOn_times", []))
+    first_move_times = np.asarray(sl.trials.get("firstMovement_times", []))
+    feedback_times = np.asarray(sl.trials.get("feedback_times", []))
+
+    stim_window = stim_times[(stim_times >= t_start) & (stim_times <= t_end)]
+    first_move_window = first_move_times[
+        (first_move_times >= t_start) & (first_move_times <= t_end)
+        ]
+    feedback_window = feedback_times[
+        (feedback_times >= t_start) & (feedback_times <= t_end)
+        ]
+
+    fig = plt.figure(figsize=(12, 12))
+    gs = gridspec.GridSpec(
+        4,
+        2,
+        width_ratios=[20, 1],
+        height_ratios=[10, 1, 1, 1],
+        wspace=0.05,
+        hspace=0.1,
+    )
+
+    ax_raster = fig.add_subplot(gs[0, 0])
+    for y_idx, row in df_units.iterrows():
+        unit_spike_times = window_spike_times[window_spike_clusters == row["cluster_id"]]
+        if len(unit_spike_times) > 0:
+            ax_raster.vlines(
+                unit_spike_times,
+                y_idx - 0.45,
+                y_idx + 0.45,
+                color="k",
+                linewidth=0.8,
+            )
+
+    for t_event in stim_window:
+        ax_raster.axvline(t_event, color="blue", linestyle="-", linewidth=2)
+    for t_event in first_move_window:
+        ax_raster.axvline(t_event, color="green", linestyle="-", linewidth=2)
+    for t_event in feedback_window:
+        ax_raster.axvline(t_event, color="red", linestyle="-", linewidth=2)
+
+    plot_title = (
+        f"Window {t_start:.2f}-{t_end:.2f}s | Regions: {', '.join(region_acronyms)} | "
+        f"Sort: {sort_label}"
+    )
+    ax_raster.set_xlim(t_start, t_end)
+    ax_raster.set_ylim(-1, len(df_units))
+    ax_raster.set_ylabel(ylabel_text)
+    ax_raster.set_title(plot_title)
+    ax_raster.tick_params(labelbottom=False)
+
+    ax_regions = fig.add_subplot(gs[0, 1])
+    y_min = 0
+    for acronym, group in df_units.groupby("acronym", sort=False):
+        count = len(group)
+        color = region_colors.get(acronym, "gray")
+        ax_regions.add_patch(plt.Rectangle((0, y_min), 1, count, color=color))
+        ax_regions.text(
+            1.2,
+            y_min + count / 2,
+            acronym,
+            va="center",
+            fontsize=9,
+            color=color,
+            fontweight="bold",
+        )
+        y_min += count
+
+    ax_regions.set_ylim(0, len(df_units))
+    ax_regions.axis("off")
+
+    ax_wheel = fig.add_subplot(gs[1, 0], sharex=ax_raster)
+    ax_wheel.plot(wheel_t, wheel_pos, color="black")
+    ax_wheel.set_ylabel("Wheel (rad)")
+    for t_event in stim_window:
+        ax_wheel.axvline(t_event, color="blue", linewidth=1.5)
+    for t_event in first_move_window:
+        ax_wheel.axvline(t_event, color="green", linewidth=1.5)
+    for t_event in feedback_window:
+        ax_wheel.axvline(t_event, color="red", linewidth=1.5)
+    ax_wheel.tick_params(labelbottom=False)
+
+    ax_paw = fig.add_subplot(gs[2, 0], sharex=ax_raster)
+    if paw_speed is not None:
+        ax_paw.plot(pose_t, paw_speed, color="black")
+    else:
+        ax_paw.text(0.5, 0.5, "Paw data not available", ha="center", transform=ax_paw.transAxes)
+
+    ax_paw.set_ylabel("Paw (px/s)")
+    for t_event in stim_window:
+        ax_paw.axvline(t_event, color="blue", linewidth=1.5)
+    for t_event in first_move_window:
+        ax_paw.axvline(t_event, color="green", linewidth=1.5)
+    for t_event in feedback_window:
+        ax_paw.axvline(t_event, color="red", linewidth=1.5)
+    ax_paw.tick_params(labelbottom=False)
+
+    ax_pupil = fig.add_subplot(gs[3, 0], sharex=ax_raster)
+    if pupil_diam is not None:
+        ax_pupil.plot(pupil_t, pupil_diam, color="black")
+    else:
+        ax_pupil.text(
+            0.5, 0.5, "Pupil data not available", ha="center", transform=ax_pupil.transAxes
+        )
+
+    ax_pupil.set_ylabel("Pupil (mm)")
+    ax_pupil.set_xlabel("Time in session (s)")
+    for t_event in stim_window:
+        ax_pupil.axvline(t_event, color="blue", linewidth=1.5)
+    for t_event in first_move_window:
+        ax_pupil.axvline(t_event, color="green", linewidth=1.5)
+    for t_event in feedback_window:
+        ax_pupil.axvline(t_event, color="red", linewidth=1.5)
+    ax_pupil.tick_params(labelbottom=True)
+
+    lines = [
+        plt.Line2D([0], [0], color="blue", linewidth=2),
+        plt.Line2D([0], [0], color="green", linewidth=2),
+        plt.Line2D([0], [0], color="red", linewidth=2),
+    ]
+    ax_raster.legend(
+        lines,
+        ["Stim On", "First Move", "Feedback"],
+        loc="upper left",
+        frameon=False,
+        bbox_to_anchor=(0, 1.15),
+        ncol=3,
+    )
+
+    if save_figure:
+        region_tag = "_".join(region_acronyms)
+        filename = f"{pid}_window_{t_start:.2f}_{t_end:.2f}_{region_tag}.png"
+        save_path = path_fig / filename
+        fig.savefig(save_path, dpi=300, bbox_inches="tight")
+        print(f"Figure saved to: {save_path}")
+
+    plt.show()
