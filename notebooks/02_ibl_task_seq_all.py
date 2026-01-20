@@ -101,6 +101,7 @@ CONFIG_PLOT = {
     # Heatmap colormap (examples: "Greys", "viridis", "RdGy", "magma", "cividis")
     "POP_CMAP_NAME": "bwr",
     "POP_NORMALIZE": True,
+    "SORT_BY_SPONT": True
 }
 
 # %% Loading Data ##############################################################################
@@ -226,10 +227,13 @@ if CONFIG_CALC["CALC_SPONT"] and spikes_spont is not None:
     )
 
 # %% Select Trial and Unit to Plot ###########################################################
-trial_idx = 79
+trial_idx = 125
 single_neuron_id = 559
 
 # %% Plot Single Trial Raster ##############################################################################
+CONFIG_PLOT.update(
+    {"PLOT_ONLY_GOOD_UNITS": False}
+)
 
 plot_utils.plot_trial_raster(
     spikes,
@@ -313,6 +317,7 @@ plot_utils.plot_population_sorted(
     save_flag=True,
     path_fig=path_fig,
     pid=pid,
+    df_coupling=df_coupling,
     region_acronyms=regions_to_plot,
 )
 

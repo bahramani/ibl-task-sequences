@@ -863,6 +863,7 @@ def plot_population_sorted(
     save_flag,
     path_fig,
     pid,
+    df_coupling=None,
     region_acronyms=None,
 ):
     """Plot population heatmaps sorted by delay with delay markers."""
@@ -883,6 +884,7 @@ def plot_population_sorted(
     smooth_sigma = config_plot["POP_SMOOTH_SIGMA"]
     cmap_name = config_plot["POP_CMAP_NAME"]
     normalize = config_plot["POP_NORMALIZE"]
+    sort_by_spont = config_plot.get("SORT_BY_SPONT", False)
 
     try:
         if hasattr(clusters, "metrics") and "label" in clusters.metrics.columns:
@@ -944,9 +946,32 @@ def plot_population_sorted(
                 print("Warning: df_res not found. Latencies will be NaN.")
             df_region["delay"] = np.nan
 
-        df_sorted = df_region.sort_values(
-            by="delay", ascending=True, na_position="last"
-        ).reset_index(drop=True)
+        sort_label = "Latency"
+        if sort_by_spont:
+            if df_coupling is None or len(df_coupling) == 0:
+                print(
+                    "Warning: df_coupling not found. Falling back to latency sorting."
+                )
+            elif "sorting_number" not in df_coupling.columns:
+                print(
+                    "Warning: sorting_number not found in df_coupling. Falling back to latency sorting."
+                )
+            else:
+                df_region = df_region.merge(
+                    df_coupling[["cluster_id", "sorting_number"]],
+                    on="cluster_id",
+                    how="left",
+                )
+                sort_label = "Spontaneous Coupling"
+
+        if sort_label == "Spontaneous Coupling":
+            df_sorted = df_region.sort_values(
+                by="sorting_number", ascending=True, na_position="last"
+            ).reset_index(drop=True)
+        else:
+            df_sorted = df_region.sort_values(
+                by="delay", ascending=True, na_position="last"
+            ).reset_index(drop=True)
 
         n_neurons = len(df_sorted)
         if n_neurons == 0:
@@ -960,7 +985,7 @@ def plot_population_sorted(
             )
             ax.set_xlim(-window_pre, window_post)
             ax.set_ylim(0, 1)
-            ax.set_ylabel("Neurons (Sorted by Latency)\nTotal: 0", fontsize=12)
+            ax.set_ylabel(f"Neurons (Sorted by {sort_label})\nTotal: 0", fontsize=12)
             title_str = "Normalized " if normalize else "Raw "
             ax.set_title(
                 f"{title_str}Average Response (PSTH) Heatmap | {region} Units", fontsize=14
@@ -1021,7 +1046,8 @@ def plot_population_sorted(
         ax.scatter(x_positions, y_positions, color="black", s=10, marker="o", label="Delay")
 
         ax.axvline(0, color="black", linestyle="--", linewidth=1, label=event_label(align_event))
-        ax.set_ylabel(f"Neurons (Sorted by Latency)\nTotal: {n_neurons}", fontsize=12)
+        ax.set_ylabel(
+            f"Neurons (Sorted by {sort_label})\nTotal: {n_neurons}", fontsize=12)
         title_str = "Normalized " if normalize else "Raw "
         ax.set_title(
             f"{title_str}Average Response (PSTH) Heatmap | {region} Units", fontsize=14
@@ -1058,7 +1084,10 @@ def plot_population_sorted(
 
     # Print sorted cluster IDs for each region
     print("\n" + "="*80)
-    print("SORTED CLUSTER IDs BY REGION (sorted by delay)")
+    if sort_by_spont and df_coupling is not None and "sorting_number" in df_coupling:
+        print("SORTED CLUSTER IDs BY REGION (sorted by spontaneous coupling)")
+    else:
+        print("SORTED CLUSTER IDs BY REGION (sorted by delay)")
     print("="*80)
     for region, df_sorted in region_sorted_info.items():
         print(f"\n{region} ({len(df_sorted)} neurons):")
