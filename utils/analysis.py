@@ -8,6 +8,9 @@ except ImportError:  # Graceful fallback if tqdm is unavailable.
     def tqdm(iterable, **kwargs):
         return iterable
 
+from rastermap import Rastermap, utils
+
+
 def get_trial_contrasts(sl):
     """Return per-trial contrasts (abs max of left/right), NaNs -> 0."""
     contrast_left = np.abs(sl.trials.contrastLeft)
@@ -620,4 +623,96 @@ def compute_population_coupling(
     df.loc[sorted_indices, "sorting_number"] = sorting_numbers
     df["sorting_number"] = df["sorting_number"].astype("Int64")
 
+    return df
+
+def compute_rastermap_sorting(
+    spikes,
+    cluster_ids,
+    cluster_acronyms,
+    bin_size=0.01,
+    rastermap_params=None,
+    separate_by_region=True,
+    region_acronyms=None,
+):
+    """
+    Compute Rastermap sorting indices for neurons.
+
+    Parameters
+    ----------
+    separate_by_region : bool, default True
+        If True, compute Rastermap sorting separately for each region. If False,
+        all neurons are sorted together.
+    region_acronyms : list[str] or None
+        Optional list of region prefixes to include when separate_by_region is True.
+    """
+    from rastermap import Rastermap
+
+    spike_times = np.asarray(spikes["times"])
+    spike_clusters = np.asarray(spikes["clusters"])
+    cluster_ids = np.asarray(cluster_ids)
+    cluster_acronyms = np.asarray(cluster_acronyms).astype(str)
+
+    if len(cluster_ids) == 0:
+        return pd.DataFrame(columns=["cluster_id", "region", "rastermap_sort"])
+
+    start_time = spike_times.min()
+    end_time = spike_times.max()
+    bin_edges = np.arange(start_time, end_time + bin_size, bin_size)
+
+    if rastermap_params is None:
+        rastermap_params = {
+            "n_clusters": 100,
+            "n_PCs": 64,
+            "locality": 0.5,
+            "time_lag_window": 15,
+            "grid_upsample": 0,
+        }
+
+    if separate_by_region:
+        if region_acronyms is None:
+            region_list = sorted(np.unique(cluster_acronyms))
+        elif isinstance(region_acronyms, str):
+            region_list = [region_acronyms]
+        else:
+            region_list = list(region_acronyms)
+
+        region_masks = []
+        for region in region_list:
+            region_masks.append((region, np.char.startswith(cluster_acronyms, region)))
+    else:
+        region_masks = [("all", np.ones(len(cluster_ids), dtype=bool))]
+
+    results = []
+    for region, mask in region_masks:
+        region_cluster_ids = cluster_ids[mask]
+        if len(region_cluster_ids) == 0:
+            continue
+
+        spike_raster = np.zeros((len(region_cluster_ids), len(bin_edges) - 1))
+        for idx, cid in enumerate(region_cluster_ids):
+            cluster_spikes = spike_times[spike_clusters == cid]
+            spike_raster[idx], _ = np.histogram(cluster_spikes, bins=bin_edges)
+
+        n_pcs = rastermap_params.get("n_PCs", 64)
+        if n_pcs is not None:
+            n_pcs = int(min(n_pcs, max(1, len(region_cluster_ids))))
+
+        rastermap_kwargs = {**rastermap_params, "n_PCs": n_pcs}
+        model = Rastermap(**rastermap_kwargs).fit(spike_raster)
+        sorted_indices = np.asarray(model.isort)
+
+        if len(sorted_indices) != len(region_cluster_ids):
+            sorted_indices = np.arange(len(region_cluster_ids))
+
+        for sort_rank, neuron_idx in enumerate(sorted_indices):
+            results.append(
+                {
+                    "cluster_id": int(region_cluster_ids[neuron_idx]),
+                    "region": region,
+                    "rastermap_sort": sort_rank,
+                }
+            )
+
+    df = pd.DataFrame(results)
+    df["rastermap_sort"] = df["rastermap_sort"].astype("Int64")
     return df

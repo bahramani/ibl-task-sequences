@@ -226,6 +226,24 @@ if CONFIG_CALC["CALC_SPONT"] and spikes_spont is not None:
         cluster_ids=coupling_cluster_ids,
     )
 
+rastermap_params = {
+    "n_clusters": 100,
+    "n_PCs": 64,
+    "locality": 0.5,
+    "time_lag_window": 15,
+    "grid_upsample": 0,
+}
+
+df_rastermap = ana_utils.compute_rastermap_sorting(
+    spikes,
+    cluster_ids,
+    cluster_acronyms_calc,
+    bin_size=0.01,
+    rastermap_params=rastermap_params,
+    separate_by_region=True,
+    region_acronyms=None,
+)
+
 # %% Select Trial and Unit to Plot ###########################################################
 trial_idx = 125
 single_neuron_id = 559
@@ -287,6 +305,7 @@ CONFIG_PLOT.update(
         "PLOT_REGIONS": ['VISp', 'ENTm'],
         'PLOT_ONLY_GOOD_UNITS': True,
         'SORT_BY_SPONT': False,
+        'SORT_BY_RASTERMAP': True,
     })
 
 regions_to_plot = CONFIG_PLOT["PLOT_REGIONS"]
@@ -319,6 +338,7 @@ plot_utils.plot_population_sorted(
     path_fig=path_fig,
     pid=pid,
     df_coupling=df_coupling,
+    df_rastermap=df_rastermap,
     region_acronyms=regions_to_plot,
 )
 
@@ -353,11 +373,19 @@ plot_utils.plot_time_window_raster(
     pid,
     path_fig,
     save_figure=True,
-    t_start=4880.0,
-    t_end=4890.0,
-    region_acronyms=["VISp"],
+    t_start=4836.4,
+    t_end=4837.5,
+    region_acronyms=["VISp", "ENTm"],
     df_res=df_res,
     df_coupling=df_coupling,
-    sort_mode="dealy"
+    df_rastermap=df_rastermap,
+    sort_mode="rastermap"
     )
-# dealy spont default
+# dealy spont default rastermap
+
+
+# %% Rastermap
+
+
+
+
