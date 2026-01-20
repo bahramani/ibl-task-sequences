@@ -75,7 +75,7 @@ CONFIG_PLOT = {
     # Plot only good units (label == 1) or all units
     "PLOT_ONLY_GOOD_UNITS": True,
     # Event to use for alignment and sorting
-    "PLOT_EVENT": "response_times",
+    "PLOT_EVENT": "stimOn_times",
     # Regions to plot when region_acronyms is not provided
     "PLOT_REGIONS": ["VISp", 'ENTm'],
     # Raster plot window around trial events (seconds)
@@ -212,7 +212,7 @@ df_reliability = ana_utils.calculate_delay_reliability(
     cid_to_idx,
     df_res=df_res,
 )
-# %%
+
 if CONFIG_CALC["CALC_SPONT"] and spikes_spont is not None:
     coupling_cluster_ids = (
         good_cluster_ids if CONFIG_CALC["CALC_ONLY_GOOD_UNITS"] else cluster_ids
@@ -286,20 +286,20 @@ CONFIG_PLOT.update(
 
 regions_to_plot = CONFIG_PLOT["PLOT_REGIONS"]
 
-plot_utils.plot_sequence_raster(
-    sl,
-    spikes,
-    clusters,
-    cluster_ids,
-    cluster_acronyms_plot,
-    df_res,
-    CONFIG_PLOT,
-    save_flag=True,
-    path_fig=path_fig,
-    pid=pid,
-    trial_idx=trial_idx,
-    region_acronyms=regions_to_plot,
-)
+# plot_utils.plot_sequence_raster(
+#     sl,
+#     spikes,
+#     clusters,
+#     cluster_ids,
+#     cluster_acronyms_plot,
+#     df_res,
+#     CONFIG_PLOT,
+#     save_flag=True,
+#     path_fig=path_fig,
+#     pid=pid,
+#     trial_idx=trial_idx,
+#     region_acronyms=regions_to_plot,
+# )
 
 
 plot_utils.plot_population_sorted(
@@ -316,4 +316,14 @@ plot_utils.plot_population_sorted(
     region_acronyms=regions_to_plot,
 )
 
-
+# %%
+plot_utils.plot_population_coupling_heatmap(
+    df_coupling,
+    CONFIG_PLOT,
+    CONFIG_CALC,
+    save_flag=True,
+    path_fig=path_fig,
+    pid=pid,
+    coupling_strength_thr=0.01,
+    region_acronyms=regions_to_plot,
+)

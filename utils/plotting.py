@@ -1073,3 +1073,144 @@ def plot_population_sorted(
         else:
             print("  No neurons found")
     print("="*80 + "\n")
+
+def plot_population_coupling_heatmap(
+    df_coupling,
+    config_plot,
+    config_calc,
+    save_flag,
+    path_fig,
+    pid,
+    coupling_strength_thr=np.nan,
+    region_acronyms=None,
+):
+    """Plot spike-triggered population coupling heatmaps sorted by coupling delay."""
+    if df_coupling is None or len(df_coupling) == 0:
+        print("No coupling data provided for plot_population_coupling_heatmap.")
+        return
+
+    if region_acronyms is None:
+        region_acronyms = config_plot.get("PLOT_REGIONS", ["VISp"])
+    elif isinstance(region_acronyms, str):
+        region_acronyms = [region_acronyms]
+    else:
+        region_acronyms = list(region_acronyms)
+
+    if len(region_acronyms) == 0:
+        print("No regions provided for plot_population_coupling_heatmap.")
+        return
+
+    cmap_name = config_plot["POP_CMAP_NAME"]
+    bin_size_ms = config_calc.get("STPR_BIN_SIZE", 0.001) * 1000
+    window_ms = config_calc.get("STPR_WINDOW_MS", 80)
+    window_bins = int(round(window_ms / bin_size_ms)) if bin_size_ms > 0 else 0
+    lags_ms = np.arange(-window_bins, window_bins + 1) * bin_size_ms
+
+    fig, axes = plt.subplots(
+        len(region_acronyms), 1, figsize=(10, 6 * len(region_acronyms)), sharex=True
+    )
+    if len(region_acronyms) == 1:
+        axes = [axes]
+
+    for ax, region in zip(axes, region_acronyms):
+        region_mask = df_coupling["region"].astype(str).str.startswith(region)
+        df_region = df_coupling.loc[region_mask].copy()
+        if pd.notna(coupling_strength_thr):
+            df_region = df_region.loc[
+                df_region["coupling_strength"] > coupling_strength_thr
+            ]
+        df_sorted = df_region.sort_values(
+            by="sorting_number", ascending=True, na_position="last"
+        ).reset_index(drop=True)
+
+        n_neurons = len(df_sorted)
+        if n_neurons == 0:
+            ax.text(
+                0.5,
+                0.5,
+                f"No units found for {region}",
+                transform=ax.transAxes,
+                ha="center",
+                va="center",
+            )
+            ax.set_xlim(-window_ms, window_ms)
+            ax.set_ylim(0, 1)
+            ax.set_ylabel("Neurons (Sorted by Coupling Delay)\nTotal: 0", fontsize=12)
+            ax.set_title(
+                f"Spike-triggered Population Coupling (stPR) Heatmap | {region} Units",
+                fontsize=14,
+            )
+            continue
+
+        n_bins = len(lags_ms)
+        stpr_matrix = np.full((n_neurons, n_bins), np.nan)
+
+        for row_idx, row in df_sorted.iterrows():
+            curve = np.asarray(row.get("stpr_curve", []), dtype=float)
+            if curve.size == 0:
+                continue
+            curve_mean = np.nanmean(curve)
+            curve_std = np.nanstd(curve)
+            if curve_std > 0:
+                curve = (curve - curve_mean) / curve_std
+            if curve.size == n_bins:
+                stpr_matrix[row_idx, :] = curve
+            elif curve.size < n_bins:
+                start_idx = int((n_bins - curve.size) // 2)
+                end_idx = start_idx + curve.size
+                stpr_matrix[row_idx, start_idx:end_idx] = curve
+            else:
+                trim_start = int((curve.size - n_bins) // 2)
+                stpr_matrix[row_idx, :] = curve[trim_start : trim_start + n_bins]
+
+        im = ax.imshow(
+            stpr_matrix,
+            aspect="auto",
+            origin="lower",
+            extent=[lags_ms[0], lags_ms[-1], 0, n_neurons],
+            cmap=cmap_name,
+            interpolation="nearest",
+        )
+
+        valid_delays = df_sorted.dropna(subset=["coupling_delay_ms"])
+        y_positions = valid_delays.index + 0.5
+        x_positions = valid_delays["coupling_delay_ms"]
+        ax.scatter(
+            x_positions,
+            y_positions,
+            color="black",
+            s=10,
+            marker="o",
+            label="Coupling Delay",
+        )
+
+        ax.axvline(0, color="black", linestyle="--", linewidth=1)
+        ax.set_ylabel(
+            f"Neurons (Sorted by Coupling Delay)\nTotal: {n_neurons}", fontsize=12
+        )
+        ax.set_title(
+            f"Spike-triggered Population Coupling (stPR) Heatmap | {region} Units",
+            fontsize=14,
+        )
+
+        cbar = plt.colorbar(im, ax=ax)
+        cbar.set_label("stPR (z-score)", rotation=270, labelpad=15)
+
+        ax.set_xlim(lags_ms[0], lags_ms[-1])
+        ax.set_ylim(n_neurons, 0)
+
+    axes[-1].set_xlabel("Lag (ms)", fontsize=12)
+
+    plt.tight_layout()
+
+    if save_flag:
+        if len(region_acronyms) == 1:
+            file_name = f"{pid}_population_coupling.png"
+        else:
+            region_tag = "_".join(region_acronyms)
+            file_name = f"{pid}_population_coupling_{region_tag}.png"
+        save_path = path_fig / file_name
+        fig.savefig(save_path, dpi=300, bbox_inches="tight")
+        print(f"Population coupling heatmap saved to: {save_path}")
+
+    plt.show()
