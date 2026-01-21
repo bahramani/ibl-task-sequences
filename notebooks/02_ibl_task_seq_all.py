@@ -53,7 +53,7 @@ CONFIG_CALC = {
     "PSTH_WINDOW_END": 0.35,
     # Responsive window for delay relative to the event (seconds)
     "RESPONSIVE_WINDOW_START": 0.02,
-    "RESPONSIVE_WINDOW_END": 0.15,
+    "RESPONSIVE_WINDOW_END": 0.35,
     # Gaussian smoothing sigma for PSTH (in bins)
     "SMOOTH_SIGMA": 1,
     # Minimum trials required to include a unit
@@ -63,10 +63,10 @@ CONFIG_CALC = {
     "RELIABILITY_WINDOW_END": 0.15,
     # Spike-triggered population coupling settings
     "STPR_BIN_SIZE": 0.001,
-    "STPR_WINDOW_MS": 80,
+    "STPR_WINDOW_MS": 100,
     "STPR_SMOOTH_SIGMA_MS": 5,
     # Use only good units when building population rate for stPR
-    "STPR_POP_USE_GOOD_UNITS": True,
+    "STPR_POP_USE_GOOD_UNITS": False,
 }
 
 CONFIG_PLOT = {
@@ -213,6 +213,16 @@ df_reliability = ana_utils.calculate_delay_reliability(
     cid_to_idx,
     df_res=df_res,
 )
+# %% ################################################
+#####################################################
+
+# Get the start of the spontaneous interval
+spont_start = spont_intervals[0][0]
+print(f"Spontaneous period starts at: {spont_start:.2f}s")
+
+# Filter spikes for task period (everything before spontaneous interval)
+task_time_mask = spikes['times'] < spont_start
+spikes_task = {key: val[task_time_mask] for key, val in spikes.items()}
 
 if CONFIG_CALC["CALC_SPONT"] and spikes_spont is not None:
     coupling_cluster_ids = (
@@ -226,23 +236,25 @@ if CONFIG_CALC["CALC_SPONT"] and spikes_spont is not None:
         cluster_ids=coupling_cluster_ids,
     )
 
-rastermap_params = {
-    "n_clusters": 100,
-    "n_PCs": 64,
-    "locality": 0.5,
-    "time_lag_window": 15,
-    "grid_upsample": 0,
-}
+# %%
 
-df_rastermap = ana_utils.compute_rastermap_sorting(
-    spikes,
-    cluster_ids,
-    cluster_acronyms_calc,
-    bin_size=0.01,
-    rastermap_params=rastermap_params,
-    separate_by_region=True,
-    region_acronyms=None,
-)
+# rastermap_params = {
+#     "n_clusters": 100,
+#     "n_PCs": 64,
+#     "locality": 0.5,
+#     "time_lag_window": 15,
+#     "grid_upsample": 0,
+# }
+#
+# df_rastermap = ana_utils.compute_rastermap_sorting(
+#     spikes,
+#     cluster_ids,
+#     cluster_acronyms_calc,
+#     bin_size=0.01,
+#     rastermap_params=rastermap_params,
+#     separate_by_region=True,
+#     region_acronyms=None,
+# )
 
 # %% Select Trial and Unit to Plot ###########################################################
 trial_idx = 125
@@ -250,7 +262,7 @@ single_neuron_id = 559
 
 # %% Plot Single Trial Raster ##############################################################################
 CONFIG_PLOT.update(
-    {"PLOT_ONLY_GOOD_UNITS": False}
+    {"PLOT_ONLY_GOOD_UNITS": True}
 )
 
 plot_utils.plot_trial_raster(
@@ -304,8 +316,8 @@ CONFIG_PLOT.update(
     {
         "PLOT_REGIONS": ['VISp', 'ENTm'],
         'PLOT_ONLY_GOOD_UNITS': True,
-        'SORT_BY_SPONT': False,
-        'SORT_BY_RASTERMAP': True,
+        'SORT_BY_SPONT': True,
+        'SORT_BY_RASTERMAP': False,
     })
 
 regions_to_plot = CONFIG_PLOT["PLOT_REGIONS"]
@@ -324,7 +336,6 @@ regions_to_plot = CONFIG_PLOT["PLOT_REGIONS"]
 #     trial_idx=trial_idx,
 #     region_acronyms=regions_to_plot,
 # )
-
 
 plot_utils.plot_population_sorted(
     sl,
@@ -350,7 +361,7 @@ plot_utils.plot_population_coupling_heatmap(
     save_flag=True,
     path_fig=path_fig,
     pid=pid,
-    coupling_strength_thr=0.01,
+    coupling_strength_thr=0.05,
     region_acronyms=regions_to_plot,
 )
 
@@ -373,13 +384,13 @@ plot_utils.plot_time_window_raster(
     pid,
     path_fig,
     save_figure=True,
-    t_start=4836.4,
-    t_end=4837.5,
-    region_acronyms=["VISp", "ENTm"],
+    t_start=4650,
+    t_end=4660,
+    region_acronyms=["VISp"],
     df_res=df_res,
     df_coupling=df_coupling,
-    df_rastermap=df_rastermap,
-    sort_mode="rastermap"
+    # df_rastermap=df_rastermap,
+    sort_mode="spont"
     )
 # dealy spont default rastermap
 
@@ -389,7 +400,7 @@ if CONFIG_CALC["CALC_SPONT"] and spont_intervals is not None:
     print("\n=== Computing stPR for spontaneous vs task periods ===")
 
     # Select regions to analyze and plot (set to None to use all regions)
-    regions_to_plot_comparison = None  # Or specify like: ['VISp', 'ENTm']
+    regions_to_plot_comparison = ['ENTm']  # Or specify like: ['VISp', 'ENTm']
 
     # Get the start of the spontaneous interval
     spont_start = spont_intervals[0][0]
