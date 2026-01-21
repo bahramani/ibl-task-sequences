@@ -383,9 +383,235 @@ plot_utils.plot_time_window_raster(
     )
 # dealy spont default rastermap
 
+# %% Calculate stPR for spontaneous vs task periods
 
-# %% Rastermap
+if CONFIG_CALC["CALC_SPONT"] and spont_intervals is not None:
+    print("\n=== Computing stPR for spontaneous vs task periods ===")
 
+    # Select regions to analyze and plot (set to None to use all regions)
+    regions_to_plot_comparison = None  # Or specify like: ['VISp', 'ENTm']
 
+    # Get the start of the spontaneous interval
+    spont_start = spont_intervals[0][0]
+    print(f"Spontaneous period starts at: {spont_start:.2f}s")
 
+    # Filter spikes for task period (everything before spontaneous interval)
+    task_time_mask = spikes['times'] < spont_start
+    spikes_task = {key: val[task_time_mask] for key, val in spikes.items()}
+    print(f"Task period spikes: {len(spikes_task['times'])} / {len(spikes['times'])} total spikes")
 
+    # Filter for good units if specified
+    if CONFIG_CALC["CALC_ONLY_GOOD_UNITS"]:
+        good_task_mask = np.isin(spikes_task['clusters'], good_cluster_ids)
+        spikes_task_good = {key: val[good_task_mask] for key, val in spikes_task.items()}
+        print(f"Good units in task period: {len(np.unique(spikes_task_good['clusters']))} units, "
+              f"{len(spikes_task_good['times'])} spikes")
+    else:
+        spikes_task_good = spikes_task
+
+    # Calculate stPR for task period
+    print("\nCalculating stPR for task period...")
+    df_coupling_task = ana_utils.compute_population_coupling(
+        spikes_task,
+        clusters,
+        cluster_acronyms_calc,
+        CONFIG_CALC,
+        cluster_ids=coupling_cluster_ids,
+    )
+
+    # Merge spontaneous and task stPR dataframes
+    df_comparison = df_coupling.merge(
+        df_coupling_task[['cluster_id', 'coupling_strength', 'coupling_delay_ms', 'sorting_number']],
+        on='cluster_id',
+        suffixes=('_spont', '_task')
+    )
+
+    print(f"\nFound {len(df_comparison)} neurons with stPR in both periods")
+
+    # Filter by regions if specified
+    if regions_to_plot_comparison is not None:
+        region_mask = df_comparison['region'].isin(regions_to_plot_comparison)
+        df_comparison = df_comparison[region_mask]
+        print(f"Filtered to {len(df_comparison)} neurons in regions: {regions_to_plot_comparison}")
+        unique_regions = regions_to_plot_comparison
+    else:
+        unique_regions = df_comparison['region'].unique()
+        print(f"Using all regions: {list(unique_regions)}")
+
+    # Filter for valid coupling strength data
+    valid_strength_mask = (
+        df_comparison['coupling_strength_spont'].notna() &
+        df_comparison['coupling_strength_task'].notna()
+    )
+    df_strength = df_comparison[valid_strength_mask]
+    print(f"\nNeurons with valid coupling strength: {len(df_strength)}")
+
+    # Filter for valid coupling delay data
+    valid_delay_mask = (
+        df_comparison['coupling_delay_ms_spont'].notna() &
+        df_comparison['coupling_delay_ms_task'].notna()
+    )
+    df_delay = df_comparison[valid_delay_mask]
+    print(f"Neurons with valid coupling delay: {len(df_delay)}")
+
+    # Filter for valid sorting number data
+    valid_sorting_mask = (
+        df_comparison['sorting_number_spont'].notna() &
+        df_comparison['sorting_number_task'].notna()
+    )
+    df_sorting = df_comparison[valid_sorting_mask]
+    print(f"Neurons with valid sorting number: {len(df_sorting)}")
+
+    # Calculate correlations
+    if len(df_strength) > 0:
+        correlation_strength = np.corrcoef(
+            df_strength['coupling_strength_spont'],
+            df_strength['coupling_strength_task']
+        )[0, 1]
+        print(f"\nCorrelation - Coupling strength: {correlation_strength:.3f}")
+
+    if len(df_delay) > 0:
+        correlation_delay = np.corrcoef(
+            df_delay['coupling_delay_ms_spont'],
+            df_delay['coupling_delay_ms_task']
+        )[0, 1]
+        print(f"Correlation - Coupling delay: {correlation_delay:.3f}")
+
+    if len(df_sorting) > 0:
+        correlation_sorting = np.corrcoef(
+            df_sorting['sorting_number_spont'],
+            df_sorting['sorting_number_task']
+        )[0, 1]
+        print(f"Correlation - Sorting number: {correlation_sorting:.3f}")
+
+    # Create color map for regions
+    region_colors = plt.cm.tab10(np.linspace(0, 1, len(unique_regions)))
+    region_to_color = dict(zip(unique_regions, region_colors))
+
+    # Plot 1: Coupling Strength
+    if len(df_strength) > 0:
+        fig1, ax1 = plt.subplots(figsize=(8, 8))
+
+        for region in unique_regions:
+            region_mask = df_strength['region'] == region
+            if region_mask.sum() > 0:
+                ax1.scatter(
+                    df_strength.loc[region_mask, 'coupling_strength_task'],
+                    df_strength.loc[region_mask, 'coupling_strength_spont'],
+                    c=[region_to_color[region]],
+                    alpha=0.6,
+                    s=50,
+                    edgecolors='k',
+                    linewidths=0.5,
+                    label=region
+                )
+
+        # Add unity line
+        min_val = min(df_strength['coupling_strength_task'].min(),
+                     df_strength['coupling_strength_spont'].min())
+        max_val = max(df_strength['coupling_strength_task'].max(),
+                     df_strength['coupling_strength_spont'].max())
+        ax1.plot([min_val, max_val], [min_val, max_val],
+                'r--', alpha=0.5, linewidth=2, label='Unity')
+
+        ax1.set_xlabel('Task stPR (coupling strength)', fontsize=12)
+        ax1.set_ylabel('Spontaneous stPR (coupling strength)', fontsize=12)
+        ax1.set_title(f'Coupling Strength: Spontaneous vs Task\n(r = {correlation_strength:.3f}, n = {len(df_strength)})',
+                     fontsize=14)
+        ax1.grid(True, alpha=0.3)
+        ax1.legend(loc='best', fontsize=8)
+        ax1.set_aspect('equal', adjustable='box')
+        plt.tight_layout()
+
+        fig_path_strength = path_fig / f"{pid}_stPR_strength_spontaneous_vs_task.png"
+        plt.savefig(fig_path_strength, dpi=300, bbox_inches='tight')
+        print(f"\nSaved coupling strength figure to: {fig_path_strength}")
+        plt.show()
+    else:
+        print("\nNo valid coupling strength data for plotting.")
+
+    # Plot 2: Coupling Delay
+    if len(df_delay) > 0:
+        fig2, ax2 = plt.subplots(figsize=(8, 8))
+
+        for region in unique_regions:
+            region_mask = df_delay['region'] == region
+            if region_mask.sum() > 0:
+                ax2.scatter(
+                    df_delay.loc[region_mask, 'coupling_delay_ms_task'],
+                    df_delay.loc[region_mask, 'coupling_delay_ms_spont'],
+                    c=[region_to_color[region]],
+                    alpha=0.6,
+                    s=50,
+                    edgecolors='k',
+                    linewidths=0.5,
+                    label=region
+                )
+
+        # Add unity line
+        min_val = min(df_delay['coupling_delay_ms_task'].min(),
+                     df_delay['coupling_delay_ms_spont'].min())
+        max_val = max(df_delay['coupling_delay_ms_task'].max(),
+                     df_delay['coupling_delay_ms_spont'].max())
+        ax2.plot([min_val, max_val], [min_val, max_val],
+                'r--', alpha=0.5, linewidth=2, label='Unity')
+
+        ax2.set_xlabel('Task Coupling Delay (ms)', fontsize=12)
+        ax2.set_ylabel('Spontaneous Coupling Delay (ms)', fontsize=12)
+        ax2.set_title(f'Coupling Delay: Spontaneous vs Task\n(r = {correlation_delay:.3f}, n = {len(df_delay)})',
+                     fontsize=14)
+        ax2.grid(True, alpha=0.3)
+        ax2.legend(loc='best', fontsize=8)
+        ax2.set_aspect('equal', adjustable='box')
+        ax2.set_ylim([-30, 30])
+        ax2.set_xlim([-30, 30])
+        plt.tight_layout()
+
+        fig_path_delay = path_fig / f"{pid}_stPR_delay_spontaneous_vs_task.png"
+        plt.savefig(fig_path_delay, dpi=300, bbox_inches='tight')
+        print(f"Saved coupling delay figure to: {fig_path_delay}")
+        plt.show()
+    else:
+        print("No valid coupling delay data for plotting.")
+
+    # Plot 3: Sorting Number
+    if len(df_sorting) > 0:
+        fig3, ax3 = plt.subplots(figsize=(8, 8))
+
+        for region in unique_regions:
+            region_mask = df_sorting['region'] == region
+            if region_mask.sum() > 0:
+                ax3.scatter(
+                    df_sorting.loc[region_mask, 'sorting_number_task'],
+                    df_sorting.loc[region_mask, 'sorting_number_spont'],
+                    c=[region_to_color[region]],
+                    alpha=0.6,
+                    s=50,
+                    edgecolors='k',
+                    linewidths=0.5,
+                    label=region
+                )
+
+        # Add unity line
+        min_val = min(df_sorting['sorting_number_task'].min(),
+                     df_sorting['sorting_number_spont'].min())
+        max_val = max(df_sorting['sorting_number_task'].max(),
+                     df_sorting['sorting_number_spont'].max())
+        ax3.plot([min_val, max_val], [min_val, max_val],
+                'r--', alpha=0.5, linewidth=2, label='Unity')
+
+        ax3.set_xlabel('Task Sorting Number', fontsize=12)
+        ax3.set_ylabel('Spontaneous Sorting Number', fontsize=12)
+        ax3.set_title(f'Sorting Number: Spontaneous vs Task\n(r = {correlation_sorting:.3f}, n = {len(df_sorting)})',
+                     fontsize=14)
+        ax3.grid(True, alpha=0.3)
+        ax3.legend(loc='best', fontsize=8)
+        ax3.set_aspect('equal', adjustable='box')
+        plt.tight_layout()
+
+        fig_path_sorting = path_fig / f"{pid}_stPR_sorting_spontaneous_vs_task.png"
+        plt.savefig(fig_path_sorting, dpi=300, bbox_inches='tight')
+        print(f"Saved sorting number figure to: {fig_path_sorting}")
+        plt.show()
+    else:
+        print("No valid sorting number data for plotting.")
