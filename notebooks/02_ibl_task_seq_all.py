@@ -328,6 +328,7 @@ if CONFIG_CALC["CALC_SPONT"] and spikes_spont is not None:
         cluster_acronyms_calc,
         CONFIG_CALC,
         cluster_ids=coupling_cluster_ids,
+        split_halves=True,
     )
 
 if CONFIG_CALC["CALC_SPONT"] and spont_intervals is not None:
@@ -362,6 +363,7 @@ if CONFIG_CALC["CALC_SPONT"] and spont_intervals is not None:
         cluster_acronyms_calc,
         CONFIG_CALC,
         cluster_ids=coupling_cluster_ids,
+        split_halves=True,
     )
 
     # Merge spontaneous and task stPR dataframes
@@ -491,8 +493,10 @@ plot_utils.plot_population_sorted(
 )
 
 # %%
+regions_to_plot = CONFIG_PLOT["PLOT_REGIONS"]
+
 plot_utils.plot_population_coupling_heatmap(
-    df_coupling,
+    df_coupling_task,
     CONFIG_PLOT,
     CONFIG_CALC,
     save_flag=True,

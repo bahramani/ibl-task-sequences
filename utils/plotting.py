@@ -1242,6 +1242,13 @@ def plot_population_coupling_heatmap(
         df_sorted = df_region.sort_values(
             by="sorting_number", ascending=True, na_position="last"
         ).reset_index(drop=True)
+        has_split_delays = (
+            "coupling_delay_ms_h1" in df_sorted.columns
+            and "coupling_delay_ms_h2" in df_sorted.columns
+        )
+        has_split_curves = (
+            "stpr_curve_h1" in df_sorted.columns and "stpr_curve_h2" in df_sorted.columns
+        )
 
         n_neurons = len(df_sorted)
         if n_neurons == 0:
@@ -1265,14 +1272,35 @@ def plot_population_coupling_heatmap(
         n_bins = len(lags_ms)
         stpr_matrix = np.full((n_neurons, n_bins), np.nan)
 
-        for row_idx, row in df_sorted.iterrows():
-            curve = np.asarray(row.get("stpr_curve", []), dtype=float)
-            if curve.size == 0:
-                continue
-            curve_mean = np.nanmean(curve)
-            curve_std = np.nanstd(curve)
+        def normalize_curve(curve_array):
+            if curve_array.size == 0:
+                return curve_array
+            curve_mean = np.nanmean(curve_array)
+            curve_std = np.nanstd(curve_array)
             if curve_std > 0:
-                curve = (curve - curve_mean) / curve_std
+                return (curve_array - curve_mean) / curve_std
+            return curve_array
+
+        for row_idx, row in df_sorted.iterrows():
+            if has_split_curves:
+                curve_h1 = np.asarray(row.get("stpr_curve_h1", []), dtype=float)
+                curve_h2 = np.asarray(row.get("stpr_curve_h2", []), dtype=float)
+                curve_h1 = normalize_curve(curve_h1)
+                curve_h2 = normalize_curve(curve_h2)
+                if curve_h1.size > 0 and curve_h2.size > 0:
+                    min_len = min(curve_h1.size, curve_h2.size)
+                    curve = (curve_h1[:min_len] + curve_h2[:min_len]) / 2
+                elif curve_h1.size > 0:
+                    curve = curve_h1
+                elif curve_h2.size > 0:
+                    curve = curve_h2
+                else:
+                    continue
+            else:
+                curve = np.asarray(row.get("stpr_curve", []), dtype=float)
+                if curve.size == 0:
+                    continue
+                curve = normalize_curve(curve)
             if curve.size == n_bins:
                 stpr_matrix[row_idx, :] = curve
             elif curve.size < n_bins:
@@ -1292,17 +1320,39 @@ def plot_population_coupling_heatmap(
             interpolation="nearest",
         )
 
-        valid_delays = df_sorted.dropna(subset=["coupling_delay_ms"])
-        y_positions = valid_delays.index + 0.5
-        x_positions = valid_delays["coupling_delay_ms"]
-        ax.scatter(
-            x_positions,
-            y_positions,
-            color="black",
-            s=10,
-            marker="o",
-            label="Coupling Delay",
-        )
+        if has_split_delays:
+            valid_h1 = df_sorted.dropna(subset=["coupling_delay_ms_h1"])
+            if len(valid_h1) > 0:
+                ax.scatter(
+                    valid_h1["coupling_delay_ms_h1"],
+                    valid_h1.index + 0.5,
+                    color="gray",
+                    s=10,
+                    marker="o",
+                    label="Coupling Delay (H1)",
+                )
+            valid_h2 = df_sorted.dropna(subset=["coupling_delay_ms_h2"])
+            if len(valid_h2) > 0:
+                ax.scatter(
+                    valid_h2["coupling_delay_ms_h2"],
+                    valid_h2.index + 0.5,
+                    color="black",
+                    s=10,
+                    marker="o",
+                    label="Coupling Delay (H2)",
+                )
+        else:
+            valid_delays = df_sorted.dropna(subset=["coupling_delay_ms"])
+            y_positions = valid_delays.index + 0.5
+            x_positions = valid_delays["coupling_delay_ms"]
+            ax.scatter(
+                x_positions,
+                y_positions,
+                color="black",
+                s=10,
+                marker="o",
+                label="Coupling Delay",
+            )
 
         ax.axvline(0, color="black", linestyle="--", linewidth=1)
         ax.set_ylabel(
