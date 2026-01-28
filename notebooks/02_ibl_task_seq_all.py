@@ -35,7 +35,7 @@ CONFIG_CALC = {
     # Which atlas to use when assigning brain regions ("Beryl" or "Allen")
     "ATLAS_MAPPING": "Beryl",
     # Run calculations only on good units (label == 1) or on all units
-    "CALC_ONLY_GOOD_UNITS": True,
+    "CALC_ONLY_GOOD_UNITS": False,
     # Load spontaneous data
     "CALC_SPONT": True,
     # Events to compute delays for
@@ -73,7 +73,7 @@ CONFIG_PLOT = {
     # Which atlas to use for plots ("Beryl" or "Allen")
     "ATLAS_MAPPING": "Beryl",
     # Plot only good units (label == 1) or all units
-    "PLOT_ONLY_GOOD_UNITS": True,
+    "PLOT_ONLY_GOOD_UNITS": False,
     # Event to use for alignment and sorting
     "PLOT_EVENT": "stimOn_times",
     # Regions to plot when region_acronyms is not provided
@@ -114,12 +114,18 @@ one = init_one(ibl_cache)
 
 ba, br, beryl_acronyms, hier_scores = prepare_region_dirs(path_data)
 
+# Great for double response after feedback
+# pid = '9e069684-a4be-4b70-b9e6-446309f977d4'
 
 # Great for CP and MOp:
 # pid = '26118c10-35dd-4ab1-9f0f-b9a89a1da070'
+# pid = 'f475ae14-9415-453e-b800-1480ea1c868d'
 
 # Main one for VISp and EnTm:
 pid = "c9664185-d3fd-4e0e-89cf-77c402038938"
+
+# Good for MOs, seems responsive to first movement
+# pid = 'acf04c3f-650a-4de0-b0d0-edf695dd2025'
 
 # The one that is not working well:
 # pid = # '3d3d5a5e-df26-43ee-80b6-2d72d85668a5'
@@ -240,7 +246,7 @@ if CONFIG_CALC["CALC_SPONT"] and spont_intervals is not None:
     print("\n=== Computing stPR for spontaneous vs task periods ===")
 
     # Select regions to analyze and plot (set to None to use all regions)
-    regions_to_plot_comparison = ['ENTm']  # Or specify like: ['VISp', 'ENTm']
+    regions_to_plot_comparison = None # Or specify like: ['VISp', 'ENTm']
 
     # Get the start of the spontaneous interval
     spont_start = spont_intervals[0][0]
@@ -300,7 +306,7 @@ if CONFIG_CALC["CALC_SPONT"] and spont_intervals is not None:
 # )
 
 # %% Select Trial and Unit to Plot ###########################################################
-trial_idx = 125
+trial_idx = 385 # 385 in Zador is great
 single_neuron_id = 559
 
 # %% Plot Single Trial Raster ##############################################################################
@@ -358,8 +364,8 @@ plot_utils.plot_single_neuron(
 CONFIG_PLOT.update(
     {
         "PLOT_REGIONS": ['VISp', 'ENTm'],
-        'PLOT_ONLY_GOOD_UNITS': True,
-        'SORT_BY_SPONT': True,
+        'PLOT_ONLY_GOOD_UNITS': False,
+        'SORT_BY_SPONT': False,
         'SORT_BY_RASTERMAP': False,
     })
 
@@ -392,7 +398,7 @@ plot_utils.plot_population_sorted(
     path_fig=path_fig,
     pid=pid,
     df_coupling=df_coupling,
-    df_rastermap=df_rastermap,
+    #df_rastermap=df_rastermap,
     region_acronyms=regions_to_plot,
 )
 
@@ -404,14 +410,14 @@ plot_utils.plot_population_coupling_heatmap(
     save_flag=True,
     path_fig=path_fig,
     pid=pid,
-    coupling_strength_thr=0.05,
+    coupling_strength_thr=0.1,
     region_acronyms=regions_to_plot,
 )
 
 # %%
 CONFIG_PLOT.update(
     {
-        'PLOT_ONLY_GOOD_UNITS': True,
+        'PLOT_ONLY_GOOD_UNITS': False,
         'PLOT_EVENT': 'stimOn_times'
     })
 
@@ -427,13 +433,13 @@ plot_utils.plot_time_window_raster(
     pid,
     path_fig,
     save_figure=True,
-    t_start=180,
-    t_end=182,
+    t_start=1565,
+    t_end=1567,
     region_acronyms=["VISp", "ENTm"],
     df_res=df_res,
-    df_coupling=df_coupling,
+    df_coupling=df_coupling_task,
     # df_rastermap=df_rastermap,
-    sort_mode="spont"
+    sort_mode="default"
     )
 # dealy spont default rastermap
 

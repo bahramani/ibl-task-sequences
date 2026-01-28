@@ -5,6 +5,9 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 from scipy import stats
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+from matplotlib.colors import to_rgba
 
 from .analysis import (
     compute_psth_for_clusters, 
@@ -148,115 +151,179 @@ def plot_trial_raster(
             pupil_t = pt[mask_pupil]
             pupil_diam = pd_vals[mask_pupil]
 
-    fig = plt.figure(figsize=(12, 12))
-    gs = gridspec.GridSpec(
-        4,
-        2,
-        width_ratios=[20, 1],
-        height_ratios=[10, 1, 1, 1],
-        wspace=0.05,
-        hspace=0.1,
+    fig = make_subplots(
+        rows=4,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.02,
+        row_heights=[0.6, 0.13, 0.13, 0.14],
+        subplot_titles=("Raster", "Wheel", "Paw Speed", "Pupil Diameter"),
     )
 
-    ax_raster = fig.add_subplot(gs[0, 0])
-    for y_idx, row in df_units.iterrows():
-        unit_spike_times = window_spike_times[window_spike_clusters == row["cluster_id"]]
-        if len(unit_spike_times) > 0:
-            ax_raster.vlines(
-                unit_spike_times - t_offset,
-                y_idx - 0.45,
-                y_idx + 0.45,
-                color="k",
-                linewidth=0.8,
-            )
+    cluster_index_map = dict(zip(df_units["cluster_id"].values, df_units.index.values))
+    cluster_region_map = dict(zip(df_units["cluster_id"].values, df_units["acronym"].values))
+    spike_mask = np.isin(window_spike_clusters, df_units["cluster_id"].values)
+    if np.any(spike_mask):
+        spike_clusters = window_spike_clusters[spike_mask]
+        spike_times = window_spike_times[spike_mask] - t_offset
+        spike_y = pd.Series(spike_clusters).map(cluster_index_map).values
+        spike_regions = pd.Series(spike_clusters).map(cluster_region_map).values
+        fig.add_trace(
+            go.Scattergl(
+                x=spike_times,
+                y=spike_y,
+                mode="markers",
+                marker=dict(color="black", size=5, symbol="line-ns-open"),
+                customdata=np.column_stack([spike_clusters, spike_regions]),
+                hovertemplate=(
+                    "Time: %{x:.3f}s<br>"
+                    "Unit: %{customdata[0]}<br>"
+                    "Region: %{customdata[1]}<extra></extra>"
+                ),
+                name="Spikes",
+            ),
+            row=1,
+            col=1,
+        )
+    else:
+        fig.add_annotation(
+            x=0.5,
+            y=0.5,
+            xref="paper",
+            yref="y1",
+            text="No spikes in window",
+            showarrow=False,
+            row=1,
+            col=1,
+        )
 
-    for ax in [ax_raster]:
-        ax.axvline(t_stim_on - t_offset, color="blue", linestyle="-", linewidth=2)
-        ax.axvline(t_first_move - t_offset, color="green", linestyle="-", linewidth=2)
-        ax.axvline(t_feedback - t_offset, color="red", linestyle="-", linewidth=2)
-
-    ax_raster.set_xlim(t_start - t_offset, t_end - t_offset)
-    ax_raster.set_ylim(-1, len(df_units))
-    ax_raster.set_ylabel(ylabel_text)
-    ax_raster.set_title(plot_title)
-    ax_raster.tick_params(labelbottom=False)
-
-    ax_regions = fig.add_subplot(gs[0, 1])
-    y_min = 0
     for acronym, group in df_units.groupby("acronym", sort=False):
-        count = len(group)
-        color = region_colors.get(acronym, "gray")
-        ax_regions.add_patch(plt.Rectangle((0, y_min), 1, count, color=color))
-        ax_regions.text(
-            1.2,
-            y_min + count / 2,
-            acronym,
-            va="center",
-            fontsize=9,
-            color=color,
-            fontweight="bold",
+        y0 = group.index.min() - 0.5
+        y1 = group.index.max() + 0.5
+        color = region_colors.get(acronym, "lightgray")
+        shade_rgba = to_rgba(color, alpha=0.08)
+        fig.add_shape(
+            type="rect",
+            x0=t_start - t_offset,
+            x1=t_end - t_offset,
+            y0=y0,
+            y1=y1,
+            line=dict(width=0),
+            fillcolor=(
+                f"rgba({int(shade_rgba[0]*255)},"
+                f"{int(shade_rgba[1]*255)},"
+                f"{int(shade_rgba[2]*255)},"
+                f"{shade_rgba[3]:.2f})"
+            ),
+            layer="below",
+            row=1,
+            col=1,
         )
-        y_min += count
+        fig.add_annotation(
+            x=t_end - t_offset,
+            y=(y0 + y1) / 2,
+            xanchor="left",
+            yanchor="middle",
+            text=acronym,
+            showarrow=False,
+            font=dict(size=10, color="gray"),
+            xshift=10,
+            row=1,
+            col=1,
+        )
 
-    ax_regions.set_ylim(0, len(df_units))
-    ax_regions.axis("off")
+    fig.add_trace(
+        go.Scatter(x=wheel_t - t_offset, y=wheel_pos, mode="lines", line=dict(color="black")),
+        row=2,
+        col=1,
+    )
 
-    ax_wheel = fig.add_subplot(gs[1, 0], sharex=ax_raster)
-    ax_wheel.plot(wheel_t - t_offset, wheel_pos, color="black")
-    ax_wheel.set_ylabel("Wheel (rad)")
-    ax_wheel.axvline(t_stim_on - t_offset, color="blue", linewidth=1.5)
-    ax_wheel.axvline(t_first_move - t_offset, color="green", linewidth=1.5)
-    ax_wheel.axvline(t_feedback - t_offset, color="red", linewidth=1.5)
-    ax_wheel.tick_params(labelbottom=False)
-
-    ax_paw = fig.add_subplot(gs[2, 0], sharex=ax_raster)
     if paw_speed is not None:
-        ax_paw.plot(pose_t - t_offset, paw_speed, color="black")
+        fig.add_trace(
+            go.Scatter(x=pose_t - t_offset, y=paw_speed, mode="lines", line=dict(color="black")),
+            row=3,
+            col=1,
+        )
     else:
-        ax_paw.text(0.5, 0.5, "Paw data not available", ha="center", transform=ax_paw.transAxes)
-
-    ax_paw.set_ylabel("Paw (px/s)")
-    ax_paw.axvline(t_stim_on - t_offset, color="blue", linewidth=1.5)
-    ax_paw.axvline(t_first_move - t_offset, color="green", linewidth=1.5)
-    ax_paw.axvline(t_feedback - t_offset, color="red", linewidth=1.5)
-    ax_paw.tick_params(labelbottom=False)
-
-    ax_pupil = fig.add_subplot(gs[3, 0], sharex=ax_raster)
-    if pupil_diam is not None:
-        ax_pupil.plot(pupil_t - t_offset, pupil_diam, color="black")
-    else:
-        ax_pupil.text(
-            0.5, 0.5, "Pupil data not available", ha="center", transform=ax_pupil.transAxes
+        fig.add_annotation(
+            x=0.5,
+            y=0.5,
+            xref="paper",
+            yref="y3",
+            text="Paw data not available",
+            showarrow=False,
+            row=3,
+            col=1,
         )
 
-    ax_pupil.set_ylabel("Pupil (mm)")
-    ax_pupil.set_xlabel(xlabel_text)
-    ax_pupil.axvline(t_stim_on - t_offset, color="blue", linewidth=1.5)
-    ax_pupil.axvline(t_first_move - t_offset, color="green", linewidth=1.5)
-    ax_pupil.axvline(t_feedback - t_offset, color="red", linewidth=1.5)
-    ax_pupil.tick_params(labelbottom=True)
+    if pupil_diam is not None:
+        fig.add_trace(
+            go.Scatter(x=pupil_t - t_offset, y=pupil_diam, mode="lines", line=dict(color="black")),
+            row=4,
+            col=1,
+        )
+    else:
+        fig.add_annotation(
+            x=0.5,
+            y=0.5,
+            xref="paper",
+            yref="y4",
+            text="Pupil data not available",
+            showarrow=False,
+            row=4,
+            col=1,
+        )
 
-    lines = [
-        plt.Line2D([0], [0], color="blue", linewidth=2),
-        plt.Line2D([0], [0], color="green", linewidth=2),
-        plt.Line2D([0], [0], color="red", linewidth=2),
+    event_lines = [
+        ("Stim On", t_stim_on, "blue"),
+        ("First Move", t_first_move, "green"),
+        ("Feedback", t_feedback, "red"),
     ]
-    ax_raster.legend(
-        lines,
-        ["Stim On", "First Move", "Feedback"],
-        loc="upper left",
-        frameon=False,
-        bbox_to_anchor=(0, 1.15),
-        ncol=3,
+    for name, time_val, color in event_lines:
+        for row in range(1, 5):
+            fig.add_vline(
+                x=time_val - t_offset,
+                line=dict(color=color, width=2),
+                row=row,
+                col=1,
+            )
+        fig.add_trace(
+            go.Scatter(
+                x=[None],
+                y=[None],
+                mode="lines",
+                line=dict(color=color, width=2),
+                name=name,
+                showlegend=True,
+            ),
+            row=1,
+            col=1,
+        )
+
+    fig.update_yaxes(title_text=ylabel_text, row=1, col=1, showticklabels=False)
+    fig.update_yaxes(title_text="Wheel (rad)", row=2, col=1)
+    fig.update_yaxes(title_text="Paw (px/s)", row=3, col=1)
+    fig.update_yaxes(title_text="Pupil (mm)", row=4, col=1)
+    fig.update_xaxes(title_text=xlabel_text, row=4, col=1)
+    fig.update_xaxes(range=[t_start - t_offset, t_end - t_offset])
+
+    fig.update_layout(
+        title=plot_title,
+        template="plotly_white",
+        height=900,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        hovermode="closest",
+        margin=dict(l=70, r=40, t=80, b=60),
     )
 
     if save_figure:
-        filename = f"{pid}_{trial_idx}_Raster.png"
+        filename = f"{pid}_{trial_idx}_Raster.html"
         save_path = path_fig / filename
-        fig.savefig(save_path, dpi=300, bbox_inches="tight")
+        fig.write_html(save_path, include_plotlyjs="cdn")
         print(f"Figure saved to: {save_path}")
 
-    plt.show()
+    fig.show()
+
 
 
 def plot_delay_histogram(df_res, config_calc, config_plot, save_flag, path_fig, pid):
