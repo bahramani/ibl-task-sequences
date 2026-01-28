@@ -35,7 +35,7 @@ CONFIG_CALC = {
     # Which atlas to use when assigning brain regions ("Beryl" or "Allen")
     "ATLAS_MAPPING": "Beryl",
     # Run calculations only on good units (label == 1) or on all units
-    "CALC_ONLY_GOOD_UNITS": False,
+    "CALC_ONLY_GOOD_UNITS": True,
     # Load spontaneous data
     "CALC_SPONT": True,
     # Events to compute delays for
@@ -73,7 +73,7 @@ CONFIG_PLOT = {
     # Which atlas to use for plots ("Beryl" or "Allen")
     "ATLAS_MAPPING": "Beryl",
     # Plot only good units (label == 1) or all units
-    "PLOT_ONLY_GOOD_UNITS": False,
+    "PLOT_ONLY_GOOD_UNITS": True,
     # Event to use for alignment and sorting
     "PLOT_EVENT": "stimOn_times",
     # Regions to plot when region_acronyms is not provided
