@@ -5,7 +5,9 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path.cwd().parent))  # if notebook is in /notebooks/
 
-from utils.io import setup_paths, init_one, prepare_region_dirs, map_acronyms, load_session_data, build_cluster_id_map, load_pupil_data
+from utils.io import (setup_paths, init_one, prepare_region_dirs, map_acronyms,
+                      load_session_data, build_cluster_id_map, load_pupil_data,
+                      load_and_combine_multi_probe_data, print_region_info)
 import utils.analysis as ana_utils
 import utils.plotting as plot_utils
 
@@ -38,6 +40,9 @@ CONFIG_CALC = {
     "CALC_ONLY_GOOD_UNITS": True,
     # Load spontaneous data
     "CALC_SPONT": True,
+    # Combine spikes from all probes in the same session (EID)
+    # Set to False or negative to disable multi-probe combining
+    "COMBINE_MULTI_PROBE": True,
     # Events to compute delays for
     "EVENT_NAMES": ["stimOn_times", "firstMovement_times", "response_times", "feedback_times"],
     # Delay calculation method: "center_of_mass", "psth_peak", or "tfs"
@@ -131,7 +136,23 @@ pid = "c9664185-d3fd-4e0e-89cf-77c402038938"
 # pid = # '3d3d5a5e-df26-43ee-80b6-2d72d85668a5'
 print(f"\nProcessing PID: {pid}")
 
-ssl, spikes, clusters, sl = load_session_data(pid, one, ba)
+# Check if multi-probe combining is enabled
+combine_multi_probe = CONFIG_CALC.get("COMBINE_MULTI_PROBE", False)
+if isinstance(combine_multi_probe, (int, float)) and combine_multi_probe < 0:
+    combine_multi_probe = False
+
+if combine_multi_probe:
+    print("\n=== Multi-probe combining enabled ===")
+    ssl, spikes, clusters, sl, other_pids = load_and_combine_multi_probe_data(
+        pid, one, ba, br, atlas_mapping=CONFIG_CALC["ATLAS_MAPPING"]
+    )
+else:
+    ssl, spikes, clusters, sl = load_session_data(pid, one, ba)
+    other_pids = []
+    # Print region info for single probe mode
+    cluster_acronyms_temp = map_acronyms(clusters, br, CONFIG_CALC["ATLAS_MAPPING"])
+    print_region_info(clusters, cluster_acronyms_temp, label="original PID")
+
 pupil_features, pupil_times = load_pupil_data(sl)
 
 # Resolve cluster IDs for safe indexing.
