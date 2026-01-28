@@ -67,6 +67,8 @@ CONFIG_CALC = {
     "STPR_SMOOTH_SIGMA_MS": 5,
     # Use only good units when building population rate for stPR
     "STPR_POP_USE_GOOD_UNITS": False,
+    # Combine spikes/clusters across all PIDs in the same EID (negative = current behavior)
+    "COMBINE_PIDS": -1,
 }
 
 CONFIG_PLOT = {
@@ -134,6 +136,94 @@ print(f"\nProcessing PID: {pid}")
 ssl, spikes, clusters, sl = load_session_data(pid, one, ba)
 pupil_features, pupil_times = load_pupil_data(sl)
 
+eid = one.pid2eid(pid)[0]
+
+# Optionally combine spikes/clusters across all other PIDs for this EID.
+combine_pids_flag = CONFIG_CALC.get("COMBINE_PIDS", -1)
+if combine_pids_flag is not None and combine_pids_flag >= 0:
+    all_pids = one.eid2pid(eid)
+    if isinstance(all_pids, tuple):
+        all_pids = all_pids[0]
+    pid_str = str(pid)
+    all_pids = [str(p) for p in all_pids]
+    all_pids = list(dict.fromkeys(all_pids))
+    other_pids = [p for p in all_pids if p != pid_str]
+    region_scope = "good units" if CONFIG_CALC["CALC_ONLY_GOOD_UNITS"] else "all units"
+
+    cluster_acronyms_calc_orig = map_acronyms(clusters, br, CONFIG_CALC["ATLAS_MAPPING"])
+    region_labels = np.asarray(cluster_acronyms_calc_orig)
+    if CONFIG_CALC["CALC_ONLY_GOOD_UNITS"] and "label" in clusters:
+        region_labels = region_labels[np.asarray(clusters["label"]) == 1]
+    if len(region_labels) > 0:
+        region_counts = pd.Series(region_labels).value_counts().sort_index()
+        region_summary = ", ".join(
+            [f"{region} ({count})" for region, count in region_counts.items()]
+        )
+    else:
+        region_summary = "None"
+    print(f"Regions in original PID ({region_scope}): {region_summary}")
+
+    if len(other_pids) == 0:
+        print("No other PIDs found for this EID.")
+    else:
+        next_cluster_offset = int(np.max(np.asarray(clusters["cluster_id"]))) + 1
+        for other_pid in other_pids:
+            ssl_other, spikes_other, clusters_other, _sl_other = load_session_data(
+                other_pid, one, ba
+            )
+
+            cluster_acronyms_other = map_acronyms(
+                clusters_other, br, CONFIG_CALC["ATLAS_MAPPING"]
+            )
+            other_region_labels = np.asarray(cluster_acronyms_other)
+            if CONFIG_CALC["CALC_ONLY_GOOD_UNITS"] and "label" in clusters_other:
+                other_region_labels = other_region_labels[
+                    np.asarray(clusters_other["label"]) == 1
+                ]
+            if len(other_region_labels) > 0:
+                other_counts = pd.Series(other_region_labels).value_counts().sort_index()
+                other_summary = ", ".join(
+                    [f"{region} ({count})" for region, count in other_counts.items()]
+                )
+            else:
+                other_summary = "None"
+            print(f"Regions in other PID {other_pid} ({region_scope}): {other_summary}")
+
+            # Offset cluster IDs to avoid collisions across probes.
+            clusters_other_ids = np.asarray(clusters_other["cluster_id"])
+            clusters_other["cluster_id"] = clusters_other_ids + next_cluster_offset
+            spikes_other["clusters"] = (
+                np.asarray(spikes_other["clusters"]) + next_cluster_offset
+            )
+
+            # Combine spikes.
+            for key in spikes.keys():
+                if key in spikes_other:
+                    spikes[key] = np.concatenate(
+                        [np.asarray(spikes[key]), np.asarray(spikes_other[key])]
+                    )
+
+            # Combine clusters (handle pandas DataFrame metrics if present).
+            cluster_keys = set(list(clusters.keys()) + list(clusters_other.keys()))
+            for key in cluster_keys:
+                if key not in clusters:
+                    clusters[key] = clusters_other[key]
+                    continue
+                if key not in clusters_other:
+                    continue
+                base_val = clusters[key]
+                other_val = clusters_other[key]
+                if isinstance(base_val, pd.DataFrame) or isinstance(other_val, pd.DataFrame):
+                    base_df = base_val if isinstance(base_val, pd.DataFrame) else pd.DataFrame(base_val)
+                    other_df = other_val if isinstance(other_val, pd.DataFrame) else pd.DataFrame(other_val)
+                    clusters[key] = pd.concat([base_df, other_df], ignore_index=True)
+                else:
+                    clusters[key] = np.concatenate(
+                        [np.asarray(base_val), np.asarray(other_val)]
+                    )
+
+            next_cluster_offset = int(np.max(np.asarray(clusters["cluster_id"]))) + 1
+
 # Resolve cluster IDs for safe indexing.
 cluster_ids, cid_to_idx = build_cluster_id_map(clusters)
 
@@ -145,8 +235,6 @@ cluster_acronyms_plot = map_acronyms(clusters, br, CONFIG_PLOT["ATLAS_MAPPING"])
 events_by_name, contrasts_by_name = ana_utils.build_event_dicts(
     sl, CONFIG_CALC["EVENT_NAMES"], CONFIG_CALC["MIN_TRIALS"]
 )
-
-eid = one.pid2eid(pid)[0]
 
 # %% Load spontaneous activity periods
 good_cluster_ids = None
