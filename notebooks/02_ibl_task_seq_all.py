@@ -38,6 +38,8 @@ CONFIG_CALC = {
     "CALC_ONLY_GOOD_UNITS": True,
     # Load spontaneous data
     "CALC_SPONT": True,
+    # Combine spikes from all probes of the same experiment (negative/False = use only the specified PID)
+    "COMBINE_MULTI_PROBE_SPIKES": False,
     # Events to compute delays for
     "EVENT_NAMES": ["stimOn_times", "firstMovement_times", "response_times", "feedback_times"],
     # Delay calculation method: "center_of_mass", "psth_peak", or "tfs"
@@ -134,6 +136,87 @@ print(f"\nProcessing PID: {pid}")
 ssl, spikes, clusters, sl = load_session_data(pid, one, ba)
 pupil_features, pupil_times = load_pupil_data(sl)
 
+eid = one.pid2eid(pid)[0]
+
+# Print regions and neuron counts for the original PID
+cluster_acronyms_original = map_acronyms(clusters, br, CONFIG_CALC["ATLAS_MAPPING"])
+original_regions = {}
+for acronym in np.unique(cluster_acronyms_original):
+    original_regions[acronym] = np.sum(cluster_acronyms_original == acronym)
+print(f"\nRegions in original PID ({pid[:8]}...): ", end="")
+print(", ".join([f"{r}: {c}" for r, c in sorted(original_regions.items(), key=lambda x: -x[1])]))
+
+# Combine spikes from all probes of the same experiment if flag is set
+if CONFIG_CALC["COMBINE_MULTI_PROBE_SPIKES"]:
+    print("\n=== Combining spikes from all probes of the same experiment ===")
+
+    # Get all PIDs for this EID
+    all_pids = one.eid2pid(eid)[0]
+    other_pids = [p for p in all_pids if p != pid]
+
+    print(f"EID: {eid}")
+    print(f"Original PID: {pid}")
+    print(f"Other PIDs found: {other_pids}")
+
+    if len(other_pids) > 0:
+        # Get the maximum cluster_id from the original clusters to offset new cluster IDs
+        max_cluster_id = int(np.max(clusters['cluster_id'])) + 1
+
+        for other_pid in other_pids:
+            print(f"\nLoading data from other PID: {other_pid}")
+
+            # Load spikes and clusters from the other probe
+            ssl_other = SpikeSortingLoader(pid=other_pid, one=one, atlas=ba)
+            spikes_other, clusters_other, channels_other = ssl_other.load_spike_sorting()
+            clusters_other = ssl_other.merge_clusters(spikes_other, clusters_other, channels_other)
+
+            # Print regions and neuron counts for this other PID
+            cluster_acronyms_other = map_acronyms(clusters_other, br, CONFIG_CALC["ATLAS_MAPPING"])
+            other_regions = {}
+            for acronym in np.unique(cluster_acronyms_other):
+                other_regions[acronym] = np.sum(cluster_acronyms_other == acronym)
+            print(f"Regions in the other simultaneous PID ({other_pid[:8]}...): ", end="")
+            print(", ".join([f"{r}: {c}" for r, c in sorted(other_regions.items(), key=lambda x: -x[1])]))
+
+            # Offset cluster IDs in the other probe to avoid collisions
+            original_cluster_ids = np.asarray(clusters_other['cluster_id'])
+            offset_cluster_ids = original_cluster_ids + max_cluster_id
+
+            # Update the cluster_id mapping in spikes_other
+            cluster_id_map = dict(zip(original_cluster_ids, offset_cluster_ids))
+            spikes_other_clusters_offset = np.array([cluster_id_map[c] for c in spikes_other['clusters']])
+
+            # Update clusters_other with offset IDs
+            clusters_other_dict = {key: np.asarray(val) for key, val in clusters_other.items()}
+            clusters_other_dict['cluster_id'] = offset_cluster_ids
+
+            # Combine spikes
+            spikes = {
+                'times': np.concatenate([spikes['times'], spikes_other['times']]),
+                'clusters': np.concatenate([spikes['clusters'], spikes_other_clusters_offset]),
+                'amps': np.concatenate([spikes['amps'], spikes_other['amps']]),
+                'depths': np.concatenate([spikes['depths'], spikes_other['depths']]),
+            }
+
+            # Sort spikes by time
+            sort_idx = np.argsort(spikes['times'])
+            spikes = {key: val[sort_idx] for key, val in spikes.items()}
+
+            # Combine clusters
+            clusters_dict = {key: np.asarray(val) for key, val in clusters.items()}
+            for key in clusters_dict.keys():
+                if key in clusters_other_dict:
+                    clusters_dict[key] = np.concatenate([clusters_dict[key], clusters_other_dict[key]])
+            clusters = pd.DataFrame(clusters_dict)
+
+            # Update max_cluster_id for next iteration
+            max_cluster_id = int(np.max(clusters['cluster_id'])) + 1
+
+            print(f"Combined spikes: {len(spikes['times'])} total")
+            print(f"Combined clusters: {len(clusters)} total")
+    else:
+        print("No other probes found for this experiment.")
+
 # Resolve cluster IDs for safe indexing.
 cluster_ids, cid_to_idx = build_cluster_id_map(clusters)
 
@@ -145,8 +228,6 @@ cluster_acronyms_plot = map_acronyms(clusters, br, CONFIG_PLOT["ATLAS_MAPPING"])
 events_by_name, contrasts_by_name = ana_utils.build_event_dicts(
     sl, CONFIG_CALC["EVENT_NAMES"], CONFIG_CALC["MIN_TRIALS"]
 )
-
-eid = one.pid2eid(pid)[0]
 
 # %% Load spontaneous activity periods
 good_cluster_ids = None
