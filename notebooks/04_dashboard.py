@@ -22,6 +22,8 @@ from utils.plotting_plotly import (
     plot_coupling_strength_summary_plotly,
     plot_coupling_delay_summary_plotly,
     plot_coupling_sorting_summary_plotly,
+    plot_single_neuron_plotly,
+    plot_stpr_curve_halves_plotly,
 )
 
 try:
@@ -89,6 +91,15 @@ def _build_region_colors(acronyms):
         except Exception:
             continue
     return colors
+
+
+def _get_cached_value(state_key, key, builder):
+    cache_key = f"{state_key}_key"
+    value_key = f"{state_key}_value"
+    if st.session_state.get(cache_key) != key:
+        st.session_state[cache_key] = key
+        st.session_state[value_key] = builder()
+    return st.session_state.get(value_key)
 
 
 st.title("Neuron Session Dashboard")
@@ -201,11 +212,45 @@ if plot_only_good and good_cluster_ids is not None:
 st.subheader("General Raster")
 min_time = float(np.nanmin(spikes["times"]))
 max_time = float(np.nanmax(spikes["times"]))
-col_a, col_b = st.columns(2)
+if "general_t_start" not in st.session_state:
+    st.session_state.general_t_start = float(min_time)
+if "general_t_end" not in st.session_state:
+    st.session_state.general_t_end = float(min(min_time + 10.0, max_time))
+
+col_a, col_b, col_shift = st.columns([1, 1, 0.5])
+with col_shift:
+    shift_window = st.button("Shift +1s")
+if shift_window:
+    window = st.session_state.general_t_end - st.session_state.general_t_start
+    total_range = max_time - min_time
+    if window <= 0:
+        window = min(10.0, total_range)
+    if total_range > 0 and window > total_range:
+        window = total_range
+    new_start = st.session_state.general_t_start + 1.0
+    new_end = st.session_state.general_t_end + 1.0
+    if new_end > max_time:
+        new_end = max_time
+        new_start = max_time - window
+    if new_start < min_time:
+        new_start = min_time
+        new_end = min_time + window
+    st.session_state.general_t_start = float(new_start)
+    st.session_state.general_t_end = float(new_end)
 with col_a:
-    t_start = st.number_input("Start time (s)", value=min_time, min_value=min_time, max_value=max_time)
+    t_start = st.number_input(
+        "Start time (s)",
+        key="general_t_start",
+        min_value=min_time,
+        max_value=max_time,
+    )
 with col_b:
-    t_end = st.number_input("End time (s)", value=min(min_time + 10.0, max_time), min_value=min_time, max_value=max_time)
+    t_end = st.number_input(
+        "End time (s)",
+        key="general_t_end",
+        min_value=min_time,
+        max_value=max_time,
+    )
 
 general_sort = st.selectbox(
     "General raster sorting",
@@ -282,48 +327,115 @@ plot_sort_map = {
     "Coupling Task": "task",
     "Default": "depth",
 }
+pop_key = (
+    pid,
+    plot_only_good,
+    plot_sort,
+    plot_config["PLOTLY_TEMPLATE"],
+    tuple(config_plot.get("PLOT_REGIONS") or []),
+    config_plot.get("POP_BIN_SIZE"),
+    config_plot.get("POP_SMOOTH_SIGMA"),
+    config_plot.get("POP_CMAP_NAME"),
+    config_plot.get("POP_NORMALIZE"),
+)
 
+def _build_population_figs():
+    figs = []
+    for event_name in ["stimOn_times", "firstMovement_times", "feedback_times"]:
+        cfg = dict(config_plot)
+        cfg["PLOT_EVENT"] = event_name
+        cfg["PLOT_ONLY_GOOD_UNITS"] = plot_only_good
+        cfg["PLOTLY_TEMPLATE"] = plot_config["PLOTLY_TEMPLATE"]
+        figs.append(
+            plot_population_sorted_plotly(
+                session,
+                spikes,
+                clusters,
+                cluster_ids,
+                cluster_acronyms,
+                data.get("df_res"),
+                cfg,
+                df_coupling=df_coupling_plot,
+                df_coupling_task=df_coupling_task_plot,
+                region_acronyms=cfg.get("PLOT_REGIONS"),
+                sort_mode=plot_sort_map[plot_sort],
+            )
+        )
+    return figs
+
+pop_figs = _get_cached_value("population_analysis_figs", pop_key, _build_population_figs)
 cols = st.columns(3)
-for event_name, col in zip(["stimOn_times", "firstMovement_times", "feedback_times"], cols):
-    cfg = dict(config_plot)
-    cfg["PLOT_EVENT"] = event_name
-    cfg["PLOT_ONLY_GOOD_UNITS"] = plot_only_good
-    cfg["PLOTLY_TEMPLATE"] = plot_config["PLOTLY_TEMPLATE"]
-    fig_pop = plot_population_sorted_plotly(
-        session,
-        spikes,
-        clusters,
-        cluster_ids,
-        cluster_acronyms,
-        data.get("df_res"),
-        cfg,
-        df_coupling=df_coupling_plot,
-        df_coupling_task=df_coupling_task_plot,
-        region_acronyms=cfg.get("PLOT_REGIONS"),
-        sort_mode=plot_sort_map[plot_sort],
-    )
+for fig_pop, col in zip(pop_figs or [], cols):
     col.plotly_chart(fig_pop, width="stretch")
 
 st.subheader("Coupling")
-col1, col2 = st.columns(2)
-with col1:
-    st.markdown("**Spont Coupling**")
+coupling_key = (
+    pid,
+    plot_only_good,
+    plot_config["PLOTLY_TEMPLATE"],
+    tuple(config_plot.get("PLOT_REGIONS") or []),
+    config_calc.get("STPR_BIN_SIZE"),
+    config_calc.get("STPR_WINDOW_MS"),
+    plot_config.get("POP_CMAP_NAME"),
+)
+
+def _build_coupling_figs():
     fig_spont = plot_population_coupling_heatmap_plotly(
         df_coupling_plot,
         plot_config,
         config_calc,
         region_acronyms=config_plot.get("PLOT_REGIONS"),
     )
-    st.plotly_chart(fig_spont, width="stretch")
-with col2:
-    st.markdown("**Task Coupling**")
     fig_task = plot_population_coupling_heatmap_plotly(
         df_coupling_task_plot,
         plot_config,
         config_calc,
         region_acronyms=config_plot.get("PLOT_REGIONS"),
     )
+    return fig_spont, fig_task
+
+fig_spont, fig_task = _get_cached_value("coupling_figs", coupling_key, _build_coupling_figs)
+col1, col2 = st.columns(2)
+with col1:
+    st.markdown("**Spont Coupling**")
+    st.plotly_chart(fig_spont, width="stretch")
+with col2:
+    st.markdown("**Task Coupling**")
     st.plotly_chart(fig_task, width="stretch")
+
+units_df = pd.DataFrame(
+    {
+        "cluster_id": np.asarray(cluster_ids),
+        "region": np.asarray(cluster_acronyms).astype(str),
+    }
+)
+if labels is not None:
+    units_df["good"] = labels == 1
+else:
+    units_df["good"] = np.nan
+
+if plot_only_good and labels is not None:
+    units_df = units_df[units_df["good"]]
+
+units_df = units_df.sort_values(["region", "cluster_id"]).reset_index(drop=True)
+label_map = {}
+units_df_empty = units_df.empty
+if units_df_empty:
+    selected_cluster_id = None
+else:
+    for _, row in units_df.iterrows():
+        good_val = row["good"]
+        if pd.isna(good_val):
+            good_text = "NA"
+        else:
+            good_text = "Good" if bool(good_val) else "Not good"
+        label_map[row["cluster_id"]] = f"{row['cluster_id']} | {row['region']} | {good_text}"
+
+    default_cluster_id = int(units_df["cluster_id"].iloc[0])
+    selected_cluster_id = st.session_state.get("single_neuron_select", default_cluster_id)
+    if selected_cluster_id not in units_df["cluster_id"].values:
+        selected_cluster_id = default_cluster_id
+        st.session_state["single_neuron_select"] = selected_cluster_id
 
 st.subheader("stPR Comparison")
 region_order = None
@@ -335,14 +447,75 @@ fig_strength = plot_coupling_strength_summary_plotly(
     region_order,
     region_colors=region_colors,
     template=plot_config["PLOTLY_TEMPLATE"],
+    highlight_cluster_id=selected_cluster_id,
 )
 fig_delay = plot_coupling_delay_summary_plotly(
     df_comparison_plot,
     region_order,
     region_colors=region_colors,
     template=plot_config["PLOTLY_TEMPLATE"],
+    highlight_cluster_id=selected_cluster_id,
 )
 
 cols = st.columns(2)
 cols[0].plotly_chart(fig_strength, width="stretch")
 cols[1].plotly_chart(fig_delay, width="stretch")
+
+st.subheader("Single Neuron")
+if units_df_empty or selected_cluster_id is None:
+    st.info("No neurons available for selection with current filters.")
+else:
+    selected_idx = int(
+        np.where(units_df["cluster_id"].values == selected_cluster_id)[0][0]
+    )
+    selected_cluster_id = st.selectbox(
+        "Select neuron",
+        units_df["cluster_id"].tolist(),
+        index=selected_idx,
+        format_func=lambda cid: label_map.get(cid, str(cid)),
+        key="single_neuron_select",
+    )
+
+    selected_row = units_df.loc[units_df["cluster_id"] == selected_cluster_id].iloc[0]
+    quality_text = "NA"
+    if pd.notna(selected_row["good"]):
+        quality_text = "Good" if bool(selected_row["good"]) else "Not good"
+
+    info_cols = st.columns(3)
+    info_cols[0].metric("Cluster ID", selected_cluster_id)
+    info_cols[1].metric("Region", selected_row["region"])
+    info_cols[2].metric("Quality", quality_text)
+
+    fig_single = plot_single_neuron_plotly(
+        session,
+        spikes,
+        clusters,
+        cluster_ids,
+        cluster_acronyms,
+        data.get("df_res"),
+        plot_config,
+        selected_cluster_id,
+    )
+    st.plotly_chart(fig_single, width="stretch")
+
+    col_task, col_spont = st.columns(2)
+    with col_task:
+        st.markdown("**Task stPR (First vs Second Half)**")
+        fig_task_curve = plot_stpr_curve_halves_plotly(
+            df_coupling_task_plot,
+            config_calc,
+            selected_cluster_id,
+            title="Task stPR Curve (First vs Second Half)",
+            template=plot_config["PLOTLY_TEMPLATE"],
+        )
+        st.plotly_chart(fig_task_curve, width="stretch")
+    with col_spont:
+        st.markdown("**Spont stPR (First vs Second Half)**")
+        fig_spont_curve = plot_stpr_curve_halves_plotly(
+            df_coupling_plot,
+            config_calc,
+            selected_cluster_id,
+            title="Spont stPR Curve (First vs Second Half)",
+            template=plot_config["PLOTLY_TEMPLATE"],
+        )
+        st.plotly_chart(fig_spont_curve, width="stretch")

@@ -5,6 +5,7 @@ import plotly.express as px
 from plotly.subplots import make_subplots
 from plotly_resampler import FigureResampler
 from scipy.stats import pearsonr, spearmanr
+from types import SimpleNamespace
 
 from .analysis import compute_psth_for_clusters, event_label, delay_column_name
 
@@ -666,6 +667,370 @@ def plot_trial_raster_plotly(
         margin=dict(l=70, r=40, t=80, b=60),
     )
     fig.update_layout(template=template, font=dict(color=base_color))
+
+    return fig
+
+
+def _template_base_color(template):
+    if template is None:
+        return "black"
+    return "white" if "dark" in template.lower() else "black"
+
+
+def plot_single_neuron_plotly(
+    sl,
+    spikes,
+    clusters,
+    cluster_ids,
+    cluster_acronyms,
+    df_res,
+    config_plot,
+    cluster_id,
+):
+    """Plot PSTHs and rasters for a single neuron using plotly."""
+    trials = _get_session_field(sl, "trials")
+    if trials is None:
+        return go.Figure()
+
+    cluster_ids = np.asarray(cluster_ids)
+    cluster_acronyms = np.asarray(cluster_acronyms).astype(str)
+    if cluster_id not in cluster_ids:
+        fallback_id = cluster_ids[0] if len(cluster_ids) > 0 else None
+        if fallback_id is None:
+            return go.Figure()
+        cluster_id = fallback_id
+
+    idx = int(np.where(cluster_ids == cluster_id)[0][0])
+    target_acronym = cluster_acronyms[idx]
+
+    align_event = config_plot.get("PLOT_EVENT", "stimOn_times")
+    if align_event not in trials.keys():
+        align_event = "stimOn_times"
+
+    delay_col = delay_column_name(align_event)
+    unit_delay = np.nan
+    if df_res is not None and delay_col in df_res.columns:
+        match = df_res[df_res["cluster_id"] == cluster_id]
+        if not match.empty:
+            unit_delay = float(match.iloc[0][delay_col])
+
+    def _get_trials_array(key):
+        if hasattr(trials, "keys") and key in trials.keys():
+            return np.asarray(trials[key])
+        if hasattr(trials, key):
+            return np.asarray(getattr(trials, key))
+        return None
+
+    def _get_spike_array(key):
+        if spikes is None:
+            return np.array([])
+        if isinstance(spikes, dict):
+            return np.asarray(spikes.get(key, []))
+        return np.asarray(getattr(spikes, key, []))
+
+    spike_times = _get_spike_array("times")
+    spike_clusters = _get_spike_array("clusters")
+    spikes_obj = spikes
+    if isinstance(spikes, dict):
+        spikes_obj = SimpleNamespace(times=spike_times, clusters=spike_clusters)
+    neuron_spikes = spike_times[spike_clusters == cluster_id]
+
+    raster_pre = config_plot["SINGLE_NEURON_RASTER_PRE"]
+    raster_post = config_plot["SINGLE_NEURON_RASTER_POST"]
+    bin_size = config_plot["SINGLE_NEURON_BIN_SIZE"]
+    smooth_sigma = config_plot["SINGLE_NEURON_SMOOTH_SIGMA"]
+
+    template = config_plot.get("PLOTLY_TEMPLATE", "plotly_white")
+    base_color = _template_base_color(template)
+
+    fig = make_subplots(
+        rows=3,
+        cols=2,
+        specs=[[{}, {}], [{}, {}], [{"colspan": 2}, None]],
+        subplot_titles=(
+            "Left Stimuli PSTH",
+            "Right Stimuli PSTH",
+            "Left Stimuli Raster",
+            "Right Stimuli Raster",
+            "Global PSTH (All Trials)",
+        ),
+        row_heights=[0.25, 0.45, 0.3],
+        vertical_spacing=0.08,
+        horizontal_spacing=0.06,
+    )
+
+    contrasts_to_plot = [1.0, 0.25, 0.125, 0.0625, 0.0]
+    contrast_colors = {
+        1.0: "rgba(0,0,0,1.0)",
+        0.5: "rgba(51,51,51,1.0)",
+        0.25: "rgba(102,102,102,1.0)",
+        0.125: "rgba(153,153,153,1.0)",
+        0.0625: "rgba(191,191,191,1.0)",
+        0.0: "rgba(217,217,217,1.0)",
+    }
+
+    event_series = _get_trials_array(align_event)
+    if event_series is None:
+        return go.Figure()
+
+    sides = [("Left", "contrastLeft"), ("Right", "contrastRight")]
+    global_curves = []
+    global_bin_centers = None
+    for col_idx, (side_label, contrast_key) in enumerate(sides, start=1):
+        contrast_arr = _get_trials_array(contrast_key)
+        if contrast_arr is None:
+            continue
+
+        current_raster_y = 0
+        raster_x = []
+        raster_y = []
+        raster_colors = []
+
+        for cont in contrasts_to_plot:
+            mask = (contrast_arr == cont) & (~np.isnan(event_series))
+            events = event_series[mask]
+            if len(events) == 0:
+                continue
+
+            psth_by_cluster, bin_centers = compute_psth_for_clusters(
+                spikes_obj,
+                [cluster_id],
+                events,
+                -raster_pre,
+                raster_post,
+                bin_size,
+                smooth_sigma,
+                show_progress=False,
+            )
+            psth_entry = psth_by_cluster.get(cluster_id)
+            if psth_entry and bin_centers is not None:
+                firing_rate = psth_entry["fr_smooth"]
+            else:
+                firing_rate = np.zeros(len(bin_centers) if bin_centers is not None else 0)
+
+            color_val = contrast_colors.get(cont, "rgba(0,0,0,1.0)")
+            label_text = f"{cont * 100:.0f}%" if cont > 0 else "0%"
+            fig.add_trace(
+                go.Scatter(
+                    x=bin_centers,
+                    y=firing_rate,
+                    mode="lines",
+                    line=dict(color=color_val, width=2),
+                    name=label_text,
+                    showlegend=(col_idx == 1),
+                    legendgroup=label_text,
+                ),
+                row=1,
+                col=col_idx,
+            )
+            if bin_centers is not None and len(firing_rate) > 0:
+                global_curves.append(np.asarray(firing_rate, dtype=float))
+                if global_bin_centers is None:
+                    global_bin_centers = np.asarray(bin_centers, dtype=float)
+
+            for event_t in events:
+                t_start = event_t - raster_pre
+                t_end = event_t + raster_post
+                trial_spikes = neuron_spikes[
+                    (neuron_spikes >= t_start) & (neuron_spikes <= t_end)
+                ]
+                aligned_spikes = trial_spikes - event_t
+                if len(aligned_spikes) > 0:
+                    raster_x.extend(aligned_spikes.tolist())
+                    raster_y.extend([current_raster_y] * len(aligned_spikes))
+                    raster_colors.extend([color_val] * len(aligned_spikes))
+                current_raster_y += 1
+
+            current_raster_y += 2
+
+        fig.add_trace(
+            go.Scattergl(
+                x=raster_x,
+                y=raster_y,
+                mode="markers",
+                marker=dict(color=raster_colors, size=5, symbol="line-ns-open"),
+                showlegend=False,
+            ),
+            row=2,
+            col=col_idx,
+        )
+
+        fig.add_vline(x=0, line=dict(color="black", dash="dash"), row=1, col=col_idx)
+        fig.add_vline(x=0, line=dict(color="black", dash="dash"), row=2, col=col_idx)
+        fig.update_xaxes(range=[-raster_pre, raster_post], row=1, col=col_idx)
+        fig.update_xaxes(range=[-raster_pre, raster_post], row=2, col=col_idx)
+        fig.update_yaxes(title_text="Firing Rate (Hz)", row=1, col=col_idx)
+        fig.update_yaxes(title_text="Trials", showticklabels=False, row=2, col=col_idx)
+
+    if global_curves and global_bin_centers is not None:
+        min_len = min(len(curve) for curve in global_curves)
+        curves = [curve[:min_len] for curve in global_curves]
+        global_curve = np.nanmean(np.vstack(curves), axis=0)
+        x_vals = global_bin_centers[:min_len]
+        fig.add_trace(
+            go.Scatter(
+                x=x_vals,
+                y=global_curve,
+                mode="lines",
+                line=dict(color=base_color, width=2),
+                name="Global PSTH",
+                showlegend=False,
+            ),
+            row=3,
+            col=1,
+        )
+
+        if np.isfinite(unit_delay):
+            fig.add_vline(
+                x=unit_delay,
+                line=dict(color="red", width=2),
+                row=3,
+                col=1,
+            )
+            y_text = float(np.nanmax(global_curve)) * 0.9 if len(global_curve) > 0 else 0
+            fig.add_annotation(
+                x=unit_delay,
+                y=y_text,
+                text=f"{unit_delay * 1000:.0f} ms",
+                showarrow=False,
+                font=dict(color="red"),
+                row=3,
+                col=1,
+            )
+
+        fig.add_vline(
+            x=0,
+            line=dict(color="blue", dash="dash"),
+            row=3,
+            col=1,
+        )
+        fig.update_xaxes(title_text=f"Time from {event_label(align_event)} (s)", row=3, col=1)
+        fig.update_yaxes(title_text="Firing Rate (Hz)", row=3, col=1)
+    else:
+        fig.add_annotation(
+            x=0.5,
+            y=0.5,
+            text="No valid trials found",
+            showarrow=False,
+            row=3,
+            col=1,
+        )
+
+    fig.update_layout(
+        title=f"Cluster #{cluster_id} ({target_acronym}) Response Analysis",
+        height=900,
+        margin=dict(l=70, r=40, t=80, b=60),
+    )
+    fig.update_layout(template=template, font=dict(color=base_color))
+
+    return fig
+
+
+def _build_stpr_lags(config_calc, curve_len=None):
+    bin_size_ms = config_calc.get("STPR_BIN_SIZE", 0.001) * 1000
+    if bin_size_ms <= 0:
+        bin_size_ms = 1.0
+    window_ms = config_calc.get("STPR_WINDOW_MS", 80)
+    window_bins = int(round(window_ms / bin_size_ms)) if bin_size_ms > 0 else 0
+    if curve_len is None:
+        return np.arange(-window_bins, window_bins + 1) * bin_size_ms
+    expected_len = window_bins * 2 + 1
+    if curve_len == expected_len:
+        return np.arange(-window_bins, window_bins + 1) * bin_size_ms
+    half = (curve_len - 1) / 2.0
+    return (np.arange(curve_len) - half) * bin_size_ms
+
+
+def plot_stpr_curve_halves_plotly(
+    df_coupling,
+    config_calc,
+    cluster_id,
+    title=None,
+    template=None,
+):
+    """Plot stPR curves for first and second halves of a session."""
+    fig = go.Figure()
+    if template is None:
+        template, base_color = _white_theme()
+    else:
+        base_color = _template_base_color(template)
+
+    if df_coupling is None or len(df_coupling) == 0:
+        fig.add_annotation(text="No coupling data available", showarrow=False)
+        fig.update_layout(
+            title=title or "stPR Curves (First vs Second Half)",
+            template=template,
+            font=dict(color=base_color),
+        )
+        return fig
+
+    match = df_coupling[df_coupling["cluster_id"] == cluster_id]
+    if match.empty:
+        fig.add_annotation(text="Selected neuron not found in coupling data", showarrow=False)
+        fig.update_layout(
+            title=title or "stPR Curves (First vs Second Half)",
+            template=template,
+            font=dict(color=base_color),
+        )
+        return fig
+
+    row = match.iloc[0]
+    curve_h1 = np.asarray(row.get("stpr_curve_h1", []), dtype=float)
+    curve_h2 = np.asarray(row.get("stpr_curve_h2", []), dtype=float)
+    if curve_h1.size == 0 and "stpr_curve" in row:
+        curve_h1 = np.asarray(row.get("stpr_curve", []), dtype=float)
+
+    if curve_h1.size == 0 and curve_h2.size == 0:
+        fig.add_annotation(text="No stPR curve data available", showarrow=False)
+        fig.update_layout(
+            title=title or "stPR Curves (First vs Second Half)",
+            template=template,
+            font=dict(color=base_color),
+        )
+        return fig
+
+    colors = ["#1f77b4", "#ff7f0e"]
+    if curve_h1.size > 0:
+        lags_h1 = _build_stpr_lags(config_calc, curve_h1.size)
+        fig.add_trace(
+            go.Scatter(
+                x=lags_h1,
+                y=curve_h1,
+                mode="lines",
+                line=dict(color=colors[0], width=2),
+                name="First Half",
+            )
+        )
+        delay_h1 = row.get("coupling_delay_ms_h1", np.nan)
+        if np.isfinite(delay_h1):
+            fig.add_vline(x=delay_h1, line=dict(color=colors[0], dash="dash"))
+
+    if curve_h2.size > 0:
+        lags_h2 = _build_stpr_lags(config_calc, curve_h2.size)
+        fig.add_trace(
+            go.Scatter(
+                x=lags_h2,
+                y=curve_h2,
+                mode="lines",
+                line=dict(color=colors[1], width=2),
+                name="Second Half",
+            )
+        )
+        delay_h2 = row.get("coupling_delay_ms_h2", np.nan)
+        if np.isfinite(delay_h2):
+            fig.add_vline(x=delay_h2, line=dict(color=colors[1], dash="dash"))
+
+    fig.add_vline(x=0, line=dict(color="gray", dash="dot"))
+
+    fig.update_layout(
+        title=title or "stPR Curves (First vs Second Half)",
+        xaxis_title="Lag (ms)",
+        yaxis_title="stPR (z)",
+        template=template,
+        font=dict(color=base_color),
+        margin=dict(l=60, r=40, t=60, b=50),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+    )
 
     return fig
 
@@ -1354,6 +1719,8 @@ def _scatter_with_unity_plotly(
     region_order=None,
     region_colors=None,
     template=None,
+    highlight_cluster_id=None,
+    other_alpha=0.4,
 ):
     fig = px.scatter(
         df,
@@ -1363,6 +1730,10 @@ def _scatter_with_unity_plotly(
         category_orders={"region": region_order} if region_order is not None else None,
         color_discrete_map=region_colors,
     )
+    if highlight_cluster_id is not None:
+        for trace in fig.data:
+            if getattr(trace, "mode", "") and "markers" in trace.mode:
+                trace.update(marker=dict(opacity=other_alpha, size=7))
     min_val = np.nanmin([df[xcol].min(), df[ycol].min()])
     max_val = np.nanmax([df[xcol].max(), df[ycol].max()])
     fig.add_trace(
@@ -1377,7 +1748,7 @@ def _scatter_with_unity_plotly(
     if template is None:
         template, base_color = _white_theme()
     else:
-        base_color = "black"
+        base_color = _template_base_color(template)
     fig.update_layout(
         title=title,
         xaxis_title=xlabel,
@@ -1385,11 +1756,38 @@ def _scatter_with_unity_plotly(
         template=template,
         font=dict(color=base_color),
     )
+    if highlight_cluster_id is not None and "cluster_id" in df.columns:
+        highlight_rows = df[df["cluster_id"] == highlight_cluster_id]
+        if not highlight_rows.empty:
+            highlight_row = highlight_rows.iloc[0]
+            region_val = str(highlight_row.get("region", "NA"))
+            highlight_color = None
+            if region_colors and region_val in region_colors:
+                highlight_color = region_colors[region_val]
+            fig.add_trace(
+                go.Scatter(
+                    x=[highlight_row[xcol]],
+                    y=[highlight_row[ycol]],
+                    mode="markers",
+                    marker=dict(
+                        color=highlight_color or "red",
+                        size=12,
+                        opacity=1.0,
+                        line=dict(color="white", width=1),
+                    ),
+                    name=f"Selected {highlight_cluster_id}",
+                    showlegend=False,
+                )
+            )
     return fig
 
 
 def plot_coupling_strength_summary_plotly(
-    df_comparison, region_order=None, region_colors=None, template=None
+    df_comparison,
+    region_order=None,
+    region_colors=None,
+    template=None,
+    highlight_cluster_id=None,
 ):
     df_strength = df_comparison.dropna(
         subset=["coupling_strength_spont", "coupling_strength_task"]
@@ -1412,11 +1810,16 @@ def plot_coupling_strength_summary_plotly(
         region_order,
         region_colors,
         template,
+        highlight_cluster_id=highlight_cluster_id,
     )
 
 
 def plot_coupling_delay_summary_plotly(
-    df_comparison, region_order=None, region_colors=None, template=None
+    df_comparison,
+    region_order=None,
+    region_colors=None,
+    template=None,
+    highlight_cluster_id=None,
 ):
     df_delay = df_comparison.dropna(
         subset=["coupling_delay_ms_spont", "coupling_delay_ms_task"]
@@ -1437,6 +1840,7 @@ def plot_coupling_delay_summary_plotly(
         region_order,
         region_colors,
         template,
+        highlight_cluster_id=highlight_cluster_id,
     )
 
 
