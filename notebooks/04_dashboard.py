@@ -5,6 +5,7 @@ import sys
 
 import numpy as np
 import pandas as pd
+
 import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -90,8 +91,6 @@ def _build_region_colors(acronyms):
     return colors
 
 
-
-
 st.title("Neuron Session Dashboard")
 
 pid_list = _list_pids(CACHE_DIR)
@@ -113,11 +112,6 @@ session = data.get("session")
 trials = data.get("trials")
 config_plot = data.get("config_plot", {})
 config_calc = data.get("config_calc", {})
-labels = _get_label_array(clusters)
-if labels is not None:
-    good_cluster_ids = np.asarray(cluster_ids)[labels == 1]
-else:
-    good_cluster_ids = None
 
 if session is None:
     st.warning("Session data missing in cache. Re-run 03_calc_dashboard.py to rebuild.")
@@ -143,6 +137,20 @@ info_df = pd.DataFrame(info, index=[0]).T
 info_df.columns = ["Value"]
 st.table(info_df.astype(str))
 
+st.subheader("Region Table")
+cluster_acronyms = np.asarray(cluster_acronyms).astype(str)
+all_counts = pd.Series(cluster_acronyms).value_counts().sort_index()
+labels = _get_label_array(clusters)
+if labels is not None:
+    good_counts = pd.Series(cluster_acronyms[labels == 1]).value_counts().sort_index()
+    good_cluster_ids = np.asarray(cluster_ids)[labels == 1]
+else:
+    good_counts = pd.Series(dtype=int)
+    good_cluster_ids = None
+region_table = pd.DataFrame({"All Neurons": all_counts, "Good Neurons": good_counts}).fillna(0)
+region_table = region_table.astype(int)
+st.dataframe(region_table, width="stretch")
+
 calc_only_good = config_calc.get("CALC_ONLY_GOOD_UNITS", None)
 calc_label = "Good neurons only" if calc_only_good else "All neurons"
 st.caption(f"Calculations: {calc_label}")
@@ -150,33 +158,20 @@ plot_only_good = st.toggle(
     "Plot only good neurons",
     value=config_plot.get("PLOT_ONLY_GOOD_UNITS", True),
 )
-avg_psth_only_good = st.toggle(
-    "Avg PSTH uses good neurons only",
-    value=True,
-)
 if calc_only_good and not plot_only_good:
     st.warning(
         "Calculations were done only for good neurons; delay/coupling metrics for other neurons will be missing."
     )
 
-st.subheader("Region Table")
-cluster_acronyms = np.asarray(cluster_acronyms).astype(str)
-all_counts = pd.Series(cluster_acronyms).value_counts().sort_index()
-if labels is not None:
-    good_counts = pd.Series(cluster_acronyms[labels == 1]).value_counts().sort_index()
-else:
-    good_counts = pd.Series(dtype=int)
-region_table = pd.DataFrame({"All Neurons": all_counts, "Good Neurons": good_counts}).fillna(0)
-region_table = region_table.astype(int)
-st.dataframe(region_table, width="stretch")
-
 plot_config = dict(config_plot)
 plot_config["PLOT_ONLY_GOOD_UNITS"] = plot_only_good
-plot_config["AVG_PSTH_ONLY_GOOD"] = avg_psth_only_good
 plot_config["PSTH_WINDOW_START"] = config_calc.get("PSTH_WINDOW_START", -0.2)
 plot_config["PSTH_WINDOW_END"] = config_calc.get("PSTH_WINDOW_END", 0.35)
 plot_config["TRIAL_RASTER_USE_EVENT_WINDOW"] = True
-plot_config["PLOTLY_TEMPLATE"] = "plotly_white"
+theme_base = st.get_option("theme.base")
+if theme_base is None:
+    theme_base = "light"
+plot_config["PLOTLY_TEMPLATE"] = "plotly_dark" if theme_base == "dark" else "plotly_white"
 region_colors = _build_region_colors(cluster_acronyms)
 
 sort_map = {
@@ -247,7 +242,7 @@ trial_table = pd.DataFrame(
     {
         "Contrast": [trial_row["contrast"]],
         "Reaction Time": [trial_row["reaction_time"]],
-        "Correct Response": [trial_row["correct_response"]],
+        "Response Type": [trial_row["correct_response"]],
         "Subject Response": [trial_row["subject_response"]],
     }
 )

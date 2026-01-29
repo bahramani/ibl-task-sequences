@@ -396,7 +396,7 @@ if CONFIG_CALC["CALC_SPONT"] and spont_intervals is not None:
 # )
 
 # %% Select Trial and Unit to Plot ###########################################################
-trial_idx = 385 # 385 in Zador is great
+trial_idx = 385 # 385 in Zador is great # and 36 for reversed sequence
 single_neuron_id = 559
 
 # %% Plot Single Trial Raster ##############################################################################

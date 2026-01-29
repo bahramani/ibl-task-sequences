@@ -1,6 +1,6 @@
+# %%
 from pathlib import Path
 import pickle
-import sys
 
 import numpy as np
 import pandas as pd
@@ -15,15 +15,12 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path.cwd().parent))  # if notebook is in /notebooks/
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
 from utils.io import (
     setup_paths,
     init_one,
     prepare_region_dirs,
     map_acronyms,
     load_session_data,
-    load_pupil_data,
     build_cluster_id_map,
 )
 import utils.analysis as ana_utils
@@ -31,15 +28,15 @@ import utils.analysis as ana_utils
 
 CONFIG_CALC = {
     "ATLAS_MAPPING": "Beryl",
-    "CALC_ONLY_GOOD_UNITS": True,
+    "CALC_ONLY_GOOD_UNITS": False,
     "CALC_SPONT": True,
     "EVENT_NAMES": ["stimOn_times", "firstMovement_times", "response_times", "feedback_times"],
     "DELAY_METHOD": "center_of_mass",
     "FULL_CONTRAST_VALUES": (1.0, 100.0),
     "BIN_SIZE": 0.005,
     "BASELINE_PRE": 0.2,
-    "PSTH_WINDOW_START": -0.2,
-    "PSTH_WINDOW_END": 0.35,
+    "PSTH_WINDOW_START": -1,
+    "PSTH_WINDOW_END": 1,
     "RESPONSIVE_WINDOW_START": 0.02,
     "RESPONSIVE_WINDOW_END": 0.35,
     "SMOOTH_SIGMA": 1,
@@ -55,9 +52,9 @@ CONFIG_CALC = {
 
 CONFIG_PLOT = {
     "ATLAS_MAPPING": "Beryl",
-    "PLOT_ONLY_GOOD_UNITS": True,
+    "PLOT_ONLY_GOOD_UNITS": False,
     "PLOT_EVENT": "stimOn_times",
-    "PLOT_REGIONS": ["VISp", "ENTm"],
+    "PLOT_REGIONS": None, ############
     "RASTER_WINDOW_PRE": 1,
     "RASTER_WINDOW_POST": 2,
     "RASTER_ALIGN_TO_EVENT": True,
@@ -82,6 +79,7 @@ CONFIG_PLOT = {
 # Update this list with the PIDs you want to process.
 PIDS = [
     "c9664185-d3fd-4e0e-89cf-77c402038938",
+    "799d899d-c398-4e81-abaf-1ef4b02d5475",
 ]
 
 
@@ -132,7 +130,6 @@ def main():
     for pid in tqdm(PIDS, desc="Processing PIDs"):
         try:
             ssl, spikes, clusters, sl = load_session_data(pid, one, ba)
-            pupil_features, pupil_times = load_pupil_data(sl)
             eid = ssl.eid
             eid2pid = one.eid2pid(eid)
             if isinstance(eid2pid, tuple):
@@ -284,8 +281,6 @@ def main():
                 "clusters": clusters,
                 "spikes": spikes,
                 "session": session,
-                "pupil_features": pupil_features,
-                "pupil_times": pupil_times,
                 "trials": trial_df,
                 "df_res": df_res,
                 "df_reliability": df_reliability,

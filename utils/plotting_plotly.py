@@ -142,6 +142,8 @@ def _prepare_units_df(cluster_ids, cluster_acronyms, clusters, only_good):
             "depth": depths[quality_mask],
         }
     )
+    df_units["acronym"] = df_units["acronym"].astype(str)
+    df_units = df_units[~df_units["acronym"].isin(["root", "void"])]
     return df_units, quality_mask
 
 
@@ -440,6 +442,7 @@ def plot_trial_raster_plotly(
             ),
             name="Spikes",
         ),
+        max_n_samples=len(window_spike_times),
         hf_x=window_spike_times,
         hf_y=spike_y,
         row=1,
@@ -641,7 +644,13 @@ def plot_trial_raster_plotly(
         else f"All Units (n={len(df_units)})"
     )
 
-    fig.update_yaxes(title_text=ylabel_text, row=1, col=1, showticklabels=False)
+    fig.update_yaxes(
+        title_text=ylabel_text,
+        row=1,
+        col=1,
+        showticklabels=False,
+        range=[-0.5, len(df_units) - 0.5],
+    )
     fig.update_yaxes(title_text="Avg PSTH (Hz)", row=2, col=1)
     fig.update_yaxes(title_text="Wheel (rad)", row=3, col=1)
     fig.update_yaxes(title_text="Paw (px/s)", row=4, col=1)
@@ -763,6 +772,7 @@ def plot_time_window_raster_plotly(
             ),
             name="Spikes",
         ),
+        max_n_samples=len(window_spike_times),
         hf_x=window_spike_times,
         hf_y=spike_y,
         row=1,
@@ -948,7 +958,13 @@ def plot_time_window_raster_plotly(
         else f"All Units (n={len(df_units)})"
     )
 
-    fig.update_yaxes(title_text=ylabel_text, row=1, col=1, showticklabels=False)
+    fig.update_yaxes(
+        title_text=ylabel_text,
+        row=1,
+        col=1,
+        showticklabels=False,
+        range=[-0.5, len(df_units) - 0.5],
+    )
     fig.update_yaxes(title_text="Avg PSTH (Hz)", row=2, col=1)
     fig.update_yaxes(title_text="Wheel (rad)", row=3, col=1)
     fig.update_yaxes(title_text="Paw (px/s)", row=4, col=1)
@@ -992,6 +1008,9 @@ def plot_population_sorted_plotly(
     )
     cluster_ids = np.asarray(cluster_ids)[quality_mask]
     cluster_acronyms = cluster_acronyms[quality_mask]
+    keep_mask = ~np.isin(cluster_acronyms, ["root", "void"])
+    cluster_ids = cluster_ids[keep_mask]
+    cluster_acronyms = cluster_acronyms[keep_mask]
     if region_acronyms is None:
         region_acronyms = config_plot.get("PLOT_REGIONS", ["VISp"])
     elif isinstance(region_acronyms, str):
@@ -1162,6 +1181,8 @@ def plot_population_coupling_heatmap_plotly(
     """Plot spike-triggered population coupling heatmaps sorted by coupling delay."""
     if df_coupling is None or len(df_coupling) == 0:
         return go.Figure()
+
+    df_coupling = df_coupling[~df_coupling["region"].isin(["root", "void"])]
 
     if region_acronyms is None:
         region_acronyms = config_plot.get("PLOT_REGIONS", ["VISp"])

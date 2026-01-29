@@ -1,6 +1,7 @@
 # Data (usually don't commit raw data)
 data/raw/
 data/processed/
+data/dashboard_cache/
 results/
 
 # Results (optional: keep if you want)
@@ -26,3 +27,4 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
+data/dashboard_cache/c9664185-d3fd-4e0e-89cf-77c402038938.pkl
