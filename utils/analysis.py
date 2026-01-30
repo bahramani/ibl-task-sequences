@@ -650,11 +650,14 @@ def compute_population_coupling(
             stpr_z = (stpr - pop_mean) / pop_std
             peak_idx = int(np.argmax(stpr_z))
             coupling_strength = float(stpr_z[peak_idx])
-            stpr_sum = np.sum(stpr_z)
-            if stpr_sum != 0:
-                coupling_delay_ms = float(np.sum(lags_ms * stpr_z) / stpr_sum)
+            stpr_pos = np.clip(stpr_z, 0, None)
+            stpr_sum = np.sum(stpr_pos)
+            if stpr_sum > 0:
+                coupling_delay_ms = float(np.sum(lags_ms * stpr_pos) / stpr_sum)
             else:
-                coupling_delay_ms = float(lags_ms[peak_idx])
+                coupling_delay_ms = np.nan
+            if not np.isfinite(coupling_delay_ms) or abs(coupling_delay_ms) > window_ms:
+                coupling_delay_ms = np.nan
 
             results_local[cid_local] = {
                 "coupling_delay_ms": coupling_delay_ms,
@@ -757,12 +760,16 @@ def compute_population_coupling(
         else:
             peak_idx = int(np.nanargmax(mean_curve))
             strength_means.append(float(mean_curve[peak_idx]))
-            stpr_sum = np.nansum(mean_curve)
             lags = lags_ms[: len(mean_curve)]
-            if stpr_sum != 0:
-                delay_means.append(float(np.nansum(lags * mean_curve) / stpr_sum))
+            stpr_pos = np.clip(mean_curve, 0, None)
+            stpr_sum = np.nansum(stpr_pos)
+            if stpr_sum > 0:
+                delay_val = float(np.nansum(lags * stpr_pos) / stpr_sum)
             else:
-                delay_means.append(float(lags[peak_idx]))
+                delay_val = np.nan
+            if not np.isfinite(delay_val) or abs(delay_val) > window_ms:
+                delay_val = np.nan
+            delay_means.append(delay_val)
 
     df["stpr_curve"] = mean_curves
     df["coupling_delay_ms"] = delay_means

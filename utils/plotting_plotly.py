@@ -28,6 +28,16 @@ def _get_session_field(sl, key):
     return getattr(sl, key, None)
 
 
+def _get_trials_array_field(trials, key):
+    if trials is None:
+        return None
+    if hasattr(trials, "keys") and key in trials.keys():
+        return np.asarray(trials[key])
+    if hasattr(trials, key):
+        return np.asarray(getattr(trials, key))
+    return None
+
+
 def _normalize_colorscale(cmap_name):
     if not isinstance(cmap_name, str):
         return cmap_name
@@ -808,11 +818,7 @@ def plot_single_neuron_plotly(
             unit_delay = float(match.iloc[0][delay_col])
 
     def _get_trials_array(key):
-        if hasattr(trials, "keys") and key in trials.keys():
-            return np.asarray(trials[key])
-        if hasattr(trials, key):
-            return np.asarray(getattr(trials, key))
-        return None
+        return _get_trials_array_field(trials, key)
 
     def _get_spike_array(key):
         if spikes is None:
@@ -1013,6 +1019,240 @@ def plot_single_neuron_plotly(
         title=f"Cluster #{cluster_id} ({target_acronym}) Response Analysis",
         height=900,
         margin=dict(l=70, r=40, t=80, b=60),
+    )
+    fig.update_layout(template=template, font=dict(color=base_color))
+
+    return fig
+
+
+def plot_single_neuron_conditioned_event_plotly(
+    sl,
+    spikes,
+    clusters,
+    cluster_ids,
+    cluster_acronyms,
+    df_res,
+    config_plot,
+    cluster_id,
+    event_name,
+    condition_type,
+    title=None,
+):
+    """Plot PSTH + raster + global PSTH for a single neuron conditioned on trial groups."""
+    trials = _get_session_field(sl, "trials")
+    if trials is None:
+        return go.Figure()
+
+    cluster_ids = np.asarray(cluster_ids)
+    cluster_acronyms = np.asarray(cluster_acronyms).astype(str)
+    if cluster_id not in cluster_ids:
+        fallback_id = cluster_ids[0] if len(cluster_ids) > 0 else None
+        if fallback_id is None:
+            return go.Figure()
+        cluster_id = fallback_id
+
+    idx = int(np.where(cluster_ids == cluster_id)[0][0])
+    target_acronym = cluster_acronyms[idx]
+
+    event_series = _get_trials_array_field(trials, event_name)
+    if event_series is None:
+        return go.Figure()
+
+    choice_arr = _get_trials_array_field(trials, "choice")
+    feedback_arr = _get_trials_array_field(trials, "feedbackType")
+
+    if condition_type == "choice":
+        conditions = [
+            ("Left", choice_arr == 1, "#1f77b4"),
+            ("Right", choice_arr == -1, "#ff7f0e"),
+        ]
+        sort_label = "Left/Right"
+    elif condition_type == "feedback":
+        conditions = [
+            ("Correct", feedback_arr == 1, "#2ca02c"),
+            ("Incorrect", feedback_arr == -1, "#d62728"),
+        ]
+        sort_label = "Correct/Incorrect"
+    else:
+        return go.Figure()
+
+    raster_pre = config_plot["SINGLE_NEURON_RASTER_PRE"]
+    raster_post = config_plot["SINGLE_NEURON_RASTER_POST"]
+    bin_size = config_plot["SINGLE_NEURON_BIN_SIZE"]
+    smooth_sigma = config_plot["SINGLE_NEURON_SMOOTH_SIGMA"]
+
+    template = config_plot.get("PLOTLY_TEMPLATE", "plotly_white")
+    base_color = _template_base_color(template)
+
+    fig = make_subplots(
+        rows=3,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.08,
+        subplot_titles=(
+            f"{event_label(event_name)} PSTH",
+            f"{event_label(event_name)} Raster ({sort_label})",
+            f"{event_label(event_name)} Global PSTH",
+        ),
+    )
+
+    spike_times = np.asarray(spikes.times if hasattr(spikes, "times") else spikes.get("times", []))
+    spike_clusters = np.asarray(
+        spikes.clusters if hasattr(spikes, "clusters") else spikes.get("clusters", [])
+    )
+    neuron_spikes = spike_times[spike_clusters == cluster_id]
+
+    global_curves = []
+    global_bin_centers = None
+
+    raster_x = []
+    raster_y = []
+    raster_colors = []
+    current_raster_y = 0
+
+    for label, cond_mask, color in conditions:
+        if cond_mask is None:
+            continue
+        mask = cond_mask & (~np.isnan(event_series))
+        events = event_series[mask]
+        if len(events) == 0:
+            continue
+
+        psth_by_cluster, bin_centers = compute_psth_for_clusters(
+            spikes,
+            [cluster_id],
+            events,
+            -raster_pre,
+            raster_post,
+            bin_size,
+            smooth_sigma,
+            show_progress=False,
+        )
+        psth_entry = psth_by_cluster.get(cluster_id)
+        if psth_entry and bin_centers is not None:
+            firing_rate = psth_entry["fr_smooth"]
+        else:
+            firing_rate = np.zeros(len(bin_centers) if bin_centers is not None else 0)
+
+        fig.add_trace(
+            go.Scatter(
+                x=bin_centers,
+                y=firing_rate,
+                mode="lines",
+                line=dict(color=color, width=2),
+                name=label,
+                showlegend=True,
+            ),
+            row=1,
+            col=1,
+        )
+
+        if bin_centers is not None and len(firing_rate) > 0:
+            global_curves.append(np.asarray(firing_rate, dtype=float))
+            if global_bin_centers is None:
+                global_bin_centers = np.asarray(bin_centers, dtype=float)
+
+        for event_t in events:
+            t_start = event_t - raster_pre
+            t_end = event_t + raster_post
+            trial_spikes = neuron_spikes[
+                (neuron_spikes >= t_start) & (neuron_spikes <= t_end)
+            ]
+            aligned_spikes = trial_spikes - event_t
+            if len(aligned_spikes) > 0:
+                raster_x.extend(aligned_spikes.tolist())
+                raster_y.extend([current_raster_y] * len(aligned_spikes))
+                raster_colors.extend([color] * len(aligned_spikes))
+            current_raster_y += 1
+
+        current_raster_y += 2
+
+    fig.add_trace(
+        go.Scattergl(
+            x=raster_x,
+            y=raster_y,
+            mode="markers",
+            marker=dict(color=raster_colors, size=5, symbol="line-ns-open"),
+            showlegend=False,
+        ),
+        row=2,
+        col=1,
+    )
+
+    fig.add_vline(x=0, line=dict(color="black", dash="dash"), row=1, col=1)
+    fig.add_vline(x=0, line=dict(color="black", dash="dash"), row=2, col=1)
+    fig.update_xaxes(range=[-raster_pre, raster_post], row=1, col=1)
+    fig.update_xaxes(range=[-raster_pre, raster_post], row=2, col=1)
+    fig.update_yaxes(title_text="Firing Rate (Hz)", row=1, col=1)
+    fig.update_yaxes(title_text="Trials", showticklabels=False, row=2, col=1)
+
+    delay_col = delay_column_name(event_name)
+    unit_delay = np.nan
+    if df_res is not None and delay_col in df_res.columns:
+        match = df_res[df_res["cluster_id"] == cluster_id]
+        if not match.empty:
+            unit_delay = float(match.iloc[0][delay_col])
+
+    if global_curves and global_bin_centers is not None:
+        min_len = min(len(curve) for curve in global_curves)
+        curves = [curve[:min_len] for curve in global_curves]
+        global_curve = np.nanmean(np.vstack(curves), axis=0)
+        x_vals = global_bin_centers[:min_len]
+        fig.add_trace(
+            go.Scatter(
+                x=x_vals,
+                y=global_curve,
+                mode="lines",
+                line=dict(color=base_color, width=2),
+                name="Global PSTH",
+                showlegend=False,
+            ),
+            row=3,
+            col=1,
+        )
+
+        if np.isfinite(unit_delay):
+            fig.add_vline(
+                x=unit_delay,
+                line=dict(color="red", width=2),
+                row=3,
+                col=1,
+            )
+            y_text = float(np.nanmax(global_curve)) * 0.9 if len(global_curve) > 0 else 0
+            fig.add_annotation(
+                x=unit_delay,
+                y=y_text,
+                text=f"{unit_delay * 1000:.0f} ms",
+                showarrow=False,
+                font=dict(color="red"),
+                row=3,
+                col=1,
+            )
+
+        fig.add_vline(
+            x=0,
+            line=dict(color="blue", dash="dash"),
+            row=3,
+            col=1,
+        )
+        fig.update_xaxes(title_text=f"Time from {event_label(event_name)} (s)", row=3, col=1)
+        fig.update_yaxes(title_text="Firing Rate (Hz)", row=3, col=1)
+
+    else:
+        fig.add_annotation(
+            x=0.5,
+            y=0.5,
+            text="No valid trials found",
+            showarrow=False,
+            row=3,
+            col=1,
+        )
+
+    fig.update_layout(
+        title=title or f"{event_label(event_name)} Response",
+        height=700,
+        margin=dict(l=70, r=40, t=80, b=60),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
     )
     fig.update_layout(template=template, font=dict(color=base_color))
 
@@ -1513,7 +1753,9 @@ def plot_population_sorted_plotly(
     cluster_ids = cluster_ids[keep_mask]
     cluster_acronyms = cluster_acronyms[keep_mask]
     if region_acronyms is None:
-        region_acronyms = config_plot.get("PLOT_REGIONS", ["VISp"])
+        region_acronyms = config_plot.get("PLOT_REGIONS")
+        if region_acronyms is None:
+            region_acronyms = sorted(pd.Series(cluster_acronyms).astype(str).unique().tolist())
     elif isinstance(region_acronyms, str):
         region_acronyms = [region_acronyms]
 
@@ -1686,7 +1928,11 @@ def plot_population_coupling_heatmap_plotly(
     df_coupling = df_coupling[~df_coupling["region"].isin(["root", "void"])]
 
     if region_acronyms is None:
-        region_acronyms = config_plot.get("PLOT_REGIONS", ["VISp"])
+        region_acronyms = config_plot.get("PLOT_REGIONS")
+        if region_acronyms is None:
+            region_acronyms = sorted(
+                pd.Series(df_coupling["region"]).astype(str).unique().tolist()
+            )
     elif isinstance(region_acronyms, str):
         region_acronyms = [region_acronyms]
 

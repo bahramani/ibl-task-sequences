@@ -4,6 +4,7 @@ import pickle
 
 import numpy as np
 import pandas as pd
+from psutil import pids
 
 try:
     from tqdm.auto import tqdm
@@ -25,6 +26,11 @@ from utils.io import (
 )
 import utils.analysis as ana_utils
 
+from one.api import ONE
+
+ONE.setup(base_url='https://openalyx.internationalbrainlab.org', silent=True)
+one = ONE(password='international')
+one = ONE()
 
 CONFIG_CALC = {
     "ATLAS_MAPPING": "Beryl",
@@ -77,10 +83,27 @@ CONFIG_PLOT = {
 }
 
 # Update this list with the PIDs you want to process.
-PIDS = [
-    "c9664185-d3fd-4e0e-89cf-77c402038938",
-    "799d899d-c398-4e81-abaf-1ef4b02d5475",
-]
+# PIDS = [
+#     "c9664185-d3fd-4e0e-89cf-77c402038938",
+#     "799d899d-c398-4e81-abaf-1ef4b02d5475",
+# ]
+
+# all PIDs for a given subject and tag
+subject = "CSH_ZAD_029"
+
+# 1) Get sessions (EIDs) for the subject (remote)
+eids, session_dicts = one.search(
+    tag="2025_Q3_IBL_et_al_BWM",
+    subject=subject,
+    details=True,
+    query_type="remote"
+)
+
+# 2) Convert sessions -> probe insertion ids (PIDs)
+PIDS = []
+for eid in eids:
+    insertions = one.alyx.rest("insertions", "list", session=eid)
+    PIDS.extend([ins["id"] for ins in insertions])
 
 
 def _fetch_session_metadata(one, eid):

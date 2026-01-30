@@ -23,6 +23,7 @@ from utils.plotting_plotly import (
     plot_coupling_delay_summary_plotly,
     plot_coupling_sorting_summary_plotly,
     plot_single_neuron_plotly,
+    plot_single_neuron_conditioned_event_plotly,
     plot_stpr_curve_halves_plotly,
 )
 
@@ -179,6 +180,8 @@ plot_config["PLOT_ONLY_GOOD_UNITS"] = plot_only_good
 plot_config["PSTH_WINDOW_START"] = config_calc.get("PSTH_WINDOW_START", -0.2)
 plot_config["PSTH_WINDOW_END"] = config_calc.get("PSTH_WINDOW_END", 0.35)
 plot_config["TRIAL_RASTER_USE_EVENT_WINDOW"] = True
+plot_config["SINGLE_NEURON_SMOOTH_SIGMA"] = 0.5
+plot_config["SINGLE_NEURON_BIN_SIZE"] = 0.03
 theme_base = st.get_option("theme.base")
 if theme_base is None:
     theme_base = "light"
@@ -514,6 +517,38 @@ else:
         selected_cluster_id,
     )
     st.plotly_chart(fig_single, width="stretch")
+
+    st.markdown("**First Movement (Left vs Right)**")
+    fig_move = plot_single_neuron_conditioned_event_plotly(
+        session,
+        spikes,
+        clusters,
+        cluster_ids,
+        cluster_acronyms,
+        data.get("df_res"),
+        plot_config,
+        selected_cluster_id,
+        event_name="firstMovement_times",
+        condition_type="choice",
+        title="First Movement Response",
+    )
+    st.plotly_chart(fig_move, width="stretch")
+
+    st.markdown("**Feedback (Correct vs Incorrect)**")
+    fig_feedback = plot_single_neuron_conditioned_event_plotly(
+        session,
+        spikes,
+        clusters,
+        cluster_ids,
+        cluster_acronyms,
+        data.get("df_res"),
+        plot_config,
+        selected_cluster_id,
+        event_name="feedback_times",
+        condition_type="feedback",
+        title="Feedback Response",
+    )
+    st.plotly_chart(fig_feedback, width="stretch")
 
     col_task, col_spont = st.columns(2)
     with col_task:
