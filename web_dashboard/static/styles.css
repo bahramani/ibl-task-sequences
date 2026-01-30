@@ -1,0 +1,101 @@
+body {
+  font-family: "Segoe UI", Tahoma, sans-serif;
+  margin: 0;
+  padding: 0 24px 48px;
+  background: #fafafa;
+  color: #222;
+}
+
+header {
+  padding: 24px 0 8px;
+}
+
+h1 {
+  margin: 0;
+  font-size: 28px;
+}
+
+section {
+  background: #fff;
+  border: 1px solid #e6e6e6;
+  border-radius: 8px;
+  padding: 16px;
+  margin: 16px 0;
+}
+
+h2 {
+  margin-top: 0;
+}
+
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  align-items: center;
+}
+
+.control-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+label {
+  font-weight: 600;
+}
+
+select,
+input,
+button {
+  padding: 6px 10px;
+  border: 1px solid #ccc;
+  border-radius: 6px;
+}
+
+button {
+  background: #1f77b4;
+  color: #fff;
+  border: none;
+  cursor: pointer;
+}
+
+button:hover {
+  background: #135c8a;
+}
+
+.plot {
+  width: 100%;
+  min-height: 320px;
+}
+
+.plot-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 16px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+td,
+th {
+  border: 1px solid #eee;
+  padding: 6px 8px;
+}
+
+.info-row {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.info-row span {
+  background: #f0f0f0;
+  border-radius: 6px;
+  padding: 6px 10px;
+}
