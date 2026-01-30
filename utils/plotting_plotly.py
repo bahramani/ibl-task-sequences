@@ -91,6 +91,57 @@ def _region_color_map(regions):
     return colors
 
 
+def _compute_variability_curve(
+    bin_centers, rate, window_s=0.1, step_s=0.025, metric="fano"
+):
+    if bin_centers is None or rate is None:
+        return None, None
+    bin_centers = np.asarray(bin_centers, dtype=float)
+    rate = np.asarray(rate, dtype=float)
+    if bin_centers.size == 0 or rate.size == 0:
+        return None, None
+    n = min(bin_centers.size, rate.size)
+    bin_centers = bin_centers[:n]
+    rate = rate[:n]
+    if step_s <= 0 or window_s <= 0:
+        return None, None
+    start = float(bin_centers[0])
+    end = float(bin_centers[-1])
+    if end - start < window_s:
+        return None, None
+    centers = []
+    fano_vals = []
+    win_start = start
+    while win_start + window_s <= end + 1e-9:
+        win_end = win_start + window_s
+        mask = (bin_centers >= win_start) & (bin_centers < win_end)
+        if np.sum(mask) >= 2:
+            vals = rate[mask]
+            mean_val = np.nanmean(vals)
+            var_val = np.nanvar(vals)
+            std_val = np.sqrt(var_val)
+            if metric == "cv":
+                fano = std_val / mean_val if np.isfinite(mean_val) and mean_val != 0 else np.nan
+            else:
+                fano = var_val / mean_val if np.isfinite(mean_val) and mean_val != 0 else np.nan
+        else:
+            fano = np.nan
+        centers.append(win_start + window_s / 2)
+        fano_vals.append(fano)
+        win_start += step_s
+    if len(centers) == 0:
+        return None, None
+    return np.asarray(centers, dtype=float), np.asarray(fano_vals, dtype=float)
+
+
+def _moving_mean(values, window_bins):
+    values = np.asarray(values, dtype=float)
+    if window_bins <= 1 or values.size == 0:
+        return values
+    kernel = np.ones(int(window_bins), dtype=float) / float(window_bins)
+    return np.convolve(values, kernel, mode="same")
+
+
 def _get_trial_event(trials, event_name, trial_idx):
     if trials is None:
         return np.nan
@@ -297,6 +348,7 @@ def plot_trial_raster_plotly(
     config_plot,
     trial_idx,
     sorting_metric="depth",
+    variability_metric=None,
     df_res=None,
     df_coupling=None,
     df_coupling_task=None,
@@ -420,14 +472,29 @@ def plot_trial_raster_plotly(
     spike_y = pd.Series(window_spike_clusters).map(cluster_index_map).to_numpy()
     spike_regions = pd.Series(window_spike_clusters).map(cluster_region_map).to_numpy()
 
+    metric = (
+        variability_metric
+        if variability_metric is not None
+        else config_plot.get("PSTH_VARIABILITY_METRIC", "fano")
+    )
+    metric = str(metric).lower()
+    metric_title = "Fano Factor" if metric == "fano" else "CV"
+
     fig = FigureResampler(
         make_subplots(
-            rows=5,
+            rows=6,
             cols=1,
             shared_xaxes=True,
             vertical_spacing=0.02,
-            row_heights=[0.55, 0.12, 0.11, 0.11, 0.11],
-            subplot_titles=("Raster", "Avg PSTH", "Wheel", "Paw Speed", "Pupil Diameter"),
+            row_heights=[0.5, 0.12, 0.1, 0.1, 0.09, 0.09],
+            subplot_titles=(
+                "Raster",
+                "Avg PSTH",
+                metric_title,
+                "Wheel",
+                "Paw Speed",
+                "Pupil Diameter",
+            ),
         )
     )
 
@@ -506,6 +573,10 @@ def plot_trial_raster_plotly(
         wheel_pos = np.array([])
     # Average PSTH by region (single-event window)
     bin_size = config_plot.get("POP_BIN_SIZE", 0.005)
+    smooth_window_s = 0.05
+    smooth_bins = max(1, int(round(smooth_window_s / bin_size))) if bin_size > 0 else 1
+    fano_window_s = 0.1
+    fano_step_s = 0.025
     if align_to_event:
         psth_start = t_start - t_offset
         psth_end = t_end - t_offset
@@ -530,10 +601,11 @@ def plot_trial_raster_plotly(
             region_spike_times = psth_spike_times_all[region_mask]
             counts, _ = np.histogram(region_spike_times, bins=bins)
             rate = counts / (len(region_ids) * bin_size)
+            rate_smoothed = _moving_mean(rate, smooth_bins)
             fig.add_trace(
                 go.Scatter(
                     x=bin_centers,
-                    y=rate,
+                    y=rate_smoothed,
                     mode="lines",
                     line=dict(color=region_colors.get(acronym)),
                     name=f"{acronym} PSTH",
@@ -542,10 +614,30 @@ def plot_trial_raster_plotly(
                 row=2,
                 col=1,
             )
+            var_x, var_y = _compute_variability_curve(
+                bin_centers,
+                rate,
+                window_s=fano_window_s,
+                step_s=fano_step_s,
+                metric=metric,
+            )
+            if var_x is not None and var_y is not None:
+                fig.add_trace(
+                    go.Scatter(
+                        x=var_x,
+                        y=var_y,
+                        mode="lines",
+                        line=dict(color=region_colors.get(acronym)),
+                        name=f"{acronym} {metric_title}",
+                        showlegend=False,
+                    ),
+                    row=3,
+                    col=1,
+                )
 
     fig.add_trace(
         go.Scatter(x=wheel_t, y=wheel_pos, mode="lines", line=dict(color=base_color)),
-        row=3,
+        row=4,
         col=1,
     )
 
@@ -573,7 +665,7 @@ def plot_trial_raster_plotly(
     if paw_speed is not None:
         fig.add_trace(
             go.Scatter(x=pose_t, y=paw_speed, mode="lines", line=dict(color=base_color)),
-            row=4,
+            row=5,
             col=1,
         )
     else:
@@ -581,10 +673,10 @@ def plot_trial_raster_plotly(
             x=0.5,
             y=0.5,
             xref="paper",
-            yref="y4",
+            yref="y5",
             text="Paw data not available",
             showarrow=False,
-            row=4,
+            row=5,
             col=1,
         )
 
@@ -603,7 +695,7 @@ def plot_trial_raster_plotly(
     if pupil_diam is not None:
         fig.add_trace(
             go.Scatter(x=pupil_t, y=pupil_diam, mode="lines", line=dict(color=base_color)),
-            row=5,
+            row=6,
             col=1,
         )
     else:
@@ -611,10 +703,10 @@ def plot_trial_raster_plotly(
             x=0.5,
             y=0.5,
             xref="paper",
-            yref="y5",
+            yref="y6",
             text="Pupil data not available",
             showarrow=False,
-            row=5,
+            row=6,
             col=1,
         )
 
@@ -624,7 +716,7 @@ def plot_trial_raster_plotly(
         ("Feedback", t_feedback, "red"),
     ]
     for name, time_val, color in event_lines:
-        for row in range(1, 6):
+        for row in range(1, 7):
             fig.add_vline(x=time_val - t_offset, line=dict(color=color, width=2), row=row, col=1)
         fig.add_trace(
             go.Scatter(
@@ -653,15 +745,16 @@ def plot_trial_raster_plotly(
         range=[-0.5, len(df_units) - 0.5],
     )
     fig.update_yaxes(title_text="Avg PSTH (Hz)", row=2, col=1)
-    fig.update_yaxes(title_text="Wheel (rad)", row=3, col=1)
-    fig.update_yaxes(title_text="Paw (px/s)", row=4, col=1)
-    fig.update_yaxes(title_text="Pupil (mm)", row=5, col=1)
-    fig.update_xaxes(title_text=xlabel_text, row=5, col=1)
+    fig.update_yaxes(title_text=metric_title, row=3, col=1)
+    fig.update_yaxes(title_text="Wheel (rad)", row=4, col=1)
+    fig.update_yaxes(title_text="Paw (px/s)", row=5, col=1)
+    fig.update_yaxes(title_text="Pupil (mm)", row=6, col=1)
+    fig.update_xaxes(title_text=xlabel_text, row=6, col=1)
     fig.update_xaxes(range=[t_start - t_offset, t_end - t_offset])
 
     fig.update_layout(
         title=f"{plot_title} | Sort: {sort_label}",
-        height=900,
+        height=980,
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
         hovermode="closest",
         margin=dict(l=70, r=40, t=80, b=60),
@@ -1046,6 +1139,7 @@ def plot_time_window_raster_plotly(
     t_end,
     region_acronyms=None,
     sorting_metric="depth",
+    variability_metric=None,
     df_res=None,
     df_coupling=None,
     df_coupling_task=None,
@@ -1115,14 +1209,29 @@ def plot_time_window_raster_plotly(
     spike_y = pd.Series(window_spike_clusters).map(cluster_index_map).to_numpy()
     spike_regions = pd.Series(window_spike_clusters).map(cluster_region_map).to_numpy()
 
+    metric = (
+        variability_metric
+        if variability_metric is not None
+        else config_plot.get("PSTH_VARIABILITY_METRIC", "fano")
+    )
+    metric = str(metric).lower()
+    metric_title = "Fano Factor" if metric == "fano" else "CV"
+
     fig = FigureResampler(
         make_subplots(
-            rows=5,
+            rows=6,
             cols=1,
             shared_xaxes=True,
             vertical_spacing=0.02,
-            row_heights=[0.55, 0.12, 0.11, 0.11, 0.11],
-            subplot_titles=("Raster", "Avg PSTH", "Wheel", "Paw Speed", "Pupil Diameter"),
+            row_heights=[0.5, 0.12, 0.1, 0.1, 0.09, 0.09],
+            subplot_titles=(
+                "Raster",
+                "Avg PSTH",
+                metric_title,
+                "Wheel",
+                "Paw Speed",
+                "Pupil Diameter",
+            ),
         )
     )
     fig.add_trace(
@@ -1187,6 +1296,10 @@ def plot_time_window_raster_plotly(
         wheel_pos = np.array([])
     # Average PSTH by region across the selected time window
     bin_size = config_plot.get("POP_BIN_SIZE", 0.005)
+    smooth_window_s = 0.05
+    smooth_bins = max(1, int(round(smooth_window_s / bin_size))) if bin_size > 0 else 1
+    fano_window_s = 0.1
+    fano_step_s = 0.025
     if t_end > t_start and len(df_units_psth) > 0:
         bins = np.arange(t_start, t_end + bin_size, bin_size)
         bin_centers = (bins[:-1] + bins[1:]) / 2
@@ -1200,10 +1313,11 @@ def plot_time_window_raster_plotly(
             region_spike_times = window_spike_times_all[region_mask]
             counts, _ = np.histogram(region_spike_times, bins=bins)
             rate = counts / (len(region_ids) * bin_size)
+            rate_smoothed = _moving_mean(rate, smooth_bins)
             fig.add_trace(
                 go.Scatter(
                     x=bin_centers,
-                    y=rate,
+                    y=rate_smoothed,
                     mode="lines",
                     line=dict(color=region_colors.get(acronym)),
                     name=f"{acronym} PSTH",
@@ -1212,10 +1326,30 @@ def plot_time_window_raster_plotly(
                 row=2,
                 col=1,
             )
+            var_x, var_y = _compute_variability_curve(
+                bin_centers,
+                rate,
+                window_s=fano_window_s,
+                step_s=fano_step_s,
+                metric=metric,
+            )
+            if var_x is not None and var_y is not None:
+                fig.add_trace(
+                    go.Scatter(
+                        x=var_x,
+                        y=var_y,
+                        mode="lines",
+                        line=dict(color=region_colors.get(acronym)),
+                        name=f"{acronym} {metric_title}",
+                        showlegend=False,
+                    ),
+                    row=3,
+                    col=1,
+                )
 
     fig.add_trace(
         go.Scatter(x=wheel_t, y=wheel_pos, mode="lines", line=dict(color=base_color)),
-        row=3,
+        row=4,
         col=1,
     )
 
@@ -1243,7 +1377,7 @@ def plot_time_window_raster_plotly(
     if paw_speed is not None:
         fig.add_trace(
             go.Scatter(x=pose_t, y=paw_speed, mode="lines", line=dict(color=base_color)),
-            row=4,
+            row=5,
             col=1,
         )
     else:
@@ -1251,10 +1385,10 @@ def plot_time_window_raster_plotly(
             x=0.5,
             y=0.5,
             xref="paper",
-            yref="y4",
+            yref="y5",
             text="Paw data not available",
             showarrow=False,
-            row=4,
+            row=5,
             col=1,
         )
 
@@ -1273,7 +1407,7 @@ def plot_time_window_raster_plotly(
     if pupil_diam is not None:
         fig.add_trace(
             go.Scatter(x=pupil_t, y=pupil_diam, mode="lines", line=dict(color=base_color)),
-            row=5,
+            row=6,
             col=1,
         )
     else:
@@ -1281,10 +1415,10 @@ def plot_time_window_raster_plotly(
             x=0.5,
             y=0.5,
             xref="paper",
-            yref="y5",
+            yref="y6",
             text="Pupil data not available",
             showarrow=False,
-            row=5,
+            row=6,
             col=1,
         )
 
@@ -1301,7 +1435,7 @@ def plot_time_window_raster_plotly(
         valid_times = event_times[(event_times >= t_start) & (event_times <= t_end)]
         if len(valid_times) == 0:
             continue
-        for row in range(1, 6):
+        for row in range(1, 7):
             for t_event in valid_times:
                 fig.add_vline(x=t_event, line=dict(color=color, width=1.5), row=row, col=1)
         fig.add_trace(
@@ -1331,14 +1465,15 @@ def plot_time_window_raster_plotly(
         range=[-0.5, len(df_units) - 0.5],
     )
     fig.update_yaxes(title_text="Avg PSTH (Hz)", row=2, col=1)
-    fig.update_yaxes(title_text="Wheel (rad)", row=3, col=1)
-    fig.update_yaxes(title_text="Paw (px/s)", row=4, col=1)
-    fig.update_yaxes(title_text="Pupil (mm)", row=5, col=1, showticklabels=False)
-    fig.update_xaxes(title_text="Time in session (s)", row=5, col=1)
+    fig.update_yaxes(title_text=metric_title, row=3, col=1)
+    fig.update_yaxes(title_text="Wheel (rad)", row=4, col=1)
+    fig.update_yaxes(title_text="Paw (px/s)", row=5, col=1)
+    fig.update_yaxes(title_text="Pupil (mm)", row=6, col=1, showticklabels=False)
+    fig.update_xaxes(title_text="Time in session (s)", row=6, col=1)
 
     fig.update_layout(
         title=f"Window {t_start:.2f}-{t_end:.2f}s | Sort: {sort_label}",
-        height=900,
+        height=980,
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
         margin=dict(l=70, r=40, t=80, b=60),
     )
@@ -1348,6 +1483,7 @@ def plot_time_window_raster_plotly(
     fig.update_xaxes(range=[t_start, t_end], row=3, col=1)
     fig.update_xaxes(range=[t_start, t_end], row=4, col=1)
     fig.update_xaxes(range=[t_start, t_end], row=5, col=1)
+    fig.update_xaxes(range=[t_start, t_end], row=6, col=1)
 
     return fig
 

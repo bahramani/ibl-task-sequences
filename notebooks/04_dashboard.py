@@ -1,4 +1,4 @@
-# %%
+# %% KKKKKKKKKKKKKKKKKKKKK
 from pathlib import Path
 import pickle
 import sys
@@ -210,6 +210,13 @@ if plot_only_good and good_cluster_ids is not None:
         ]
 
 st.subheader("General Raster")
+variability_choice = st.radio(
+    "PSTH variability metric",
+    ["Fano Factor", "CV"],
+    horizontal=True,
+    key="psth_variability_metric",
+)
+variability_metric = "fano" if variability_choice == "Fano Factor" else "cv"
 min_time = float(np.nanmin(spikes["times"]))
 max_time = float(np.nanmax(spikes["times"]))
 if "general_t_start" not in st.session_state:
@@ -219,7 +226,14 @@ if "general_t_end" not in st.session_state:
 
 col_a, col_b, col_shift = st.columns([1, 1, 0.5])
 with col_shift:
-    shift_window = st.button("Shift +1s")
+    shift_seconds = st.number_input(
+        "Shift (s)",
+        key="general_shift_seconds",
+        value=1.0,
+        min_value=0.0,
+        step=0.5,
+    )
+    shift_window = st.button("Shift +", use_container_width=True)
 if shift_window:
     window = st.session_state.general_t_end - st.session_state.general_t_start
     total_range = max_time - min_time
@@ -227,8 +241,9 @@ if shift_window:
         window = min(10.0, total_range)
     if total_range > 0 and window > total_range:
         window = total_range
-    new_start = st.session_state.general_t_start + 1.0
-    new_end = st.session_state.general_t_end + 1.0
+    shift_val = float(shift_seconds)
+    new_start = st.session_state.general_t_start + shift_val
+    new_end = st.session_state.general_t_end + shift_val
     if new_end > max_time:
         new_end = max_time
         new_start = max_time - window
@@ -270,6 +285,7 @@ else:
         plot_config,
         t_start,
         t_end,
+        variability_metric=variability_metric,
         sorting_metric=sort_map[general_sort],
         df_res=data.get("df_res"),
         df_coupling=df_coupling_plot,
@@ -306,6 +322,7 @@ fig_trial = plot_trial_raster_plotly(
     session,
     plot_config,
     trial_idx,
+    variability_metric=variability_metric,
     sorting_metric=sort_map[sort_choice],
     df_res=data.get("df_res"),
     df_coupling=df_coupling_plot,
