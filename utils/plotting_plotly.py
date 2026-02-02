@@ -9,6 +9,8 @@ from types import SimpleNamespace
 
 from .analysis import compute_psth_for_clusters, event_label, delay_column_name
 
+DEFAULT_TEMPLATE = "plotly_white"
+
 
 def _get_cluster_attr(clusters, key, fallback=None):
     if clusters is None:
@@ -43,14 +45,18 @@ def _normalize_colorscale(cmap_name):
         return cmap_name
     cmap = cmap_name.strip().lower()
     if cmap in ("bwr", "rdbu"):
-        return "rdbu"
+        return "rdbu_r"
+    if cmap == "rdbu_r":
+        return "rdbu_r"
     if cmap == "rdgy":
         return "rdgy"
     return cmap_name
 
 
 def _white_theme():
-    return "plotly_white", "black"
+    template = DEFAULT_TEMPLATE or "plotly_white"
+    base_color = "white" if "dark" in str(template).lower() else "black"
+    return template, base_color
 
 
 def _color_to_rgba(color, alpha=0.15):
@@ -1293,7 +1299,11 @@ def plot_stpr_curve_halves_plotly(
         fig.update_layout(
             title=title or "stPR Curves (First vs Second Half)",
             template=template,
-            font=dict(color=base_color),
+            font=dict(color=base_color, size=13),
+            width=900,
+            height=650,
+            margin=dict(l=60, r=40, t=80, b=60),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
         )
         return fig
 
@@ -1303,7 +1313,11 @@ def plot_stpr_curve_halves_plotly(
         fig.update_layout(
             title=title or "stPR Curves (First vs Second Half)",
             template=template,
-            font=dict(color=base_color),
+            font=dict(color=base_color, size=13),
+            width=900,
+            height=650,
+            margin=dict(l=60, r=40, t=80, b=60),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
         )
         return fig
 
@@ -1318,7 +1332,11 @@ def plot_stpr_curve_halves_plotly(
         fig.update_layout(
             title=title or "stPR Curves (First vs Second Half)",
             template=template,
-            font=dict(color=base_color),
+            font=dict(color=base_color, size=13),
+            width=900,
+            height=650,
+            margin=dict(l=60, r=40, t=80, b=60),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
         )
         return fig
 
@@ -1360,8 +1378,10 @@ def plot_stpr_curve_halves_plotly(
         xaxis_title="Lag (ms)",
         yaxis_title="stPR (z)",
         template=template,
-        font=dict(color=base_color),
-        margin=dict(l=60, r=40, t=60, b=50),
+        font=dict(color=base_color, size=13),
+        width=900,
+        height=650,
+        margin=dict(l=60, r=40, t=80, b=60),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
     )
 
@@ -1780,11 +1800,12 @@ def plot_population_sorted_plotly(
     event_series = np.asarray(trials[align_event])
     stim_times = event_series[~np.isnan(event_series)]
 
+    n_rows = len(region_acronyms)
     fig = make_subplots(
-        rows=len(region_acronyms),
+        rows=n_rows,
         cols=1,
         shared_xaxes=True,
-        vertical_spacing=0.03,
+        vertical_spacing=0.06,
         subplot_titles=[f"{region} units" for region in region_acronyms],
     )
 
@@ -1871,14 +1892,20 @@ def plot_population_sorted_plotly(
                     fr_smooth = fr_smooth / peak
             psth_matrix[i, :] = fr_smooth
 
+        show_scale = row_idx == 1
         fig.add_trace(
             go.Heatmap(
                 z=psth_matrix,
                 x=bin_centers,
                 y=np.arange(n_neurons),
                 colorscale=cmap_name,
-                colorbar=dict(title="Norm FR" if normalize else "FR", len=0.35),
-                showscale=True,
+                colorbar=dict(
+                    title="Norm FR" if normalize else "FR",
+                    len=0.7,
+                    y=0.5,
+                    yanchor="middle",
+                ),
+                showscale=show_scale,
             ),
             row=row_idx,
             col=1,
@@ -1903,13 +1930,21 @@ def plot_population_sorted_plotly(
             title_text=f"Neurons (Sorted by {sort_label})", row=row_idx, col=1, autorange="reversed"
         )
 
+    for ann in fig.layout.annotations or []:
+        ann.update(font=dict(size=12))
+
     fig.update_layout(
         title=f"Population PSTH Heatmaps | Align: {event_label(align_event)}",
-        height=350 * len(region_acronyms),
-        margin=dict(l=60, r=40, t=60, b=50),
+        height=max(450, 280 * n_rows + 140),
+        width=1000,
+        margin=dict(l=70, r=70, t=90, b=70),
     )
-    fig.update_layout(template=template, font=dict(color=base_color))
-    fig.update_xaxes(title_text=f"Time from {event_label(align_event)} (s)")
+    fig.update_layout(template=template, font=dict(color=base_color, size=12))
+    fig.update_xaxes(
+        title_text=f"Time from {event_label(align_event)} (s)",
+        row=n_rows,
+        col=1,
+    )
 
     return fig
 
@@ -1946,11 +1981,12 @@ def plot_population_coupling_heatmap_plotly(
     window_bins = int(round(window_ms / bin_size_ms)) if bin_size_ms > 0 else 0
     lags_ms = np.arange(-window_bins, window_bins + 1) * bin_size_ms
 
+    n_rows = len(region_acronyms)
     fig = make_subplots(
-        rows=len(region_acronyms),
+        rows=n_rows,
         cols=1,
         shared_xaxes=True,
-        vertical_spacing=0.03,
+        vertical_spacing=0.06,
         subplot_titles=[f"{region} units" for region in region_acronyms],
     )
 
@@ -2010,14 +2046,20 @@ def plot_population_coupling_heatmap_plotly(
                 trim_start = int((curve.size - n_bins) // 2)
                 stpr_matrix[row_i, :] = curve[trim_start : trim_start + n_bins]
 
+        show_scale = row_idx == 1
         fig.add_trace(
             go.Heatmap(
                 z=stpr_matrix,
                 x=lags_ms,
                 y=np.arange(n_neurons),
                 colorscale=cmap_name,
-                colorbar=dict(title="stPR z", len=0.35),
-                showscale=True,
+                colorbar=dict(
+                    title="stPR z",
+                    len=0.7,
+                    y=0.5,
+                    yanchor="middle",
+                ),
+                showscale=show_scale,
             ),
             row=row_idx,
             col=1,
@@ -2065,13 +2107,22 @@ def plot_population_coupling_heatmap_plotly(
         fig.add_vline(x=0, line=dict(color="black", dash="dash"), row=row_idx, col=1)
         fig.update_yaxes(title_text="Neurons", row=row_idx, col=1, autorange="reversed")
 
+    for ann in fig.layout.annotations or []:
+        ann.update(font=dict(size=12))
+
     fig.update_layout(
         title="Spike-triggered Population Coupling (stPR)",
-        height=350 * len(region_acronyms),
-        margin=dict(l=60, r=40, t=60, b=50),
+        height=max(450, 280 * n_rows + 140),
+        width=1000,
+        margin=dict(l=70, r=70, t=90, b=70),
     )
-    fig.update_layout(template=template, font=dict(color=base_color))
-    fig.update_xaxes(title_text="Lag (ms)", range=[-window_ms, window_ms])
+    fig.update_layout(template=template, font=dict(color=base_color, size=12))
+    fig.update_xaxes(
+        title_text="Lag (ms)",
+        range=[-window_ms, window_ms],
+        row=n_rows,
+        col=1,
+    )
 
     return fig
 
@@ -2104,6 +2155,10 @@ def _scatter_with_unity_plotly(
     highlight_cluster_id=None,
     other_alpha=0.4,
 ):
+    if region_colors is None and "region" in df.columns:
+        region_colors = _region_color_map(
+            pd.Series(df["region"]).astype(str).unique().tolist()
+        )
     fig = px.scatter(
         df,
         x=xcol,
@@ -2136,7 +2191,11 @@ def _scatter_with_unity_plotly(
         xaxis_title=xlabel,
         yaxis_title=ylabel,
         template=template,
-        font=dict(color=base_color),
+        font=dict(color=base_color, size=13),
+        width=900,
+        height=650,
+        margin=dict(l=70, r=40, t=80, b=60),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
     )
     if highlight_cluster_id is not None and "cluster_id" in df.columns:
         highlight_rows = df[df["cluster_id"] == highlight_cluster_id]
