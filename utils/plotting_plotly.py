@@ -7,7 +7,12 @@ from plotly_resampler import FigureResampler
 from scipy.stats import pearsonr, spearmanr
 from types import SimpleNamespace
 
-from .analysis import compute_psth_for_clusters, event_label, delay_column_name
+from .analysis import (
+    compute_psth_for_clusters,
+    event_label,
+    delay_column_name,
+    delay_split_column_name,
+)
 
 DEFAULT_TEMPLATE = "plotly_white"
 
@@ -20,6 +25,49 @@ def _get_cluster_attr(clusters, key, fallback=None):
     if isinstance(clusters, dict) and key in clusters:
         return clusters.get(key)
     return fallback
+
+
+def _get_metrics_df(clusters):
+    if clusters is None:
+        return None
+    if hasattr(clusters, "metrics"):
+        return clusters.metrics
+    if isinstance(clusters, dict) and "metrics" in clusters:
+        return clusters.get("metrics")
+    return None
+
+
+def _get_metric_cluster_ids(metrics):
+    if metrics is None:
+        return None
+    if isinstance(metrics, pd.DataFrame):
+        if "cluster_id" in metrics.columns:
+            return np.asarray(metrics["cluster_id"])
+        try:
+            return np.asarray(metrics.index)
+        except Exception:
+            return None
+    if isinstance(metrics, dict) and "cluster_id" in metrics:
+        return np.asarray(metrics["cluster_id"])
+    if hasattr(metrics, "cluster_id"):
+        return np.asarray(metrics.cluster_id)
+    return None
+
+
+def _map_labels_to_cluster_ids(labels, cluster_ids, id_all):
+    if labels is None:
+        return None
+    labels = np.asarray(labels)
+    cluster_ids = np.asarray(cluster_ids)
+    if labels.shape[0] == len(cluster_ids):
+        return labels.astype(float)
+    if id_all is None:
+        return None
+    id_all = np.asarray(id_all)
+    if id_all.shape[0] != labels.shape[0]:
+        return None
+    label_lookup = dict(zip(id_all.tolist(), labels.tolist()))
+    return np.array([label_lookup.get(cid, np.nan) for cid in cluster_ids], dtype=float)
 
 
 def _get_session_field(sl, key):
@@ -57,6 +105,25 @@ def _white_theme():
     template = DEFAULT_TEMPLATE or "plotly_white"
     base_color = "white" if "dark" in str(template).lower() else "black"
     return template, base_color
+
+
+def _delay_units(config_plot):
+    units = str(config_plot.get("DELAY_UNITS", "s")).lower()
+    return "ms" if units.startswith("ms") else "s"
+
+
+def _delay_to_seconds(values, config_plot):
+    vals = np.asarray(values, dtype=float)
+    if _delay_units(config_plot) == "ms":
+        vals = vals / 1000.0
+    return vals
+
+
+def _delay_to_ms(values, config_plot):
+    vals = np.asarray(values, dtype=float)
+    if _delay_units(config_plot) != "ms":
+        vals = vals * 1000.0
+    return vals
 
 
 def _color_to_rgba(color, alpha=0.15):
@@ -175,17 +242,31 @@ def _get_trial_event(trials, event_name, trial_idx):
 def _get_quality_mask(clusters, cluster_ids, only_good):
     if not only_good:
         return np.ones(len(cluster_ids), dtype=bool)
+    label_values = _get_label_values(clusters, cluster_ids)
+    if label_values is None:
+        return np.ones(len(cluster_ids), dtype=bool)
+    return np.asarray(label_values == 1, dtype=bool)
+
+def _get_label_values(clusters, cluster_ids):
+    cluster_ids = np.asarray(cluster_ids)
+    metrics = _get_metrics_df(clusters)
     labels = None
-    if hasattr(clusters, "metrics") and hasattr(clusters.metrics, "columns"):
-        if "label" in clusters.metrics.columns:
-            labels = np.asarray(clusters.metrics.label)
-    if labels is None and hasattr(clusters, "label"):
+    if isinstance(metrics, pd.DataFrame) and "label" in metrics.columns:
+        labels = np.asarray(metrics["label"])
+    elif isinstance(metrics, dict) and "label" in metrics:
+        labels = np.asarray(metrics["label"])
+    elif hasattr(metrics, "label"):
+        labels = np.asarray(metrics.label)
+    values = _map_labels_to_cluster_ids(labels, cluster_ids, _get_metric_cluster_ids(metrics))
+    if values is not None:
+        return values
+
+    labels = None
+    if hasattr(clusters, "label"):
         labels = np.asarray(clusters.label)
     if labels is None and isinstance(clusters, dict) and "label" in clusters:
         labels = np.asarray(clusters.get("label"))
-    if labels is None:
-        return np.ones(len(cluster_ids), dtype=bool)
-    return labels == 1
+    return _map_labels_to_cluster_ids(labels, cluster_ids, _get_cluster_attr(clusters, "cluster_id", None))
 
 
 def _get_depths(clusters, n_units):
@@ -194,14 +275,32 @@ def _get_depths(clusters, n_units):
         depths = _get_cluster_attr(clusters, "depth", None)
     if depths is None:
         return np.arange(n_units)
-    return np.asarray(depths)
+    depths = np.asarray(depths)
+    if depths.shape[0] == n_units:
+        return depths
+    # Fall back to mapping by cluster_id if lengths mismatch.
+    cluster_id_all = _get_cluster_attr(clusters, "cluster_id", None)
+    if cluster_id_all is None:
+        return np.arange(n_units)
+    cluster_id_all = np.asarray(cluster_id_all)
+    if cluster_id_all.shape[0] != depths.shape[0]:
+        return np.arange(n_units)
+    depth_lookup = dict(zip(cluster_id_all.tolist(), depths.tolist()))
+    return depth_lookup
 
 
-def _prepare_units_df(cluster_ids, cluster_acronyms, clusters, only_good):
+def _prepare_units_df(cluster_ids, cluster_acronyms, clusters, only_good, label_min=None):
     cluster_ids = np.asarray(cluster_ids)
     cluster_acronyms = np.asarray(cluster_acronyms).astype(str)
     quality_mask = _get_quality_mask(clusters, cluster_ids, only_good)
+    if label_min is not None:
+        label_values = _get_label_values(clusters, cluster_ids)
+        if label_values is not None:
+            label_mask = label_values >= float(label_min)
+            quality_mask = quality_mask & label_mask
     depths = _get_depths(clusters, len(cluster_ids))
+    if isinstance(depths, dict):
+        depths = np.array([depths.get(cid, np.nan) for cid in cluster_ids], dtype=float)
 
     df_units = pd.DataFrame(
         {
@@ -215,10 +314,30 @@ def _prepare_units_df(cluster_ids, cluster_acronyms, clusters, only_good):
     return df_units, quality_mask
 
 
-def _merge_metric(df_units, metric_key, df_res=None, df_coupling=None, df_coupling_task=None):
+def _merge_metric(
+    df_units,
+    metric_key,
+    df_res=None,
+    df_coupling=None,
+    df_coupling_task=None,
+    df_coupling_iti=None,
+):
     metric_key = (metric_key or "depth").strip().lower()
     df_units = df_units.copy()
     sort_label = "Depth"
+
+    def _merge_coupling_metric(df_local, df_src, columns, label):
+        if df_src is not None:
+            for col in columns:
+                if col in df_src.columns:
+                    df_local = df_local.merge(
+                        df_src[["cluster_id", col]].rename(columns={col: "sort_metric"}),
+                        on="cluster_id",
+                        how="left",
+                    )
+                    return df_local, label
+        df_local["sort_metric"] = df_local["depth"]
+        return df_local, "Depth"
 
     if metric_key in ("depth", "default"):
         df_units["sort_metric"] = df_units["depth"]
@@ -280,6 +399,52 @@ def _merge_metric(df_units, metric_key, df_res=None, df_coupling=None, df_coupli
             sort_label = "Depth"
         return df_units, sort_label
 
+    if "strength" in metric_key:
+        if "spont" in metric_key:
+            return _merge_coupling_metric(
+                df_units,
+                df_coupling,
+                ["coupling_strength", "coupling_strength_h1", "coupling_strength_h2"],
+                "stPR Strength (Spont)",
+            )
+        if "task" in metric_key:
+            return _merge_coupling_metric(
+                df_units,
+                df_coupling_task,
+                ["coupling_strength", "coupling_strength_odd", "coupling_strength_even"],
+                "stPR Strength (Task)",
+            )
+        if "iti" in metric_key:
+            return _merge_coupling_metric(
+                df_units,
+                df_coupling_iti,
+                ["coupling_strength", "coupling_strength_odd", "coupling_strength_even"],
+                "stPR Strength (ITI)",
+            )
+
+    if "max" in metric_key:
+        if "spont" in metric_key:
+            return _merge_coupling_metric(
+                df_units,
+                df_coupling,
+                ["coupling_max", "coupling_max_h1", "coupling_max_h2"],
+                "stPR Max (Spont)",
+            )
+        if "task" in metric_key:
+            return _merge_coupling_metric(
+                df_units,
+                df_coupling_task,
+                ["coupling_max", "coupling_max_odd", "coupling_max_even"],
+                "stPR Max (Task)",
+            )
+        if "iti" in metric_key:
+            return _merge_coupling_metric(
+                df_units,
+                df_coupling_iti,
+                ["coupling_max", "coupling_max_odd", "coupling_max_even"],
+                "stPR Max (ITI)",
+            )
+
     if "spont" in metric_key:
         sort_label = "Coupling (Spont)"
         if df_coupling is not None:
@@ -334,6 +499,33 @@ def _merge_metric(df_units, metric_key, df_res=None, df_coupling=None, df_coupli
             sort_label = "Depth"
         return df_units, sort_label
 
+    if "iti" in metric_key:
+        sort_label = "Coupling (ITI)"
+        if df_coupling_iti is not None:
+            if "sorting_number" in df_coupling_iti.columns:
+                df_units = df_units.merge(
+                    df_coupling_iti[["cluster_id", "sorting_number"]].rename(
+                        columns={"sorting_number": "sort_metric"}
+                    ),
+                    on="cluster_id",
+                    how="left",
+                )
+            elif "coupling_delay_ms" in df_coupling_iti.columns:
+                df_units = df_units.merge(
+                    df_coupling_iti[["cluster_id", "coupling_delay_ms"]].rename(
+                        columns={"coupling_delay_ms": "sort_metric"}
+                    ),
+                    on="cluster_id",
+                    how="left",
+                )
+            else:
+                df_units["sort_metric"] = df_units["depth"]
+                sort_label = "Depth"
+        else:
+            df_units["sort_metric"] = df_units["depth"]
+            sort_label = "Depth"
+        return df_units, sort_label
+
     df_units["sort_metric"] = df_units["depth"]
     return df_units, "Depth"
 
@@ -368,6 +560,7 @@ def plot_trial_raster_plotly(
     df_res=None,
     df_coupling=None,
     df_coupling_task=None,
+    df_coupling_iti=None,
     pupil_features=None,
     pupil_times=None,
     region_colors=None,
@@ -379,7 +572,8 @@ def plot_trial_raster_plotly(
     if trials is None:
         return go.Figure()
 
-    template, base_color = _white_theme()
+    template = config_plot.get("PLOTLY_TEMPLATE", DEFAULT_TEMPLATE)
+    base_color = _template_base_color(template)
 
     t_stim_on = _get_trial_event(trials, "stimOn_times", trial_idx)
     t_first_move = _get_trial_event(trials, "firstMovement_times", trial_idx)
@@ -440,7 +634,11 @@ def plot_trial_raster_plotly(
     )
 
     df_units, _ = _prepare_units_df(
-        cluster_ids, cluster_acronyms, clusters, config_plot["PLOT_ONLY_GOOD_UNITS"]
+        cluster_ids,
+        cluster_acronyms,
+        clusters,
+        config_plot["PLOT_ONLY_GOOD_UNITS"],
+        label_min=config_plot.get("PLOT_LABEL_MIN"),
     )
     if df_units.empty:
         return go.Figure()
@@ -449,21 +647,11 @@ def plot_trial_raster_plotly(
         "AVG_PSTH_ONLY_GOOD", config_plot["PLOT_ONLY_GOOD_UNITS"]
     )
     df_units_psth, _ = _prepare_units_df(
-        cluster_ids, cluster_acronyms, clusters, avg_psth_only_good
-    )
-
-    avg_psth_only_good = config_plot.get(
-        "AVG_PSTH_ONLY_GOOD", config_plot["PLOT_ONLY_GOOD_UNITS"]
-    )
-    df_units_psth, _ = _prepare_units_df(
-        cluster_ids, cluster_acronyms, clusters, avg_psth_only_good
-    )
-
-    avg_psth_only_good = config_plot.get(
-        "AVG_PSTH_ONLY_GOOD", config_plot["PLOT_ONLY_GOOD_UNITS"]
-    )
-    df_units_psth, _ = _prepare_units_df(
-        cluster_ids, cluster_acronyms, clusters, avg_psth_only_good
+        cluster_ids,
+        cluster_acronyms,
+        clusters,
+        avg_psth_only_good,
+        label_min=config_plot.get("PLOT_LABEL_MIN"),
     )
 
     df_units, sort_label = _merge_metric(
@@ -472,6 +660,7 @@ def plot_trial_raster_plotly(
         df_res=df_res,
         df_coupling=df_coupling,
         df_coupling_task=df_coupling_task,
+        df_coupling_iti=df_coupling_iti,
     )
     df_units, region_order, sort_label = _sort_within_regions(df_units, sort_label)
 
@@ -817,11 +1006,23 @@ def plot_single_neuron_plotly(
         align_event = "stimOn_times"
 
     delay_col = delay_column_name(align_event)
+    delay_odd_col = delay_split_column_name(align_event, "odd")
+    delay_even_col = delay_split_column_name(align_event, "even")
     unit_delay = np.nan
     if df_res is not None and delay_col in df_res.columns:
         match = df_res[df_res["cluster_id"] == cluster_id]
         if not match.empty:
             unit_delay = float(match.iloc[0][delay_col])
+    delay_s = (
+        float(_delay_to_seconds(unit_delay, config_plot))
+        if np.isfinite(unit_delay)
+        else np.nan
+    )
+    delay_ms = (
+        float(_delay_to_ms(unit_delay, config_plot))
+        if np.isfinite(unit_delay)
+        else np.nan
+    )
 
     def _get_trials_array(key):
         return _get_trials_array_field(trials, key)
@@ -985,18 +1186,18 @@ def plot_single_neuron_plotly(
             col=1,
         )
 
-        if np.isfinite(unit_delay):
+        if np.isfinite(delay_s):
             fig.add_vline(
-                x=unit_delay,
+                x=delay_s,
                 line=dict(color="red", width=2),
                 row=3,
                 col=1,
             )
             y_text = float(np.nanmax(global_curve)) * 0.9 if len(global_curve) > 0 else 0
             fig.add_annotation(
-                x=unit_delay,
+                x=delay_s,
                 y=y_text,
-                text=f"{unit_delay * 1000:.0f} ms",
+                text=f"{delay_ms:.0f} ms" if np.isfinite(delay_ms) else "NA",
                 showarrow=False,
                 font=dict(color="red"),
                 row=3,
@@ -1198,6 +1399,16 @@ def plot_single_neuron_conditioned_event_plotly(
         match = df_res[df_res["cluster_id"] == cluster_id]
         if not match.empty:
             unit_delay = float(match.iloc[0][delay_col])
+    delay_s = (
+        float(_delay_to_seconds(unit_delay, config_plot))
+        if np.isfinite(unit_delay)
+        else np.nan
+    )
+    delay_ms = (
+        float(_delay_to_ms(unit_delay, config_plot))
+        if np.isfinite(unit_delay)
+        else np.nan
+    )
 
     if global_curves and global_bin_centers is not None:
         min_len = min(len(curve) for curve in global_curves)
@@ -1217,18 +1428,18 @@ def plot_single_neuron_conditioned_event_plotly(
             col=1,
         )
 
-        if np.isfinite(unit_delay):
+        if np.isfinite(delay_s):
             fig.add_vline(
-                x=unit_delay,
+                x=delay_s,
                 line=dict(color="red", width=2),
                 row=3,
                 col=1,
             )
             y_text = float(np.nanmax(global_curve)) * 0.9 if len(global_curve) > 0 else 0
             fig.add_annotation(
-                x=unit_delay,
+                x=delay_s,
                 y=y_text,
-                text=f"{unit_delay * 1000:.0f} ms",
+                text=f"{delay_ms:.0f} ms" if np.isfinite(delay_ms) else "NA",
                 showarrow=False,
                 font=dict(color="red"),
                 row=3,
@@ -1286,8 +1497,10 @@ def plot_stpr_curve_halves_plotly(
     cluster_id,
     title=None,
     template=None,
+    split_suffixes=None,
+    split_labels=None,
 ):
-    """Plot stPR curves for first and second halves of a session."""
+    """Plot stPR curves for two splits (defaults to first/second half)."""
     fig = go.Figure()
     if template is None:
         template, base_color = _white_theme()
@@ -1321,13 +1534,18 @@ def plot_stpr_curve_halves_plotly(
         )
         return fig
 
-    row = match.iloc[0]
-    curve_h1 = np.asarray(row.get("stpr_curve_h1", []), dtype=float)
-    curve_h2 = np.asarray(row.get("stpr_curve_h2", []), dtype=float)
-    if curve_h1.size == 0 and "stpr_curve" in row:
-        curve_h1 = np.asarray(row.get("stpr_curve", []), dtype=float)
+    suffix_a, suffix_b = split_suffixes or ("h1", "h2")
+    label_a, label_b = split_labels or ("First Half", "Second Half")
 
-    if curve_h1.size == 0 and curve_h2.size == 0:
+    row = match.iloc[0]
+    curve_a = np.asarray(row.get(f"stpr_curve_{suffix_a}", []), dtype=float)
+    curve_b = np.asarray(row.get(f"stpr_curve_{suffix_b}", []), dtype=float)
+    if curve_a.size == 0 and "stpr_curve" in row:
+        curve_a = np.asarray(row.get("stpr_curve", []), dtype=float)
+        label_a = "Mean"
+        label_b = ""
+
+    if curve_a.size == 0 and curve_b.size == 0:
         fig.add_annotation(text="No stPR curve data available", showarrow=False)
         fig.update_layout(
             title=title or "stPR Curves (First vs Second Half)",
@@ -1341,35 +1559,35 @@ def plot_stpr_curve_halves_plotly(
         return fig
 
     colors = ["#1f77b4", "#ff7f0e"]
-    if curve_h1.size > 0:
-        lags_h1 = _build_stpr_lags(config_calc, curve_h1.size)
+    if curve_a.size > 0:
+        lags_a = _build_stpr_lags(config_calc, curve_a.size)
         fig.add_trace(
             go.Scatter(
-                x=lags_h1,
-                y=curve_h1,
+                x=lags_a,
+                y=curve_a,
                 mode="lines",
                 line=dict(color=colors[0], width=2),
-                name="First Half",
+                name=label_a,
             )
         )
-        delay_h1 = row.get("coupling_delay_ms_h1", np.nan)
-        if np.isfinite(delay_h1):
-            fig.add_vline(x=delay_h1, line=dict(color=colors[0], dash="dash"))
+        delay_a = row.get(f"coupling_delay_ms_{suffix_a}", np.nan)
+        if np.isfinite(delay_a):
+            fig.add_vline(x=delay_a, line=dict(color=colors[0], dash="dash"))
 
-    if curve_h2.size > 0:
-        lags_h2 = _build_stpr_lags(config_calc, curve_h2.size)
+    if curve_b.size > 0:
+        lags_b = _build_stpr_lags(config_calc, curve_b.size)
         fig.add_trace(
             go.Scatter(
-                x=lags_h2,
-                y=curve_h2,
+                x=lags_b,
+                y=curve_b,
                 mode="lines",
                 line=dict(color=colors[1], width=2),
-                name="Second Half",
+                name=label_b or f"{suffix_b}",
             )
         )
-        delay_h2 = row.get("coupling_delay_ms_h2", np.nan)
-        if np.isfinite(delay_h2):
-            fig.add_vline(x=delay_h2, line=dict(color=colors[1], dash="dash"))
+        delay_b = row.get(f"coupling_delay_ms_{suffix_b}", np.nan)
+        if np.isfinite(delay_b):
+            fig.add_vline(x=delay_b, line=dict(color=colors[1], dash="dash"))
 
     fig.add_vline(x=0, line=dict(color="gray", dash="dot"))
 
@@ -1403,6 +1621,7 @@ def plot_time_window_raster_plotly(
     df_res=None,
     df_coupling=None,
     df_coupling_task=None,
+    df_coupling_iti=None,
     pupil_features=None,
     pupil_times=None,
     region_colors=None,
@@ -1417,10 +1636,15 @@ def plot_time_window_raster_plotly(
     if trials is None:
         return go.Figure()
 
-    template, base_color = _white_theme()
+    template = config_plot.get("PLOTLY_TEMPLATE", DEFAULT_TEMPLATE)
+    base_color = _template_base_color(template)
 
     df_units, _ = _prepare_units_df(
-        cluster_ids, cluster_acronyms, clusters, config_plot["PLOT_ONLY_GOOD_UNITS"]
+        cluster_ids,
+        cluster_acronyms,
+        clusters,
+        config_plot["PLOT_ONLY_GOOD_UNITS"],
+        label_min=config_plot.get("PLOT_LABEL_MIN"),
     )
     if df_units.empty:
         return go.Figure()
@@ -1429,7 +1653,11 @@ def plot_time_window_raster_plotly(
         "AVG_PSTH_ONLY_GOOD", config_plot["PLOT_ONLY_GOOD_UNITS"]
     )
     df_units_psth, _ = _prepare_units_df(
-        cluster_ids, cluster_acronyms, clusters, avg_psth_only_good
+        cluster_ids,
+        cluster_acronyms,
+        clusters,
+        avg_psth_only_good,
+        label_min=config_plot.get("PLOT_LABEL_MIN"),
     )
 
     if region_acronyms is not None:
@@ -1454,6 +1682,7 @@ def plot_time_window_raster_plotly(
         df_res=df_res,
         df_coupling=df_coupling,
         df_coupling_task=df_coupling_task,
+        df_coupling_iti=df_coupling_iti,
     )
     df_units, region_order, sort_label = _sort_within_regions(df_units, sort_label)
 
@@ -1758,20 +1987,25 @@ def plot_population_sorted_plotly(
     config_plot,
     df_coupling=None,
     df_coupling_task=None,
+    df_coupling_iti=None,
     region_acronyms=None,
     sort_mode="delay",
 ):
     """Plot population heatmaps sorted by delay or coupling."""
     cluster_acronyms = np.asarray(cluster_acronyms).astype(str)
     template, base_color = _white_theme()
-    quality_mask = _get_quality_mask(
-        clusters, np.asarray(cluster_ids), config_plot.get("PLOT_ONLY_GOOD_UNITS", False)
+    df_units, _ = _prepare_units_df(
+        cluster_ids,
+        cluster_acronyms,
+        clusters,
+        config_plot.get("PLOT_ONLY_GOOD_UNITS", False),
+        label_min=config_plot.get("PLOT_LABEL_MIN"),
     )
-    cluster_ids = np.asarray(cluster_ids)[quality_mask]
-    cluster_acronyms = cluster_acronyms[quality_mask]
-    keep_mask = ~np.isin(cluster_acronyms, ["root", "void"])
-    cluster_ids = cluster_ids[keep_mask]
-    cluster_acronyms = cluster_acronyms[keep_mask]
+    if df_units.empty:
+        return go.Figure()
+    cluster_ids = df_units["cluster_id"].to_numpy()
+    cluster_acronyms = df_units["acronym"].to_numpy()
+    region_from_config = region_acronyms is not None
     if region_acronyms is None:
         region_acronyms = config_plot.get("PLOT_REGIONS")
         if region_acronyms is None:
@@ -1797,6 +2031,8 @@ def plot_population_sorted_plotly(
     if align_event not in trials.keys():
         align_event = "stimOn_times"
     delay_col = delay_column_name(align_event)
+    delay_odd_col = delay_split_column_name(align_event, "odd")
+    delay_even_col = delay_split_column_name(align_event, "even")
     event_series = np.asarray(trials[align_event])
     stim_times = event_series[~np.isnan(event_series)]
 
@@ -1808,18 +2044,61 @@ def plot_population_sorted_plotly(
         vertical_spacing=0.06,
         subplot_titles=[f"{region} units" for region in region_acronyms],
     )
+    use_prefix = bool(config_plot.get("PLOT_REGION_PREFIX_MATCH", False)) and region_from_config
+
+    def _select_delay_sort_key(df_local):
+        if "delay_odd" in df_local.columns and np.isfinite(df_local["delay_odd"]).any():
+            return "delay_odd", "Delay (Odd)"
+        if "delay" in df_local.columns and np.isfinite(df_local["delay"]).any():
+            return "delay", "Delay"
+        if "delay_even" in df_local.columns and np.isfinite(df_local["delay_even"]).any():
+            return "delay_even", "Delay (Even)"
+        return "delay", "Delay"
+
+    def _sort_by_coupling_value(df_local, df_src, value_cols, label, ascending=True):
+        if df_src is None:
+            return None
+        for col in value_cols:
+            if col in df_src.columns:
+                merged = df_local.merge(
+                    df_src[["cluster_id", col]].rename(columns={col: "sort_metric"}),
+                    on="cluster_id",
+                    how="left",
+                )
+                return (
+                    merged.sort_values(by="sort_metric", ascending=ascending, na_position="last"),
+                    label,
+                )
+        return None
 
     for row_idx, region in enumerate(region_acronyms, start=1):
-        region_mask = np.char.startswith(cluster_acronyms.astype(str), region)
-        df_region = pd.DataFrame({"cluster_id": cluster_ids[region_mask]})
-        if df_res is not None and delay_col in df_res.columns:
-            df_region = df_region.merge(
-                df_res[["cluster_id", delay_col]].rename(columns={delay_col: "delay"}),
-                on="cluster_id",
-                how="left",
-            )
+        if use_prefix:
+            region_mask = np.char.startswith(cluster_acronyms.astype(str), region)
         else:
-            df_region["delay"] = np.nan
+            region_mask = cluster_acronyms.astype(str) == str(region)
+        df_region = pd.DataFrame({"cluster_id": cluster_ids[region_mask]})
+        sort_desc = sort_mode not in ("depth", "default")
+        sort_ascending = not sort_desc
+        merge_cols = ["cluster_id"]
+        rename_map = {}
+        if df_res is not None:
+            if delay_col in df_res.columns:
+                merge_cols.append(delay_col)
+                rename_map[delay_col] = "delay"
+            if delay_odd_col in df_res.columns:
+                merge_cols.append(delay_odd_col)
+                rename_map[delay_odd_col] = "delay_odd"
+            if delay_even_col in df_res.columns:
+                merge_cols.append(delay_even_col)
+                rename_map[delay_even_col] = "delay_even"
+        if len(merge_cols) > 1:
+            df_region = df_region.merge(df_res[merge_cols], on="cluster_id", how="left")
+            df_region = df_region.rename(columns=rename_map)
+        for col_name in ("delay", "delay_odd", "delay_even"):
+            if col_name not in df_region.columns:
+                df_region[col_name] = np.nan
+
+        delay_sort_key, delay_sort_label = _select_delay_sort_key(df_region)
 
         if sort_mode == "spont" and df_coupling is not None:
             if "sorting_number" in df_coupling.columns:
@@ -1829,12 +2108,14 @@ def plot_population_sorted_plotly(
                     how="left",
                 )
                 df_sorted = df_region.sort_values(
-                    by="sorting_number", ascending=True, na_position="last"
+                    by="sorting_number", ascending=sort_ascending, na_position="last"
                 )
                 sort_label = "Coupling (Spont)"
             else:
-                df_sorted = df_region.sort_values(by="delay", ascending=True, na_position="last")
-                sort_label = "Delay"
+                df_sorted = df_region.sort_values(
+                    by=delay_sort_key, ascending=sort_ascending, na_position="last"
+                )
+                sort_label = delay_sort_label
         elif sort_mode == "task" and df_coupling_task is not None:
             if "sorting_number" in df_coupling_task.columns:
                 df_region = df_region.merge(
@@ -1843,12 +2124,120 @@ def plot_population_sorted_plotly(
                     how="left",
                 )
                 df_sorted = df_region.sort_values(
-                    by="sorting_number", ascending=True, na_position="last"
+                    by="sorting_number", ascending=sort_ascending, na_position="last"
                 )
                 sort_label = "Coupling (Task)"
             else:
-                df_sorted = df_region.sort_values(by="delay", ascending=True, na_position="last")
-                sort_label = "Delay"
+                df_sorted = df_region.sort_values(
+                    by=delay_sort_key, ascending=sort_ascending, na_position="last"
+                )
+                sort_label = delay_sort_label
+        elif sort_mode == "iti" and df_coupling_iti is not None:
+            if "sorting_number" in df_coupling_iti.columns:
+                df_region = df_region.merge(
+                    df_coupling_iti[["cluster_id", "sorting_number"]],
+                    on="cluster_id",
+                    how="left",
+                )
+                df_sorted = df_region.sort_values(
+                    by="sorting_number", ascending=sort_ascending, na_position="last"
+                )
+                sort_label = "Coupling (ITI)"
+            else:
+                df_sorted = df_region.sort_values(
+                    by=delay_sort_key, ascending=sort_ascending, na_position="last"
+                )
+                sort_label = delay_sort_label
+        elif sort_mode == "spont_strength":
+            sorted_result = _sort_by_coupling_value(
+                df_region,
+                df_coupling,
+                ["coupling_strength", "coupling_strength_h1", "coupling_strength_h2"],
+                "stPR Strength (Spont)",
+                ascending=sort_ascending,
+            )
+            if sorted_result is None:
+                df_sorted = df_region.sort_values(
+                    by=delay_sort_key, ascending=sort_ascending, na_position="last"
+                )
+                sort_label = delay_sort_label
+            else:
+                df_sorted, sort_label = sorted_result
+        elif sort_mode == "spont_max":
+            sorted_result = _sort_by_coupling_value(
+                df_region,
+                df_coupling,
+                ["coupling_max", "coupling_max_h1", "coupling_max_h2"],
+                "stPR Max (Spont)",
+                ascending=sort_ascending,
+            )
+            if sorted_result is None:
+                df_sorted = df_region.sort_values(
+                    by=delay_sort_key, ascending=sort_ascending, na_position="last"
+                )
+                sort_label = delay_sort_label
+            else:
+                df_sorted, sort_label = sorted_result
+        elif sort_mode == "task_strength":
+            sorted_result = _sort_by_coupling_value(
+                df_region,
+                df_coupling_task,
+                ["coupling_strength", "coupling_strength_odd", "coupling_strength_even"],
+                "stPR Strength (Task)",
+                ascending=sort_ascending,
+            )
+            if sorted_result is None:
+                df_sorted = df_region.sort_values(
+                    by=delay_sort_key, ascending=sort_ascending, na_position="last"
+                )
+                sort_label = delay_sort_label
+            else:
+                df_sorted, sort_label = sorted_result
+        elif sort_mode == "task_max":
+            sorted_result = _sort_by_coupling_value(
+                df_region,
+                df_coupling_task,
+                ["coupling_max", "coupling_max_odd", "coupling_max_even"],
+                "stPR Max (Task)",
+                ascending=sort_ascending,
+            )
+            if sorted_result is None:
+                df_sorted = df_region.sort_values(
+                    by=delay_sort_key, ascending=sort_ascending, na_position="last"
+                )
+                sort_label = delay_sort_label
+            else:
+                df_sorted, sort_label = sorted_result
+        elif sort_mode == "iti_strength":
+            sorted_result = _sort_by_coupling_value(
+                df_region,
+                df_coupling_iti,
+                ["coupling_strength", "coupling_strength_odd", "coupling_strength_even"],
+                "stPR Strength (ITI)",
+                ascending=sort_ascending,
+            )
+            if sorted_result is None:
+                df_sorted = df_region.sort_values(
+                    by=delay_sort_key, ascending=sort_ascending, na_position="last"
+                )
+                sort_label = delay_sort_label
+            else:
+                df_sorted, sort_label = sorted_result
+        elif sort_mode == "iti_max":
+            sorted_result = _sort_by_coupling_value(
+                df_region,
+                df_coupling_iti,
+                ["coupling_max", "coupling_max_odd", "coupling_max_even"],
+                "stPR Max (ITI)",
+                ascending=sort_ascending,
+            )
+            if sorted_result is None:
+                df_sorted = df_region.sort_values(
+                    by=delay_sort_key, ascending=sort_ascending, na_position="last"
+                )
+                sort_label = delay_sort_label
+            else:
+                df_sorted, sort_label = sorted_result
         elif sort_mode == "depth":
             all_cluster_ids = _get_cluster_attr(clusters, "cluster_id", None)
             if all_cluster_ids is None:
@@ -1859,8 +2248,10 @@ def plot_population_sorted_plotly(
             df_sorted = df_region.sort_values(by="depth", ascending=True, na_position="last")
             sort_label = "Depth"
         else:
-            df_sorted = df_region.sort_values(by="delay", ascending=True, na_position="last")
-            sort_label = "Delay"
+            df_sorted = df_region.sort_values(
+                by=delay_sort_key, ascending=sort_ascending, na_position="last"
+            )
+            sort_label = delay_sort_label
 
         df_sorted = df_sorted.reset_index(drop=True)
         n_neurons = len(df_sorted)
@@ -1892,6 +2283,24 @@ def plot_population_sorted_plotly(
                     fr_smooth = fr_smooth / peak
             psth_matrix[i, :] = fr_smooth
 
+        def _scale_delay_for_plot(values):
+            delay_s = _delay_to_seconds(values, config_plot)
+            if bin_centers is None:
+                return delay_s
+            delay_s = np.asarray(delay_s, dtype=float)
+            if delay_s.size == 0 or not np.isfinite(delay_s).any():
+                return delay_s
+            max_abs = np.nanmax(np.abs(bin_centers))
+            if np.isfinite(max_abs) and max_abs > 0:
+                median_abs = np.nanmedian(np.abs(delay_s))
+                if np.isfinite(median_abs) and median_abs > max_abs * 10:
+                    return delay_s / 1000.0
+            return delay_s
+
+        df_sorted["delay_plot"] = _scale_delay_for_plot(df_sorted["delay"])
+        df_sorted["delay_odd_plot"] = _scale_delay_for_plot(df_sorted["delay_odd"])
+        df_sorted["delay_even_plot"] = _scale_delay_for_plot(df_sorted["delay_even"])
+
         show_scale = row_idx == 1
         fig.add_trace(
             go.Heatmap(
@@ -1911,19 +2320,53 @@ def plot_population_sorted_plotly(
             col=1,
         )
 
-        valid_delays = df_sorted.dropna(subset=["delay"])
-        fig.add_trace(
-            go.Scatter(
-                x=valid_delays["delay"],
-                y=valid_delays.index,
-                mode="markers",
-                marker=dict(color=base_color, size=5),
-                name="Delay",
-                showlegend=False,
-            ),
-            row=row_idx,
-            col=1,
-        )
+        odd_available = np.isfinite(df_sorted["delay_odd_plot"]).any()
+        even_available = np.isfinite(df_sorted["delay_even_plot"]).any()
+        if odd_available or even_available:
+            if odd_available:
+                valid_odd = df_sorted.dropna(subset=["delay_odd_plot"])
+                fig.add_trace(
+                    go.Scatter(
+                        x=valid_odd["delay_odd_plot"],
+                        y=valid_odd.index,
+                        mode="markers",
+                        marker=dict(color="gray", size=5),
+                        name="Odd delay",
+                        legendgroup="delay_odd",
+                        showlegend=row_idx == 1,
+                    ),
+                    row=row_idx,
+                    col=1,
+                )
+            if even_available:
+                valid_even = df_sorted.dropna(subset=["delay_even_plot"])
+                fig.add_trace(
+                    go.Scatter(
+                        x=valid_even["delay_even_plot"],
+                        y=valid_even.index,
+                        mode="markers",
+                        marker=dict(color="black", size=5),
+                        name="Even delay",
+                        legendgroup="delay_even",
+                        showlegend=row_idx == 1,
+                    ),
+                    row=row_idx,
+                    col=1,
+                )
+        else:
+            valid_delays = df_sorted.dropna(subset=["delay_plot"])
+            fig.add_trace(
+                go.Scatter(
+                    x=valid_delays["delay_plot"],
+                    y=valid_delays.index,
+                    mode="markers",
+                    marker=dict(color=base_color, size=5),
+                    name="Delay",
+                    showlegend=False,
+                ),
+                row=row_idx,
+                col=1,
+            )
 
         fig.add_vline(x=0, line=dict(color="black", dash="dash"), row=row_idx, col=1)
         fig.update_yaxes(
@@ -1955,6 +2398,9 @@ def plot_population_coupling_heatmap_plotly(
     config_calc,
     region_acronyms=None,
     coupling_strength_thr=np.nan,
+    zscore_by_region=False,
+    colorbar_mode="single",
+    colorbar_side="right",
 ):
     """Plot spike-triggered population coupling heatmaps sorted by coupling delay."""
     if df_coupling is None or len(df_coupling) == 0:
@@ -1962,6 +2408,7 @@ def plot_population_coupling_heatmap_plotly(
 
     df_coupling = df_coupling[~df_coupling["region"].isin(["root", "void"])]
 
+    region_from_config = region_acronyms is not None
     if region_acronyms is None:
         region_acronyms = config_plot.get("PLOT_REGIONS")
         if region_acronyms is None:
@@ -1980,6 +2427,7 @@ def plot_population_coupling_heatmap_plotly(
     window_ms = config_calc.get("STPR_WINDOW_MS", 80)
     window_bins = int(round(window_ms / bin_size_ms)) if bin_size_ms > 0 else 0
     lags_ms = np.arange(-window_bins, window_bins + 1) * bin_size_ms
+    n_bins = len(lags_ms)
 
     n_rows = len(region_acronyms)
     fig = make_subplots(
@@ -1989,9 +2437,45 @@ def plot_population_coupling_heatmap_plotly(
         vertical_spacing=0.06,
         subplot_titles=[f"{region} units" for region in region_acronyms],
     )
+    use_prefix = bool(config_plot.get("PLOT_REGION_PREFIX_MATCH", False)) and region_from_config
+    has_split_curves = (
+        "stpr_curve_h1" in df_coupling.columns and "stpr_curve_h2" in df_coupling.columns
+    )
+
+    def _normalize_curve(curve_array):
+        if curve_array.size == 0:
+            return curve_array
+        curve_mean = np.nanmean(curve_array)
+        curve_std = np.nanstd(curve_array)
+        if curve_std > 0:
+            return (curve_array - curve_mean) / curve_std
+        return curve_array
+
+    def _extract_curve(row):
+        if has_split_curves:
+            curve_h1 = np.asarray(row.get("stpr_curve_h1", []), dtype=float)
+            curve_h2 = np.asarray(row.get("stpr_curve_h2", []), dtype=float)
+            if zscore_by_region:
+                curve_h1 = _normalize_curve(curve_h1)
+                curve_h2 = _normalize_curve(curve_h2)
+            if curve_h1.size > 0 and curve_h2.size > 0:
+                min_len = min(curve_h1.size, curve_h2.size)
+                return (curve_h1[:min_len] + curve_h2[:min_len]) / 2
+            if curve_h1.size > 0:
+                return curve_h1
+            if curve_h2.size > 0:
+                return curve_h2
+            return np.array([])
+        curve = np.asarray(row.get("stpr_curve", []), dtype=float)
+        if zscore_by_region:
+            curve = _normalize_curve(curve)
+        return curve
 
     for row_idx, region in enumerate(region_acronyms, start=1):
-        region_mask = df_coupling["region"].astype(str).str.startswith(region)
+        if use_prefix:
+            region_mask = df_coupling["region"].astype(str).str.startswith(region)
+        else:
+            region_mask = df_coupling["region"].astype(str) == str(region)
         df_region = df_coupling.loc[region_mask].copy()
         if pd.notna(coupling_strength_thr):
             df_region = df_region.loc[df_region["coupling_strength"] > coupling_strength_thr]
@@ -2000,41 +2484,15 @@ def plot_population_coupling_heatmap_plotly(
         df_sorted = df_sorted.reset_index(drop=True)
 
         n_neurons = len(df_sorted)
-        n_bins = len(lags_ms)
         if n_neurons == 0:
             continue
 
         stpr_matrix = np.full((n_neurons, n_bins), np.nan)
 
-        def _normalize_curve(curve_array):
-            if curve_array.size == 0:
-                return curve_array
-            mean = np.nanmean(curve_array)
-            std = np.nanstd(curve_array)
-            if std > 0:
-                return (curve_array - mean) / std
-            return curve_array
-
         for row_i, row in df_sorted.iterrows():
-            if "stpr_curve_h1" in df_sorted.columns and "stpr_curve_h2" in df_sorted.columns:
-                curve_h1 = np.asarray(row.get("stpr_curve_h1", []), dtype=float)
-                curve_h2 = np.asarray(row.get("stpr_curve_h2", []), dtype=float)
-                curve_h1 = _normalize_curve(curve_h1)
-                curve_h2 = _normalize_curve(curve_h2)
-                if curve_h1.size > 0 and curve_h2.size > 0:
-                    min_len = min(curve_h1.size, curve_h2.size)
-                    curve = (curve_h1[:min_len] + curve_h2[:min_len]) / 2
-                elif curve_h1.size > 0:
-                    curve = curve_h1
-                elif curve_h2.size > 0:
-                    curve = curve_h2
-                else:
-                    continue
-            else:
-                curve = np.asarray(row.get("stpr_curve", []), dtype=float)
-                if curve.size == 0:
-                    continue
-                curve = _normalize_curve(curve)
+            curve = _extract_curve(row)
+            if curve.size == 0:
+                continue
 
             if curve.size == n_bins:
                 stpr_matrix[row_i, :] = curve
@@ -2046,51 +2504,97 @@ def plot_population_coupling_heatmap_plotly(
                 trim_start = int((curve.size - n_bins) // 2)
                 stpr_matrix[row_i, :] = curve[trim_start : trim_start + n_bins]
 
-        show_scale = row_idx == 1
+        zmin = None
+        zmax = None
+        zmid = None
+
+        show_scale = False
+        if colorbar_mode == "per_row":
+            show_scale = True
+        elif colorbar_mode == "single":
+            show_scale = row_idx == 1
+
+        colorbar_title = "stPR (z-score)" if zscore_by_region else "stPR"
+        colorbar = dict(
+            title=colorbar_title,
+            len=0.7,
+            y=0.5,
+            yanchor="middle",
+        )
+        if colorbar_mode == "per_row":
+            yaxis_name = "yaxis" if row_idx == 1 else f"yaxis{row_idx}"
+            yaxis = getattr(fig.layout, yaxis_name, None)
+            if yaxis is not None and getattr(yaxis, "domain", None):
+                domain = yaxis.domain
+                colorbar["len"] = float(domain[1] - domain[0])
+                colorbar["y"] = float((domain[0] + domain[1]) / 2.0)
+            if colorbar_side == "left":
+                colorbar["x"] = -0.08
+                colorbar["xanchor"] = "right"
+            else:
+                colorbar["x"] = 1.02
+                colorbar["xanchor"] = "left"
+        elif colorbar_side == "left":
+            colorbar["x"] = -0.08
+            colorbar["xanchor"] = "right"
         fig.add_trace(
             go.Heatmap(
                 z=stpr_matrix,
                 x=lags_ms,
                 y=np.arange(n_neurons),
                 colorscale=cmap_name,
-                colorbar=dict(
-                    title="stPR z",
-                    len=0.7,
-                    y=0.5,
-                    yanchor="middle",
-                ),
+                zmin=zmin,
+                zmax=zmax,
+                zmid=zmid,
+                colorbar=colorbar,
                 showscale=show_scale,
             ),
             row=row_idx,
             col=1,
         )
 
-        if "coupling_delay_ms_h1" in df_sorted.columns and "coupling_delay_ms_h2" in df_sorted.columns:
-            fig.add_trace(
-                go.Scatter(
-                    x=df_sorted["coupling_delay_ms_h1"],
-                    y=df_sorted.index,
-                    mode="markers",
-                    marker=dict(color="gray" if base_color == "black" else "lightgray", size=4),
-                    name="Delay H1",
-                    showlegend=False,
-                ),
-                row=row_idx,
-                col=1,
-            )
-            fig.add_trace(
-                go.Scatter(
-                    x=df_sorted["coupling_delay_ms_h2"],
-                    y=df_sorted.index,
-                    mode="markers",
-                    marker=dict(color=base_color, size=4),
-                    name="Delay H2",
-                    showlegend=False,
-                ),
-                row=row_idx,
-                col=1,
-            )
-        elif "coupling_delay_ms" in df_sorted.columns:
+        split_specs = [
+            ("h1", "h2", "First half", "Second half"),
+            ("odd", "even", "Odd trials", "Even trials"),
+            ("true", "false", "True trials", "False trials"),
+        ]
+        split_plotted = False
+        for split_a, split_b, label_a, label_b in split_specs:
+            col_a = f"coupling_delay_ms_{split_a}"
+            col_b = f"coupling_delay_ms_{split_b}"
+            if col_a in df_sorted.columns and col_b in df_sorted.columns:
+                show_legend = row_idx == 1
+                fig.add_trace(
+                    go.Scatter(
+                        x=df_sorted[col_a],
+                        y=df_sorted.index,
+                        mode="markers",
+                        marker=dict(
+                            color="gray" if base_color == "black" else "lightgray", size=4
+                        ),
+                        name=label_a,
+                        legendgroup=f"delay_{split_a}",
+                        showlegend=show_legend,
+                    ),
+                    row=row_idx,
+                    col=1,
+                )
+                fig.add_trace(
+                    go.Scatter(
+                        x=df_sorted[col_b],
+                        y=df_sorted.index,
+                        mode="markers",
+                        marker=dict(color=base_color, size=4),
+                        name=label_b,
+                        legendgroup=f"delay_{split_b}",
+                        showlegend=show_legend,
+                    ),
+                    row=row_idx,
+                    col=1,
+                )
+                split_plotted = True
+                break
+        if not split_plotted and "coupling_delay_ms" in df_sorted.columns:
             fig.add_trace(
                 go.Scatter(
                     x=df_sorted["coupling_delay_ms"],
@@ -2098,7 +2602,7 @@ def plot_population_coupling_heatmap_plotly(
                     mode="markers",
                     marker=dict(color=base_color, size=4),
                     name="Delay",
-                    showlegend=False,
+                    showlegend=row_idx == 1,
                 ),
                 row=row_idx,
                 col=1,
@@ -2114,7 +2618,12 @@ def plot_population_coupling_heatmap_plotly(
         title="Spike-triggered Population Coupling (stPR)",
         height=max(450, 280 * n_rows + 140),
         width=1000,
-        margin=dict(l=70, r=70, t=90, b=70),
+        margin=dict(
+            l=110 if colorbar_mode == "per_row" and colorbar_side == "left" else 70,
+            r=70,
+            t=90,
+            b=70,
+        ),
     )
     fig.update_layout(template=template, font=dict(color=base_color, size=12))
     fig.update_xaxes(

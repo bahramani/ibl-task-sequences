@@ -1,10 +1,10 @@
 # %%
 from pathlib import Path
 import pickle
+import traceback
 
 import numpy as np
 import pandas as pd
-from psutil import pids
 
 try:
     from tqdm.auto import tqdm
@@ -23,22 +23,26 @@ from utils.io import (
     map_acronyms,
     load_session_data,
     build_cluster_id_map,
+    get_cluster_labels_array,
 )
 import utils.analysis as ana_utils
 
-from one.api import ONE
-
-ONE.setup(base_url='https://openalyx.internationalbrainlab.org', silent=True)
-one = ONE(password='international')
-one = ONE()
+CALC_VERSION = "2026-02-03-v3"
 
 CONFIG_CALC = {
     "ATLAS_MAPPING": "Beryl",
-    "CALC_ONLY_GOOD_UNITS": False,
+    "CALC_LABEL_MIN": 0.5,
     "CALC_SPONT": True,
     "EVENT_NAMES": ["stimOn_times", "firstMovement_times", "response_times", "feedback_times"],
     "DELAY_METHOD": "center_of_mass",
+    "DELAY_UNITS": "ms",
     "FULL_CONTRAST_VALUES": (1.0, 100.0),
+    "DELAY_WINDOWS": {
+        "stimOn_times": (0.02, 0.35),
+        "firstMovement_times": (-0.1, 0.2),
+        "response_times": (-0.1, 0.2),
+        "feedback_times": (-0.1, 0.2),
+    },
     "BIN_SIZE": 0.005,
     "BASELINE_PRE": 0.2,
     "PSTH_WINDOW_START": -1,
@@ -47,13 +51,14 @@ CONFIG_CALC = {
     "RESPONSIVE_WINDOW_END": 0.35,
     "SMOOTH_SIGMA": 1,
     "MIN_TRIALS": 50,
-    "RELIABILITY_WINDOW_START": 0.01,
-    "RELIABILITY_WINDOW_END": 0.15,
+    "MIN_TRIALS_SPLIT": 25,
     "STPR_BIN_SIZE": 0.001,
-    "STPR_WINDOW_MS": 100,
-    "STPR_SMOOTH_SIGMA_MS": 5,
+    "STPR_WINDOW_MS": 80,
+    "STPR_LOW_PASS_HZ": 20,
+    "STPR_LOW_PASS_ORDER": 2,
     "STPR_POP_USE_GOOD_UNITS": False,
-    "COMBINE_PIDS": False,
+    "TASK_POST_EVENT_S": 1.0,
+    "ITI_SKIP_FIRST_LAST": True,
 }
 
 CONFIG_PLOT = {
@@ -82,28 +87,12 @@ CONFIG_PLOT = {
     "SORT_BY_SPONT": True,
 }
 
-# Update this list with the PIDs you want to process.
-# PIDS = [
-#     "c9664185-d3fd-4e0e-89cf-77c402038938",
-#     "799d899d-c398-4e81-abaf-1ef4b02d5475",
-# ]
-
-# all PIDs for a given subject and tag
-subject = "CSH_ZAD_029"
-
-# 1) Get sessions (EIDs) for the subject (remote)
-eids, session_dicts = one.search(
-    tag="2025_Q3_IBL_et_al_BWM",
-    subject=subject,
-    details=True,
-    query_type="remote"
-)
-
-# 2) Convert sessions -> probe insertion ids (PIDs)
-PIDS = []
-for eid in eids:
-    insertions = one.alyx.rest("insertions", "list", session=eid)
-    PIDS.extend([ins["id"] for ins in insertions])
+# Update this list with the PIDs you want to process, or leave as None to query by subject.
+PIDS = None # ['c9664185-d3fd-4e0e-89cf-77c402038938']
+SUBJECT = None # "CSH_ZAD_029"
+# If SUBJECT is None, use REGIONS to find all PIDs from sessions with those atlas acronyms.
+REGIONS = ["MOs"]
+TAG = "2025_Q3_IBL_et_al_BWM"
 
 
 def _fetch_session_metadata(one, eid):
@@ -130,15 +119,76 @@ def _load_spontaneous_intervals(one, eid):
     return None
 
 
-def _get_label_array(clusters):
-    if hasattr(clusters, "metrics") and hasattr(clusters.metrics, "columns"):
-        if "label" in clusters.metrics.columns:
-            return np.asarray(clusters.metrics.label)
-    if hasattr(clusters, "label"):
-        return np.asarray(clusters.label)
-    if isinstance(clusters, dict) and "label" in clusters:
-        return np.asarray(clusters.get("label"))
-    return None
+def _get_pids_for_subject(one, subject, tag):
+    eids, _session_dicts = one.search(
+        tag=tag,
+        subject=subject,
+        details=True,
+        query_type="remote",
+    )
+    pids = []
+    for eid in eids:
+        insertions = one.alyx.rest("insertions", "list", session=eid)
+        pids.extend([ins["id"] for ins in insertions])
+    return pids
+
+
+def _get_pids_for_regions(one, regions, tag):
+    if not regions:
+        return []
+    all_pids = []
+    for region in regions:
+        eids, _session_dicts = one.search(
+            tag=tag,
+            details=True,
+            query_type="remote",
+            atlas_acronym=region,
+        )
+        for eid in eids:
+            insertions = one.alyx.rest("insertions", "list", session=eid)
+            all_pids.extend([ins["id"] for ins in insertions])
+    # De-duplicate, keep stable order
+    return list(dict.fromkeys(all_pids))
+
+
+def _load_cache_if_exists(path):
+    if not path.exists():
+        return None
+    try:
+        with open(path, "rb") as f:
+            return pickle.load(f)
+    except Exception:
+        return None
+
+
+HEAVY_CACHE_KEYS = (
+    "spikes",
+    "clusters",
+    "session",
+    "pupil_features",
+    "pupil_times",
+)
+
+
+def _strip_heavy_cache(cache):
+    if cache is None:
+        return cache, False
+    removed = False
+    for key in HEAVY_CACHE_KEYS:
+        if key in cache:
+            cache.pop(key, None)
+            removed = True
+    return cache, removed
+
+
+def _cache_needs_update(cache, config_calc, calc_version):
+    if cache is None:
+        return True
+    if cache.get("calc_version") != calc_version:
+        return True
+    if cache.get("config_calc") != config_calc:
+        return True
+    return False
 
 
 def main():
@@ -150,23 +200,65 @@ def main():
     one = init_one(ibl_cache)
     ba, br, _beryl_acronyms, _hier_scores = prepare_region_dirs(path_data)
 
-    for pid in tqdm(PIDS, desc="Processing PIDs"):
+    if PIDS:
+        pids_to_process = list(PIDS)
+    elif SUBJECT is not None:
+        pids_to_process = _get_pids_for_subject(one, SUBJECT, TAG)
+    else:
+        pids_to_process = _get_pids_for_regions(one, REGIONS, TAG)
+    if not pids_to_process:
+        raise RuntimeError("No PIDs found. Set PIDS, SUBJECT, or REGIONS.")
+
+    for pid in tqdm(pids_to_process, desc="Processing PIDs"):
+        cache_path = cache_dir / f"{pid}.pkl"
+        cache_existing = _load_cache_if_exists(cache_path)
+        cache_existing, removed_heavy = _strip_heavy_cache(cache_existing)
+        if not _cache_needs_update(cache_existing, CONFIG_CALC, CALC_VERSION):
+            updated = False
+            if cache_existing is not None and cache_existing.get("config_plot") != CONFIG_PLOT:
+                cache_existing["config_plot"] = CONFIG_PLOT
+                cache_existing["config_calc"] = CONFIG_CALC
+                cache_existing["calc_version"] = CALC_VERSION
+                updated = True
+            if removed_heavy:
+                updated = True
+            if updated and cache_existing is not None:
+                with open(cache_path, "wb") as f:
+                    pickle.dump(cache_existing, f)
+                print(f"Updated cache metadata: {cache_path}")
+            else:
+                print(f"Using cached results for {pid}")
+            continue
+
+        step = "load_session_data"
         try:
-            ssl, spikes, clusters, sl = load_session_data(pid, one, ba)
+            ssl, spikes, clusters, sl = load_session_data(
+                pid,
+                one,
+                ba,
+                load_wheel=False,
+                load_pose=False,
+            )
             eid = ssl.eid
             eid2pid = one.eid2pid(eid)
             if isinstance(eid2pid, tuple):
                 eid2pid = eid2pid[0]
             eid2pid = [str(p) for p in eid2pid]
 
+            step = "cluster_setup"
             cluster_ids, cid_to_idx = build_cluster_id_map(clusters)
             cluster_acronyms_calc = map_acronyms(clusters, br, CONFIG_CALC["ATLAS_MAPPING"])
             cluster_acronyms_plot = map_acronyms(clusters, br, CONFIG_PLOT["ATLAS_MAPPING"])
 
-            events_by_name, contrasts_by_name = ana_utils.build_event_dicts(
-                sl, CONFIG_CALC["EVENT_NAMES"], CONFIG_CALC["MIN_TRIALS"]
+            step = "build_event_dicts"
+            events_by_name, contrasts_by_name, trial_idx_by_name = ana_utils.build_event_dicts(
+                sl,
+                CONFIG_CALC["EVENT_NAMES"],
+                CONFIG_CALC["MIN_TRIALS"],
+                return_trial_idx=True,
             )
 
+            step = "calculate_delays"
             df_res = ana_utils.calculate_delays(
                 spikes,
                 clusters,
@@ -177,48 +269,58 @@ def main():
                 path_data_processed,
                 pid,
                 cid_to_idx,
+                trial_idx_by_name=trial_idx_by_name,
             )
-            df_reliability = ana_utils.calculate_delay_reliability(
-                spikes,
-                clusters,
-                cluster_acronyms_calc,
-                events_by_name,
-                contrasts_by_name,
-                CONFIG_CALC,
-                path_data_processed,
-                pid,
-                cid_to_idx,
-                df_res=df_res,
-            )
+            if CONFIG_CALC.get("DELAY_UNITS", "s").lower().startswith("ms") and df_res is not None:
+                delay_cols = []
+                for event_name in CONFIG_CALC.get("EVENT_NAMES", []):
+                    delay_cols.append(ana_utils.delay_column_name(event_name))
+                    delay_cols.append(ana_utils.delay_split_column_name(event_name, "odd"))
+                    delay_cols.append(ana_utils.delay_split_column_name(event_name, "even"))
+                for col in delay_cols:
+                    if col in df_res.columns:
+                        df_res[col] = df_res[col].astype(float) * 1000.0
 
             spont_intervals = None
             spont_start = None
             spont_end = None
             df_coupling = None
             df_coupling_task = None
+            df_coupling_task_tf = None
+            df_coupling_iti = None
             df_comparison = None
 
+            step = "load_spont_intervals"
             if CONFIG_CALC["CALC_SPONT"]:
                 spont_intervals = _load_spontaneous_intervals(one, eid)
 
-            labels = _get_label_array(clusters)
-            if labels is not None:
-                good_cluster_ids = np.asarray(cluster_ids)[labels == 1]
+            step = "labels_and_clusters"
+            labels = get_cluster_labels_array(clusters)
+            label_min = CONFIG_CALC.get("CALC_LABEL_MIN", None)
+            if label_min is None and CONFIG_CALC.get("CALC_ONLY_GOOD_UNITS", False):
+                label_min = 1.0
+            if labels is not None and label_min is not None:
+                try:
+                    labels_float = labels.astype(float)
+                    good_cluster_ids = np.asarray(cluster_ids)[labels_float >= float(label_min)]
+                except (TypeError, ValueError):
+                    good_cluster_ids = np.asarray(cluster_ids)[labels == 1]
             else:
                 good_cluster_ids = np.asarray(cluster_ids)
 
-            if CONFIG_CALC["CALC_SPONT"] and spont_intervals is not None:
+            coupling_cluster_ids = good_cluster_ids if label_min is not None else cluster_ids
+
+            spont_interval_list = []
+            if spont_intervals is not None:
+                spont_intervals = np.asarray(spont_intervals, dtype=float)
+                spont_interval_list = [tuple(row) for row in spont_intervals]
+
+            step = "compute_spont_stpr"
+            if CONFIG_CALC["CALC_SPONT"] and spont_interval_list:
                 spont_start = float(spont_intervals[0][0])
                 spont_end = float(spont_intervals[0][1])
 
-                valid_time_mask = np.zeros(len(spikes["times"]), dtype=bool)
-                for start, end in spont_intervals:
-                    valid_time_mask |= (spikes["times"] >= start) & (spikes["times"] <= end)
-                spikes_spont = {key: val[valid_time_mask] for key, val in spikes.items()}
-
-                coupling_cluster_ids = (
-                    good_cluster_ids if CONFIG_CALC["CALC_ONLY_GOOD_UNITS"] else cluster_ids
-                )
+                spikes_spont = ana_utils.slice_spikes_by_intervals(spikes, spont_interval_list)
                 df_coupling = ana_utils.compute_population_coupling(
                     spikes_spont,
                     clusters,
@@ -226,31 +328,194 @@ def main():
                     CONFIG_CALC,
                     cluster_ids=coupling_cluster_ids,
                     split_halves=True,
+                    intervals=spont_interval_list,
+                    context_label="Spont",
                 )
 
-                task_time_mask = spikes["times"] < spont_start
-                spikes_task = {key: val[task_time_mask] for key, val in spikes.items()}
-                df_coupling_task = ana_utils.compute_population_coupling(
-                    spikes_task,
+            step = "task_windows"
+            task_windows = ana_utils.build_task_window_table(
+                sl.trials,
+                CONFIG_CALC["EVENT_NAMES"],
+                post_event_s=CONFIG_CALC["TASK_POST_EVENT_S"],
+            )
+            if not task_windows.empty:
+                task_odd_intervals = task_windows.loc[
+                    task_windows["odd"], ["start", "end"]
+                ].to_numpy()
+                task_even_intervals = task_windows.loc[
+                    ~task_windows["odd"], ["start", "end"]
+                ].to_numpy()
+                task_true_intervals = task_windows.loc[
+                    task_windows["correct"], ["start", "end"]
+                ].to_numpy()
+                task_false_intervals = task_windows.loc[
+                    ~task_windows["correct"], ["start", "end"]
+                ].to_numpy()
+            else:
+                task_odd_intervals = np.empty((0, 2))
+                task_even_intervals = np.empty((0, 2))
+                task_true_intervals = np.empty((0, 2))
+                task_false_intervals = np.empty((0, 2))
+
+            step = "task_odd_even_stpr"
+            df_task_odd = None
+            df_task_even = None
+            if len(task_odd_intervals) > 0:
+                spikes_task_odd = ana_utils.slice_spikes_by_intervals(
+                    spikes, task_odd_intervals, exclude_intervals=spont_interval_list
+                )
+                df_task_odd = ana_utils.compute_population_coupling(
+                    spikes_task_odd,
                     clusters,
                     cluster_acronyms_calc,
                     CONFIG_CALC,
                     cluster_ids=coupling_cluster_ids,
-                    split_halves=True,
+                    split_halves=False,
+                    intervals=task_odd_intervals,
+                    context_label="Task odd",
+                )
+            if len(task_even_intervals) > 0:
+                spikes_task_even = ana_utils.slice_spikes_by_intervals(
+                    spikes, task_even_intervals, exclude_intervals=spont_interval_list
+                )
+                df_task_even = ana_utils.compute_population_coupling(
+                    spikes_task_even,
+                    clusters,
+                    cluster_acronyms_calc,
+                    CONFIG_CALC,
+                    cluster_ids=coupling_cluster_ids,
+                    split_halves=False,
+                    intervals=task_even_intervals,
+                    context_label="Task even",
+                )
+            if df_task_odd is not None and df_task_odd.empty:
+                df_task_odd = None
+            if df_task_even is not None and df_task_even.empty:
+                df_task_even = None
+            if df_task_odd is not None or df_task_even is not None:
+                df_coupling_task = ana_utils.merge_stpr_splits(
+                    df_task_odd, df_task_even, CONFIG_CALC, split_a="odd", split_b="even"
                 )
 
-                if df_coupling is not None and df_coupling_task is not None:
-                    df_comparison = df_coupling.merge(
-                        df_coupling_task[[
+            step = "task_true_false_stpr"
+            df_task_true = None
+            df_task_false = None
+            if len(task_true_intervals) > 0:
+                spikes_task_true = ana_utils.slice_spikes_by_intervals(
+                    spikes, task_true_intervals, exclude_intervals=spont_interval_list
+                )
+                df_task_true = ana_utils.compute_population_coupling(
+                    spikes_task_true,
+                    clusters,
+                    cluster_acronyms_calc,
+                    CONFIG_CALC,
+                    cluster_ids=coupling_cluster_ids,
+                    split_halves=False,
+                    intervals=task_true_intervals,
+                    context_label="Task true",
+                )
+            if len(task_false_intervals) > 0:
+                spikes_task_false = ana_utils.slice_spikes_by_intervals(
+                    spikes, task_false_intervals, exclude_intervals=spont_interval_list
+                )
+                df_task_false = ana_utils.compute_population_coupling(
+                    spikes_task_false,
+                    clusters,
+                    cluster_acronyms_calc,
+                    CONFIG_CALC,
+                    cluster_ids=coupling_cluster_ids,
+                    split_halves=False,
+                    intervals=task_false_intervals,
+                    context_label="Task false",
+                )
+            if df_task_true is not None and df_task_true.empty:
+                df_task_true = None
+            if df_task_false is not None and df_task_false.empty:
+                df_task_false = None
+            if df_task_true is not None or df_task_false is not None:
+                df_coupling_task_tf = ana_utils.merge_stpr_splits(
+                    df_task_true, df_task_false, CONFIG_CALC, split_a="true", split_b="false"
+                )
+
+            step = "iti_windows"
+            stim_on_times = np.asarray(sl.trials["stimOn_times"])
+            trial_end_times = ana_utils.compute_trial_end_times(
+                sl.trials,
+                CONFIG_CALC["EVENT_NAMES"],
+                post_event_s=CONFIG_CALC["TASK_POST_EVENT_S"],
+            )
+            iti_windows = ana_utils.build_iti_windows(
+                trial_end_times,
+                stim_on_times,
+                skip_first_last=CONFIG_CALC["ITI_SKIP_FIRST_LAST"],
+            )
+            if not iti_windows.empty:
+                iti_odd_intervals = iti_windows.loc[
+                    iti_windows["odd"], ["start", "end"]
+                ].to_numpy()
+                iti_even_intervals = iti_windows.loc[
+                    ~iti_windows["odd"], ["start", "end"]
+                ].to_numpy()
+            else:
+                iti_odd_intervals = np.empty((0, 2))
+                iti_even_intervals = np.empty((0, 2))
+
+            step = "iti_stpr"
+            df_iti_odd = None
+            df_iti_even = None
+            if len(iti_odd_intervals) > 0:
+                spikes_iti_odd = ana_utils.slice_spikes_by_intervals(
+                    spikes, iti_odd_intervals, exclude_intervals=spont_interval_list
+                )
+                df_iti_odd = ana_utils.compute_population_coupling(
+                    spikes_iti_odd,
+                    clusters,
+                    cluster_acronyms_calc,
+                    CONFIG_CALC,
+                    cluster_ids=coupling_cluster_ids,
+                    split_halves=False,
+                    intervals=iti_odd_intervals,
+                    context_label="ITI odd",
+                )
+            if len(iti_even_intervals) > 0:
+                spikes_iti_even = ana_utils.slice_spikes_by_intervals(
+                    spikes, iti_even_intervals, exclude_intervals=spont_interval_list
+                )
+                df_iti_even = ana_utils.compute_population_coupling(
+                    spikes_iti_even,
+                    clusters,
+                    cluster_acronyms_calc,
+                    CONFIG_CALC,
+                    cluster_ids=coupling_cluster_ids,
+                    split_halves=False,
+                    intervals=iti_even_intervals,
+                    context_label="ITI even",
+                )
+            if df_iti_odd is not None and df_iti_odd.empty:
+                df_iti_odd = None
+            if df_iti_even is not None and df_iti_even.empty:
+                df_iti_even = None
+            if df_iti_odd is not None or df_iti_even is not None:
+                df_coupling_iti = ana_utils.merge_stpr_splits(
+                    df_iti_odd, df_iti_even, CONFIG_CALC, split_a="odd", split_b="even"
+                )
+
+            step = "comparison_table"
+            if df_coupling is not None and df_coupling_task is not None:
+                df_comparison = df_coupling.merge(
+                    df_coupling_task[
+                        [
                             "cluster_id",
                             "coupling_strength",
                             "coupling_delay_ms",
                             "sorting_number",
-                        ]],
-                        on="cluster_id",
-                        suffixes=("_spont", "_task"),
-                    )
+                        ]
+                    ],
+                    on="cluster_id",
+                    suffixes=("_spont", "_task"),
+                )
 
+            step = "trial_df"
             trial_contrasts = ana_utils.get_trial_contrasts(sl)
             choice_map = {1: "Left", -1: "Right", 0: "NoGo"}
             choices = [choice_map.get(val, "NA") for val in sl.trials["choice"]]
@@ -270,12 +535,6 @@ def main():
                 }
             )
 
-            session = {
-                "trials": sl.trials,
-                "wheel": sl.wheel,
-                "pose": sl.pose,
-            }
-
             meta = _fetch_session_metadata(one, eid)
             recording_len = float(np.nanmax(spikes["times"]) - np.nanmin(spikes["times"]))
             spont_length = None
@@ -294,6 +553,7 @@ def main():
                 }
             )
 
+            step = "save_cache"
             cache = {
                 "pid": pid,
                 "eid": eid,
@@ -301,29 +561,28 @@ def main():
                 "cluster_ids": cluster_ids,
                 "cluster_acronyms_plot": cluster_acronyms_plot,
                 "cluster_acronyms_calc": cluster_acronyms_calc,
-                "clusters": clusters,
-                "spikes": spikes,
-                "session": session,
                 "trials": trial_df,
                 "df_res": df_res,
-                "df_reliability": df_reliability,
                 "df_coupling": df_coupling,
                 "df_coupling_task": df_coupling_task,
+                "df_coupling_task_tf": df_coupling_task_tf,
+                "df_coupling_iti": df_coupling_iti,
                 "df_comparison": df_comparison,
                 "eid2pid": eid2pid,
                 "spont_intervals": spont_intervals,
                 "meta": meta,
                 "config_calc": CONFIG_CALC,
                 "config_plot": CONFIG_PLOT,
+                "calc_version": CALC_VERSION,
             }
 
-            cache_path = cache_dir / f"{pid}.pkl"
             with open(cache_path, "wb") as f:
                 pickle.dump(cache, f)
             print(f"Saved cache: {cache_path}")
 
         except Exception as exc:  # pragma: no cover
-            print(f"Failed {pid}: {exc}")
+            print(f"Failed {pid} at step '{step}': {exc}")
+            traceback.print_exc()
 
 
 if __name__ == "__main__":

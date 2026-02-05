@@ -18,17 +18,17 @@ def setup_paths(base_path):
     return path_data, path_fig, path_data_processed, ibl_cache
 
 
-def init_one(ibl_cache):
+def init_one(ibl_cache, mode="remote", base_url="https://openalyx.internationalbrainlab.org", silent=True):
     """Initialize the ONE API with a custom cache directory."""
     try:
         one = ONE(
-            base_url="https://openalyx.internationalbrainlab.org",
+            base_url=base_url,
             password="international",
-            silent=True,
-            mode='remote',
+            silent=silent,
+            mode=mode,
             cache_dir=ibl_cache,
         )
-        print("ONE API initialized.")
+        print(f"ONE API initialized (mode={mode}).")
         return one
     except Exception as exc:
         raise RuntimeError(f"Error initializing ONE: {exc}")
@@ -59,8 +59,18 @@ def map_acronyms(clusters, br, mapping):
     return clusters.acronym
 
 
-def load_session_data(pid, one, ba):
+def load_session_data(
+    pid,
+    one,
+    ba=None,
+    load_trials=True,
+    load_wheel=True,
+    load_pose=True,
+    pose_views=("left", "right"),
+):
     """Load spikes, clusters, and session data for a given probe insertion."""
+    if ba is None:
+        ba = AllenAtlas()
     ssl = SpikeSortingLoader(pid=pid, one=one, atlas=ba)
     print(f"Session ID (EID): {ssl.eid}")
     print(f"Probe Name: {ssl.pname}")
@@ -72,12 +82,25 @@ def load_session_data(pid, one, ba):
         print(f"Cluster regions found: {set(clusters.acronym)}")
 
     sl = SessionLoader(eid=ssl.eid, one=one)
-    sl.load_trials()
-    print(f"Trials loaded. Found keys: {list(sl.trials.keys())}")
-    sl.load_wheel()
-    print(f"Wheel data loaded. Found keys: {list(sl.wheel.keys())}")
-    sl.load_pose(views=["left", "right"])
-    print(f"Pose data loaded. Found keys: {list(sl.pose.keys())}")
+    if load_trials:
+        sl.load_trials()
+        print(f"Trials loaded. Found keys: {list(sl.trials.keys())}")
+    else:
+        sl.trials = None
+    if load_wheel:
+        sl.load_wheel()
+        print(f"Wheel data loaded. Found keys: {list(sl.wheel.keys())}")
+    else:
+        sl.wheel = None
+    if load_pose:
+        views = list(pose_views) if pose_views is not None else None
+        if views is None:
+            sl.load_pose()
+        else:
+            sl.load_pose(views=views)
+        print(f"Pose data loaded. Found keys: {list(sl.pose.keys())}")
+    else:
+        sl.pose = None
 
     return ssl, spikes, clusters, sl
 
@@ -113,3 +136,17 @@ def get_cluster_label(clusters, idx):
     if hasattr(clusters, "label"):
         return clusters.label[idx]
     return 1
+
+
+def get_cluster_labels_array(clusters):
+    """Return the full label array if available, else None."""
+    if clusters is None:
+        return None
+    if hasattr(clusters, "metrics") and hasattr(clusters.metrics, "columns"):
+        if "label" in clusters.metrics.columns:
+            return np.asarray(clusters.metrics.label)
+    if hasattr(clusters, "label"):
+        return np.asarray(clusters.label)
+    if isinstance(clusters, dict) and "label" in clusters:
+        return np.asarray(clusters.get("label"))
+    return None
