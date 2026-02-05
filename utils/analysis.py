@@ -798,6 +798,7 @@ def compute_population_coupling(
             "coupling_strength",
             "coupling_max",
             "stpr_curve",
+            "stpr_curve_raw",
             "sorting_number",
         ]
         if include_halves:
@@ -808,14 +809,17 @@ def compute_population_coupling(
                 "coupling_strength",
                 "coupling_max",
                 "stpr_curve",
+                "stpr_curve_raw",
                 "coupling_delay_ms_h1",
                 "coupling_strength_h1",
                 "coupling_max_h1",
                 "stpr_curve_h1",
+                "stpr_curve_raw_h1",
                 "coupling_delay_ms_h2",
                 "coupling_strength_h2",
                 "coupling_max_h2",
                 "stpr_curve_h2",
+                "stpr_curve_raw_h2",
                 "sorting_number",
             ]
         return base
@@ -843,6 +847,9 @@ def compute_population_coupling(
         cluster_ids = np.asarray(cluster_id_all)
     else:
         cluster_ids = np.asarray(cluster_ids)
+
+    if cluster_ids is None or len(cluster_ids) == 0:
+        return pd.DataFrame(columns=_base_columns(split_halves))
 
     labels = None
     if hasattr(clusters, "metrics") and hasattr(clusters.metrics, "columns"):
@@ -890,6 +897,7 @@ def compute_population_coupling(
                         "coupling_strength": np.nan,
                         "coupling_max": np.nan,
                         "stpr_curve": [],
+                        "stpr_curve_raw": [],
                     }
                     for cid in cluster_ids
                 ]
@@ -909,6 +917,7 @@ def compute_population_coupling(
                         "coupling_strength": np.nan,
                         "coupling_max": np.nan,
                         "stpr_curve": [],
+                        "stpr_curve_raw": [],
                     }
                     for cid in cluster_ids
                 ]
@@ -951,6 +960,7 @@ def compute_population_coupling(
                             "coupling_strength": np.nan,
                             "coupling_max": np.nan,
                             "stpr_curve": [],
+                            "stpr_curve_raw": [],
                         }
                         for cid in cluster_ids
                     ]
@@ -978,6 +988,7 @@ def compute_population_coupling(
                             "coupling_strength": np.nan,
                             "coupling_max": np.nan,
                             "stpr_curve": [],
+                            "stpr_curve_raw": [],
                         }
                     )
                 continue
@@ -1011,6 +1022,7 @@ def compute_population_coupling(
                             "coupling_strength": np.nan,
                             "coupling_max": np.nan,
                             "stpr_curve": [],
+                            "stpr_curve_raw": [],
                         }
                     )
                     continue
@@ -1035,6 +1047,7 @@ def compute_population_coupling(
                             "coupling_strength": np.nan,
                             "coupling_max": np.nan,
                             "stpr_curve": [],
+                            "stpr_curve_raw": [],
                         }
                     )
                     continue
@@ -1060,12 +1073,13 @@ def compute_population_coupling(
                             "coupling_strength": np.nan,
                             "coupling_max": np.nan,
                             "stpr_curve": [],
+                            "stpr_curve_raw": [],
                         }
                     )
                     continue
 
-                stpr = np.mean(np.vstack(segments), axis=0)
-                stpr = _lowpass_filter(stpr, fs_hz, lowpass_hz, order=lowpass_order)
+                stpr_raw = np.mean(np.vstack(segments), axis=0)
+                stpr = _lowpass_filter(stpr_raw, fs_hz, lowpass_hz, order=lowpass_order)
 
                 delay_ms, strength, peak = _stpr_metrics_from_curve(stpr, lags_ms)
                 if not np.isfinite(delay_ms) or abs(delay_ms) > window_ms:
@@ -1079,6 +1093,7 @@ def compute_population_coupling(
                         "coupling_strength": strength,
                         "coupling_max": peak,
                         "stpr_curve": stpr.tolist(),
+                        "stpr_curve_raw": stpr_raw.tolist(),
                     }
                 )
 
@@ -1105,20 +1120,26 @@ def compute_population_coupling(
     df = df_h1.merge(df_h2, on=["cluster_id", "region"], how="outer", suffixes=("_h1", "_h2"))
 
     mean_curves = []
+    mean_raw_curves = []
     delay_means = []
     strength_means = []
     peak_means = []
-    for curve_h1, curve_h2 in zip(df["stpr_curve_h1"], df["stpr_curve_h2"]):
+    for curve_h1, curve_h2, curve_raw_h1, curve_raw_h2 in zip(
+        df["stpr_curve_h1"], df["stpr_curve_h2"], df["stpr_curve_raw_h1"], df["stpr_curve_raw_h2"]
+    ):
         mean_curve = _mean_stpr_curve(curve_h1, curve_h2)
+        mean_raw_curve = _mean_stpr_curve(curve_raw_h1, curve_raw_h2)
         delay_ms, strength, peak = _stpr_metrics_from_curve(mean_curve, lags_ms)
         if not np.isfinite(delay_ms) or abs(delay_ms) > window_ms:
             delay_ms = np.nan
         mean_curves.append(mean_curve.tolist())
+        mean_raw_curves.append(mean_raw_curve.tolist())
         delay_means.append(delay_ms)
         strength_means.append(strength)
         peak_means.append(peak)
 
     df["stpr_curve"] = mean_curves
+    df["stpr_curve_raw"] = mean_raw_curves
     df["coupling_delay_ms"] = delay_means
     df["coupling_strength"] = strength_means
     df["coupling_max"] = peak_means
@@ -1143,6 +1164,10 @@ def merge_stpr_splits(df_a, df_b, config, split_a="a", split_b="b", sort_on_spli
             df["stpr_curve"] = df[f"stpr_curve_{split_b}"]
         elif "stpr_curve" not in df.columns:
             df["stpr_curve"] = [[] for _ in range(len(df))]
+        if f"stpr_curve_raw_{split_b}" in df.columns:
+            df["stpr_curve_raw"] = df[f"stpr_curve_raw_{split_b}"]
+        elif "stpr_curve_raw" not in df.columns:
+            df["stpr_curve_raw"] = df.get("stpr_curve", [[] for _ in range(len(df))])
         return df
     if df_b is None:
         df = df_a.copy()
@@ -1150,6 +1175,10 @@ def merge_stpr_splits(df_a, df_b, config, split_a="a", split_b="b", sort_on_spli
             df["stpr_curve"] = df[f"stpr_curve_{split_a}"]
         elif "stpr_curve" not in df.columns:
             df["stpr_curve"] = [[] for _ in range(len(df))]
+        if f"stpr_curve_raw_{split_a}" in df.columns:
+            df["stpr_curve_raw"] = df[f"stpr_curve_raw_{split_a}"]
+        elif "stpr_curve_raw" not in df.columns:
+            df["stpr_curve_raw"] = df.get("stpr_curve", [[] for _ in range(len(df))])
         return df
 
     df = df_a.merge(
@@ -1167,22 +1196,28 @@ def merge_stpr_splits(df_a, df_b, config, split_a="a", split_b="b", sort_on_spli
     lags_ms = np.arange(-window_bins, window_bins + 1) * bin_size_ms
 
     mean_curves = []
+    mean_raw_curves = []
     delay_means = []
     strength_means = []
     peak_means = []
     for _, row in df.iterrows():
         curve_a = row.get(f"stpr_curve_{split_a}", [])
         curve_b = row.get(f"stpr_curve_{split_b}", [])
+        curve_a_raw = row.get(f"stpr_curve_raw_{split_a}", curve_a)
+        curve_b_raw = row.get(f"stpr_curve_raw_{split_b}", curve_b)
         mean_curve = _mean_stpr_curve(curve_a, curve_b)
+        mean_raw_curve = _mean_stpr_curve(curve_a_raw, curve_b_raw)
         delay_ms, strength, peak = _stpr_metrics_from_curve(mean_curve, lags_ms)
         if not np.isfinite(delay_ms) or abs(delay_ms) > window_ms:
             delay_ms = np.nan
         mean_curves.append(mean_curve.tolist())
+        mean_raw_curves.append(mean_raw_curve.tolist())
         delay_means.append(delay_ms)
         strength_means.append(strength)
         peak_means.append(peak)
 
     df["stpr_curve"] = mean_curves
+    df["stpr_curve_raw"] = mean_raw_curves
     df["coupling_delay_ms"] = delay_means
     df["coupling_strength"] = strength_means
     df["coupling_max"] = peak_means

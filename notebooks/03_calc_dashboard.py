@@ -27,7 +27,7 @@ from utils.io import (
 )
 import utils.analysis as ana_utils
 
-CALC_VERSION = "2026-02-03-v3"
+CALC_VERSION = "2026-02-05-v4"
 
 CONFIG_CALC = {
     "ATLAS_MAPPING": "Beryl",
@@ -91,7 +91,7 @@ CONFIG_PLOT = {
 PIDS = None # ['c9664185-d3fd-4e0e-89cf-77c402038938']
 SUBJECT = None # "CSH_ZAD_029"
 # If SUBJECT is None, use REGIONS to find all PIDs from sessions with those atlas acronyms.
-REGIONS = ["MOs"]
+REGIONS = ["VISp"]
 TAG = "2025_Q3_IBL_et_al_BWM"
 
 
@@ -250,6 +250,18 @@ def main():
             cluster_acronyms_calc = map_acronyms(clusters, br, CONFIG_CALC["ATLAS_MAPPING"])
             cluster_acronyms_plot = map_acronyms(clusters, br, CONFIG_PLOT["ATLAS_MAPPING"])
 
+            step = "cluster_firing_rates"
+            cluster_firing_rate = None
+            if hasattr(clusters, "firing_rate"):
+                cluster_firing_rate = np.asarray(clusters.firing_rate)
+            elif isinstance(clusters, dict) and "firing_rate" in clusters:
+                cluster_firing_rate = np.asarray(clusters["firing_rate"])
+            elif hasattr(clusters, "metrics") and hasattr(clusters.metrics, "columns"):
+                if "firing_rate" in clusters.metrics.columns:
+                    cluster_firing_rate = np.asarray(clusters.metrics["firing_rate"])
+            if cluster_firing_rate is not None and len(cluster_firing_rate) != len(cluster_ids):
+                cluster_firing_rate = None
+
             step = "build_event_dicts"
             events_by_name, contrasts_by_name, trial_idx_by_name = ana_utils.build_event_dicts(
                 sl,
@@ -288,6 +300,9 @@ def main():
             df_coupling_task = None
             df_coupling_task_tf = None
             df_coupling_iti = None
+            df_coupling_good = None
+            df_coupling_task_good = None
+            df_coupling_iti_good = None
             df_comparison = None
 
             step = "load_spont_intervals"
@@ -299,14 +314,25 @@ def main():
             label_min = CONFIG_CALC.get("CALC_LABEL_MIN", None)
             if label_min is None and CONFIG_CALC.get("CALC_ONLY_GOOD_UNITS", False):
                 label_min = 1.0
-            if labels is not None and label_min is not None:
+            labels_float = None
+            if labels is not None:
                 try:
                     labels_float = labels.astype(float)
-                    good_cluster_ids = np.asarray(cluster_ids)[labels_float >= float(label_min)]
                 except (TypeError, ValueError):
-                    good_cluster_ids = np.asarray(cluster_ids)[labels == 1]
+                    labels_float = None
+            if labels_float is not None and label_min is not None:
+                good_cluster_ids = np.asarray(cluster_ids)[labels_float >= float(label_min)]
+            elif labels is not None and label_min is not None:
+                good_cluster_ids = np.asarray(cluster_ids)[labels == 1]
             else:
                 good_cluster_ids = np.asarray(cluster_ids)
+
+            if labels_float is not None:
+                good_only_cluster_ids = np.asarray(cluster_ids)[np.isclose(labels_float, 1.0)]
+            elif labels is not None:
+                good_only_cluster_ids = np.asarray(cluster_ids)[labels == 1]
+            else:
+                good_only_cluster_ids = np.asarray(cluster_ids)
 
             coupling_cluster_ids = good_cluster_ids if label_min is not None else cluster_ids
 
@@ -331,6 +357,17 @@ def main():
                     intervals=spont_interval_list,
                     context_label="Spont",
                 )
+                if good_only_cluster_ids is not None and len(good_only_cluster_ids) > 0:
+                    df_coupling_good = ana_utils.compute_population_coupling(
+                        spikes_spont,
+                        clusters,
+                        cluster_acronyms_calc,
+                        CONFIG_CALC,
+                        cluster_ids=good_only_cluster_ids,
+                        split_halves=True,
+                        intervals=spont_interval_list,
+                        context_label="Spont good",
+                    )
 
             step = "task_windows"
             task_windows = ana_utils.build_task_window_table(
@@ -360,6 +397,8 @@ def main():
             step = "task_odd_even_stpr"
             df_task_odd = None
             df_task_even = None
+            df_task_odd_good = None
+            df_task_even_good = None
             if len(task_odd_intervals) > 0:
                 spikes_task_odd = ana_utils.slice_spikes_by_intervals(
                     spikes, task_odd_intervals, exclude_intervals=spont_interval_list
@@ -374,6 +413,17 @@ def main():
                     intervals=task_odd_intervals,
                     context_label="Task odd",
                 )
+                if good_only_cluster_ids is not None and len(good_only_cluster_ids) > 0:
+                    df_task_odd_good = ana_utils.compute_population_coupling(
+                        spikes_task_odd,
+                        clusters,
+                        cluster_acronyms_calc,
+                        CONFIG_CALC,
+                        cluster_ids=good_only_cluster_ids,
+                        split_halves=False,
+                        intervals=task_odd_intervals,
+                        context_label="Task odd good",
+                    )
             if len(task_even_intervals) > 0:
                 spikes_task_even = ana_utils.slice_spikes_by_intervals(
                     spikes, task_even_intervals, exclude_intervals=spont_interval_list
@@ -388,13 +438,36 @@ def main():
                     intervals=task_even_intervals,
                     context_label="Task even",
                 )
+                if good_only_cluster_ids is not None and len(good_only_cluster_ids) > 0:
+                    df_task_even_good = ana_utils.compute_population_coupling(
+                        spikes_task_even,
+                        clusters,
+                        cluster_acronyms_calc,
+                        CONFIG_CALC,
+                        cluster_ids=good_only_cluster_ids,
+                        split_halves=False,
+                        intervals=task_even_intervals,
+                        context_label="Task even good",
+                    )
             if df_task_odd is not None and df_task_odd.empty:
                 df_task_odd = None
             if df_task_even is not None and df_task_even.empty:
                 df_task_even = None
+            if df_task_odd_good is not None and df_task_odd_good.empty:
+                df_task_odd_good = None
+            if df_task_even_good is not None and df_task_even_good.empty:
+                df_task_even_good = None
             if df_task_odd is not None or df_task_even is not None:
                 df_coupling_task = ana_utils.merge_stpr_splits(
                     df_task_odd, df_task_even, CONFIG_CALC, split_a="odd", split_b="even"
+                )
+            if df_task_odd_good is not None or df_task_even_good is not None:
+                df_coupling_task_good = ana_utils.merge_stpr_splits(
+                    df_task_odd_good,
+                    df_task_even_good,
+                    CONFIG_CALC,
+                    split_a="odd",
+                    split_b="even",
                 )
 
             step = "task_true_false_stpr"
@@ -463,6 +536,8 @@ def main():
             step = "iti_stpr"
             df_iti_odd = None
             df_iti_even = None
+            df_iti_odd_good = None
+            df_iti_even_good = None
             if len(iti_odd_intervals) > 0:
                 spikes_iti_odd = ana_utils.slice_spikes_by_intervals(
                     spikes, iti_odd_intervals, exclude_intervals=spont_interval_list
@@ -477,6 +552,17 @@ def main():
                     intervals=iti_odd_intervals,
                     context_label="ITI odd",
                 )
+                if good_only_cluster_ids is not None and len(good_only_cluster_ids) > 0:
+                    df_iti_odd_good = ana_utils.compute_population_coupling(
+                        spikes_iti_odd,
+                        clusters,
+                        cluster_acronyms_calc,
+                        CONFIG_CALC,
+                        cluster_ids=good_only_cluster_ids,
+                        split_halves=False,
+                        intervals=iti_odd_intervals,
+                        context_label="ITI odd good",
+                    )
             if len(iti_even_intervals) > 0:
                 spikes_iti_even = ana_utils.slice_spikes_by_intervals(
                     spikes, iti_even_intervals, exclude_intervals=spont_interval_list
@@ -491,13 +577,36 @@ def main():
                     intervals=iti_even_intervals,
                     context_label="ITI even",
                 )
+                if good_only_cluster_ids is not None and len(good_only_cluster_ids) > 0:
+                    df_iti_even_good = ana_utils.compute_population_coupling(
+                        spikes_iti_even,
+                        clusters,
+                        cluster_acronyms_calc,
+                        CONFIG_CALC,
+                        cluster_ids=good_only_cluster_ids,
+                        split_halves=False,
+                        intervals=iti_even_intervals,
+                        context_label="ITI even good",
+                    )
             if df_iti_odd is not None and df_iti_odd.empty:
                 df_iti_odd = None
             if df_iti_even is not None and df_iti_even.empty:
                 df_iti_even = None
+            if df_iti_odd_good is not None and df_iti_odd_good.empty:
+                df_iti_odd_good = None
+            if df_iti_even_good is not None and df_iti_even_good.empty:
+                df_iti_even_good = None
             if df_iti_odd is not None or df_iti_even is not None:
                 df_coupling_iti = ana_utils.merge_stpr_splits(
                     df_iti_odd, df_iti_even, CONFIG_CALC, split_a="odd", split_b="even"
+                )
+            if df_iti_odd_good is not None or df_iti_even_good is not None:
+                df_coupling_iti_good = ana_utils.merge_stpr_splits(
+                    df_iti_odd_good,
+                    df_iti_even_good,
+                    CONFIG_CALC,
+                    split_a="odd",
+                    split_b="even",
                 )
 
             step = "comparison_table"
@@ -559,6 +668,7 @@ def main():
                 "eid": eid,
                 "pname": getattr(ssl, "pname", None),
                 "cluster_ids": cluster_ids,
+                "cluster_firing_rate": cluster_firing_rate,
                 "cluster_acronyms_plot": cluster_acronyms_plot,
                 "cluster_acronyms_calc": cluster_acronyms_calc,
                 "trials": trial_df,
@@ -567,6 +677,9 @@ def main():
                 "df_coupling_task": df_coupling_task,
                 "df_coupling_task_tf": df_coupling_task_tf,
                 "df_coupling_iti": df_coupling_iti,
+                "df_coupling_good": df_coupling_good,
+                "df_coupling_task_good": df_coupling_task_good,
+                "df_coupling_iti_good": df_coupling_iti_good,
                 "df_comparison": df_comparison,
                 "eid2pid": eid2pid,
                 "spont_intervals": spont_intervals,
