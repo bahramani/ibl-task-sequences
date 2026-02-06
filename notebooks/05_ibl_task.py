@@ -35,7 +35,7 @@ from utils.plotting_plotly import (  # noqa: E402
     plot_stpr_curve_halves_plotly,
 )
 import utils.plotting_plotly as plotting_utils
-from utils.io import setup_paths, init_one, load_session_data
+from utils.io import setup_paths, init_one, load_session_data, build_cluster_id_map
 
 
 def _in_notebook():
@@ -454,6 +454,20 @@ if LOAD_RAW_DATA or spikes is None or clusters is None or session is None:
         data["clusters"] = clusters
         data["session"] = session
 
+# Keep cluster metadata aligned with the live clusters object (same behavior as 04_dashboard).
+cluster_ids = data.get("cluster_ids")
+cluster_acronyms = data.get("cluster_acronyms_plot")
+if cluster_ids is None and clusters is not None:
+    cluster_ids, _ = build_cluster_id_map(clusters)
+if cluster_acronyms is None and clusters is not None:
+    if hasattr(clusters, "acronym"):
+        cluster_acronyms = np.asarray(clusters.acronym)
+    elif isinstance(clusters, dict) and "acronym" in clusters:
+        cluster_acronyms = np.asarray(clusters.get("acronym"))
+data["clusters"] = clusters
+data["cluster_ids"] = cluster_ids
+data["cluster_acronyms_plot"] = cluster_acronyms
+
 
 # %% Quick cache summary
 cache_keys = sorted(list(data.keys()))
@@ -505,8 +519,7 @@ summarize_df(data.get("df_comparison"), "df_comparison")
 
 
 # %% Region counts (all vs good)
-cluster_acronyms = data.get("cluster_acronyms_plot")
-labels = _get_label_array(data.get("clusters"), data.get("cluster_ids"))
+labels = _get_label_array(clusters, cluster_ids)
 if cluster_acronyms is not None:
     region_table = build_region_table(cluster_acronyms, labels)
     display(region_table)
@@ -1411,3 +1424,300 @@ if CORR_RUN:
                 )
                 fig_s.update_xaxes(tickangle=45)
                 show_fig(fig_s)
+
+
+# %% Binned reliability + thresholded correlation (per region)
+BIN_RUN = True
+BIN_LABEL_MIN = plot_label_min
+BIN_REGION = None  # e.g. "VISp" (prefix ok), or "ALL" for all regions
+
+# Variable to bin by (defaults to stPR task delay).
+BIN_VARIABLE_NAME = "stPR Delay (Task)"
+
+# Quantile boundaries for equal-N bins.
+BIN_QUANTILES = (1 / 3, 2 / 3)
+
+# Variable to correlate using the same thresholds (defaults to stPR spont delay).
+BIN_CORR_VARIABLE_NAME = "stPR Delay (Spont)"
+
+
+def _format_range_text(cut1, cut2, label):
+    if not (np.isfinite(cut1) and np.isfinite(cut2)):
+        return "NA"
+    if label == "low":
+        return f"<= {cut1:.3f}"
+    if label == "mid":
+        return f"({cut1:.3f}, {cut2:.3f}]"
+    return f"> {cut2:.3f}"
+
+
+def _add_unity_line(fig, x_vals, y_vals):
+    if len(x_vals) == 0 or len(y_vals) == 0:
+        return
+    min_val = float(np.nanmin([np.nanmin(x_vals), np.nanmin(y_vals)]))
+    max_val = float(np.nanmax([np.nanmax(x_vals), np.nanmax(y_vals)]))
+    if not (np.isfinite(min_val) and np.isfinite(max_val)):
+        return
+    if min_val == max_val:
+        return
+    fig.add_shape(
+        type="line",
+        x0=min_val,
+        y0=min_val,
+        x1=max_val,
+        y1=max_val,
+        line=dict(color="red", dash="dash"),
+    )
+
+
+if BIN_RUN:
+    region_lookup = _build_region_lookup(data, BIN_LABEL_MIN)
+    if region_lookup.empty:
+        print("No regions available for binned analysis.")
+    else:
+        regions_all = sorted(region_lookup["region"].unique().tolist())
+        print("Available regions:", ", ".join(regions_all))
+
+        if BIN_REGION is None or str(BIN_REGION).upper() == "ALL":
+            region_lookup_sel = region_lookup.copy()
+            region_label = "All regions"
+        else:
+            region_prefix = str(BIN_REGION)
+            region_mask = region_lookup["region"].astype(str).str.startswith(region_prefix)
+            region_lookup_sel = region_lookup[region_mask].copy()
+            region_label = f"Region {region_prefix}"
+
+        if region_lookup_sel.empty:
+            print(f"No units found for region filter: {BIN_REGION}")
+        else:
+            available_specs = []
+            for spec in CORR_VARIABLES:
+                df_src = data.get(spec["df"])
+                if df_src is None:
+                    continue
+                if spec["v1"] not in df_src.columns or spec["v2"] not in df_src.columns:
+                    continue
+                available_specs.append(spec)
+
+            spec_by_name = {spec["name"]: spec for spec in available_specs}
+            if not spec_by_name:
+                print("No variables available for binned analysis.")
+            elif BIN_VARIABLE_NAME not in spec_by_name:
+                print("BIN_VARIABLE_NAME not found. Available options:", ", ".join(spec_by_name))
+            else:
+                spec_a = spec_by_name[BIN_VARIABLE_NAME]
+                df_a = _build_variable_table(data, spec_a, region_lookup_sel)
+                if df_a is None or df_a.empty:
+                    print(f"No data for {BIN_VARIABLE_NAME} in {region_label}.")
+                else:
+                    v1_a = df_a[spec_a["v1"]].to_numpy(dtype=float)
+                    v2_a = df_a[spec_a["v2"]].to_numpy(dtype=float)
+                    mean_a = df_a["mean"].to_numpy(dtype=float)
+                    valid_a = np.isfinite(v1_a) & np.isfinite(v2_a)
+                    v1_a = v1_a[valid_a]
+                    v2_a = v2_a[valid_a]
+                    mean_a = mean_a[valid_a]
+
+                    if mean_a.size == 0:
+                        print(f"No finite values for {BIN_VARIABLE_NAME} in {region_label}.")
+                    else:
+                        fig_hist = go.Figure()
+                        fig_hist.add_trace(
+                            go.Histogram(
+                                x=v1_a,
+                                name=f"{spec_a['v1']} (half 1)",
+                                opacity=0.65,
+                            )
+                        )
+                        fig_hist.add_trace(
+                            go.Histogram(
+                                x=v2_a,
+                                name=f"{spec_a['v2']} (half 2)",
+                                opacity=0.65,
+                            )
+                        )
+                        fig_hist.update_layout(
+                            title=f"{BIN_VARIABLE_NAME} histogram (halves) | {region_label}",
+                            barmode="overlay",
+                            width=900,
+                            height=520,
+                            margin=dict(l=70, r=40, t=80, b=60),
+                            template=plot_config["PLOTLY_TEMPLATE"],
+                        )
+
+                        q1, q2 = BIN_QUANTILES
+                        if not (0 < q1 < q2 < 1):
+                            raise ValueError("BIN_QUANTILES must satisfy 0 < q1 < q2 < 1.")
+                        cut1, cut2 = np.nanquantile(mean_a, [q1, q2])
+                        cut1 = float(cut1)
+                        cut2 = float(cut2)
+                        print(
+                            f"Quantile thresholds for {BIN_VARIABLE_NAME}: "
+                            f"{cut1:.3f} (q={q1:.2f}), {cut2:.3f} (q={q2:.2f})"
+                        )
+
+                        if np.isfinite(cut1) and np.isfinite(cut2) and cut1 > cut2:
+                            cut1, cut2 = cut2, cut1
+
+                        if not (np.isfinite(cut1) and np.isfinite(cut2)):
+                            print("Thresholds are not finite; skipping bin analysis.")
+                        else:
+                            fig_hist.add_vline(
+                                x=cut1,
+                                line=dict(color="gray", dash="dot"),
+                            )
+                            fig_hist.add_vline(
+                                x=cut2,
+                                line=dict(color="gray", dash="dot"),
+                            )
+                            show_fig(fig_hist)
+
+                            bins_a = [
+                                ("low", mean_a <= cut1),
+                                ("mid", (mean_a > cut1) & (mean_a <= cut2)),
+                                ("high", mean_a > cut2),
+                            ]
+
+                            rows = []
+                            for label, mask in bins_a:
+                                r_val, n_val = _pearsonr_with_n(v1_a[mask], v2_a[mask])
+                                rho_val, n_s = _spearmanr_with_n(v1_a[mask], v2_a[mask])
+                                rows.append(
+                                    {
+                                        "bin": label,
+                                        "range": _format_range_text(cut1, cut2, label),
+                                        "n": n_val,
+                                        "pearson_r": r_val,
+                                        "spearman_rho": rho_val,
+                                    }
+                                )
+                            display(pd.DataFrame(rows))
+
+                            if BIN_CORR_VARIABLE_NAME not in spec_by_name:
+                                print(
+                                    "BIN_CORR_VARIABLE_NAME not found. Available options: "
+                                    + ", ".join(spec_by_name)
+                                )
+                            else:
+                                spec_b = spec_by_name[BIN_CORR_VARIABLE_NAME]
+                                df_b = _build_variable_table(data, spec_b, region_lookup_sel)
+                                if df_b is None or df_b.empty:
+                                    print(
+                                        f"No data for {BIN_CORR_VARIABLE_NAME} in {region_label}."
+                                    )
+                                else:
+                                    merged = (
+                                        df_a[["cluster_id", "mean"]]
+                                        .rename(columns={"mean": "mean_a"})
+                                        .merge(
+                                            df_b[["cluster_id", "mean"]].rename(
+                                                columns={"mean": "mean_b"}
+                                            ),
+                                            on="cluster_id",
+                                            how="inner",
+                                        )
+                                    )
+                                    if merged.empty:
+                                        print(
+                                            "No overlapping units between "
+                                            f"{BIN_VARIABLE_NAME} and {BIN_CORR_VARIABLE_NAME}."
+                                        )
+                                    else:
+                                        x_vals = merged["mean_a"].to_numpy(dtype=float)
+                                        y_vals = merged["mean_b"].to_numpy(dtype=float)
+                                        valid_xy = np.isfinite(x_vals) & np.isfinite(y_vals)
+                                        x_vals = x_vals[valid_xy]
+                                        y_vals = y_vals[valid_xy]
+
+                                        if x_vals.size == 0:
+                                            print("No finite mean values to plot correlation.")
+                                        else:
+                                            bins_b = [
+                                                ("low", y_vals <= cut1),
+                                                ("mid", (y_vals > cut1) & (y_vals <= cut2)),
+                                                ("high", y_vals > cut2),
+                                            ]
+                                            colors = {
+                                                "low": "#1f77b4",
+                                                "mid": "#ff7f0e",
+                                                "high": "#2ca02c",
+                                            }
+
+                                            corr_rows = []
+                                            for label, mask in bins_b:
+                                                r_val, n_val = _pearsonr_with_n(
+                                                    x_vals[mask], y_vals[mask]
+                                                )
+                                                rho_val, n_s = _spearmanr_with_n(
+                                                    x_vals[mask], y_vals[mask]
+                                                )
+                                                corr_rows.append(
+                                                    {
+                                                        "bin": label,
+                                                        "range": _format_range_text(
+                                                            cut1, cut2, label
+                                                        ),
+                                                        "n": n_val,
+                                                        "pearson_r": r_val,
+                                                        "spearman_rho": rho_val,
+                                                    }
+                                                )
+                                            display(pd.DataFrame(corr_rows))
+
+                                            r_all, n_all = _pearsonr_with_n(x_vals, y_vals)
+                                            rho_all, n_all_s = _spearmanr_with_n(
+                                                x_vals, y_vals
+                                            )
+
+                                            fig_corr = go.Figure()
+                                            for label, mask in bins_b:
+                                                if not np.any(mask):
+                                                    continue
+                                                fig_corr.add_trace(
+                                                    go.Scatter(
+                                                        x=x_vals[mask],
+                                                        y=y_vals[mask],
+                                                        mode="markers",
+                                                        name=f"{label} bin",
+                                                        marker=dict(
+                                                            size=7,
+                                                            opacity=0.7,
+                                                            color=colors.get(label),
+                                                        ),
+                                                    )
+                                                )
+
+                                            if np.isfinite(cut1):
+                                                fig_corr.add_hline(
+                                                    y=cut1,
+                                                    line=dict(color="gray", dash="dot"),
+                                                )
+                                            if np.isfinite(cut2):
+                                                fig_corr.add_hline(
+                                                    y=cut2,
+                                                    line=dict(color="gray", dash="dot"),
+                                                )
+
+                                            _add_unity_line(fig_corr, x_vals, y_vals)
+                                            fig_corr.update_layout(
+                                                title=(
+                                                    f"{BIN_VARIABLE_NAME} vs {BIN_CORR_VARIABLE_NAME} | "
+                                                    f"Pearson r={r_all:.2f} (n={n_all}) | "
+                                                    f"Spearman rho={rho_all:.2f} (n={n_all_s}) | "
+                                                    f"{region_label}"
+                                                ),
+                                                xaxis_title=f"{BIN_VARIABLE_NAME} mean",
+                                                yaxis_title=f"{BIN_CORR_VARIABLE_NAME} mean",
+                                                width=900,
+                                                height=620,
+                                                margin=dict(l=70, r=40, t=90, b=70),
+                                                template=plot_config["PLOTLY_TEMPLATE"],
+                                                legend=dict(
+                                                    orientation="h",
+                                                    yanchor="bottom",
+                                                    y=1.02,
+                                                    xanchor="left",
+                                                    x=0,
+                                                ),
+                                            )
+                                            show_fig(fig_corr)

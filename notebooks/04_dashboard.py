@@ -103,6 +103,35 @@ def _label_values_for_clusters(cluster_ids, clusters, labels):
     return None
 
 
+def _get_cluster_firing_rate(clusters, cluster_ids=None):
+    if clusters is None:
+        return None
+    rate = None
+    if hasattr(clusters, "firing_rate"):
+        rate = np.asarray(clusters.firing_rate)
+    elif isinstance(clusters, dict) and "firing_rate" in clusters:
+        rate = np.asarray(clusters.get("firing_rate"))
+    elif hasattr(clusters, "metrics") and hasattr(clusters.metrics, "columns"):
+        if "firing_rate" in clusters.metrics.columns:
+            rate = np.asarray(clusters.metrics["firing_rate"])
+    if rate is None:
+        return None
+    if cluster_ids is None:
+        return rate
+    cluster_ids = np.asarray(cluster_ids)
+    if len(rate) == len(cluster_ids):
+        return rate
+    cluster_id_all = None
+    if hasattr(clusters, "cluster_id"):
+        cluster_id_all = np.asarray(clusters.cluster_id)
+    elif isinstance(clusters, dict) and "cluster_id" in clusters:
+        cluster_id_all = np.asarray(clusters.get("cluster_id"))
+    if cluster_id_all is None or len(cluster_id_all) != len(rate):
+        return None
+    rate_map = dict(zip(cluster_id_all, rate))
+    return np.asarray([rate_map.get(cid, np.nan) for cid in cluster_ids])
+
+
 def _format_seconds(val):
     if val is None or (isinstance(val, float) and np.isnan(val)):
         return "NA"
@@ -285,7 +314,17 @@ CORR_VARIABLES = [
         "v1": "coupling_max_odd",
         "v2": "coupling_max_even",
     },
+    {
+        "name": "Firing rate",
+        "df": "df_firing_rate",
+        "v1": "firing_rate_h1",
+        "v2": "firing_rate_h2",
+    },
 ]
+
+
+def _is_firing_rate_spec(spec):
+    return spec.get("df") == "df_firing_rate"
 
 
 def _pearsonr_with_n(x, y, min_n=CORR_MIN_N):
@@ -503,8 +542,12 @@ def _build_pairwise_corr_plot(
         )
         if len(x_plot) == 0:
             return None, f"No valid pairs for {spec_x['name']} in {region_label}."
-        r_val, n_r = _pearsonr_with_n(x_vals, y_vals)
-        rho_val, n_s = _spearmanr_with_n(x_vals, y_vals)
+        if _is_firing_rate_spec(spec_x):
+            r_val, n_r = np.nan, 0
+            rho_val, n_s = np.nan, 0
+        else:
+            r_val, n_r = _pearsonr_with_n(x_vals, y_vals)
+            rho_val, n_s = _spearmanr_with_n(x_vals, y_vals)
         title = (
             f"{spec_x['name']} reliability | "
             f"Pearson r={_format_corr_value(r_val)} (n={n_r}) | "
@@ -703,6 +746,23 @@ if cluster_acronyms is None and clusters is not None:
 if cluster_ids is None or cluster_acronyms is None:
     st.error("Cluster IDs or acronyms missing. Rebuild cache or verify raw data.")
     st.stop()
+cluster_firing_rate = data.get("cluster_firing_rate")
+if cluster_firing_rate is None and clusters is not None:
+    cluster_firing_rate = _get_cluster_firing_rate(clusters, cluster_ids)
+if cluster_firing_rate is not None:
+    cluster_firing_rate = np.asarray(cluster_firing_rate, dtype=float)
+    if len(cluster_firing_rate) != len(cluster_ids):
+        cluster_firing_rate = None
+
+df_firing_rate = None
+if cluster_firing_rate is not None:
+    df_firing_rate = pd.DataFrame(
+        {
+            "cluster_id": np.asarray(cluster_ids),
+            "firing_rate_h1": cluster_firing_rate,
+            "firing_rate_h2": cluster_firing_rate,
+        }
+    )
 trials = data.get("trials")
 config_plot = data.get("config_plot", {})
 config_calc = data.get("config_calc", {})
@@ -762,6 +822,10 @@ plot_label_min = st.number_input(
     value=float(calc_label_min if calc_label_min is not None else 0.5),
     step=0.1,
 )
+use_good_stpr = st.toggle(
+    "Use stPR computed from good neuron population",
+    value=False,
+)
 
 plot_config = dict(config_plot)
 plot_config["PLOT_ONLY_GOOD_UNITS"] = False
@@ -793,11 +857,45 @@ sort_map = {
     "Spont stPR Delay": "spont",
     "Spont stPR Strength": "spont_strength",
     "Spont stPR Max": "spont_max",
+    "Firing rate": "firing_rate",
 }
 
-df_coupling_plot = data.get("df_coupling")
-df_coupling_task_plot = data.get("df_coupling_task")
-df_coupling_iti_plot = data.get("df_coupling_iti")
+df_coupling_good = data.get("df_coupling_good")
+df_coupling_task_good = data.get("df_coupling_task_good")
+df_coupling_iti_good = data.get("df_coupling_iti_good")
+if use_good_stpr:
+    missing = []
+    if df_coupling_good is None:
+        missing.append("Spont")
+    if df_coupling_task_good is None:
+        missing.append("Task")
+    if df_coupling_iti_good is None:
+        missing.append("ITI")
+    if len(missing) == 3:
+        st.warning(
+            "Good-neuron stPR not available in cache; using all neurons for stPR metrics."
+        )
+        use_good_stpr = False
+    elif missing:
+        st.warning(
+            "Good-neuron stPR missing for: "
+            + ", ".join(missing)
+            + ". Using all neurons for those contexts."
+        )
+
+df_coupling_plot = (
+    df_coupling_good if use_good_stpr and df_coupling_good is not None else data.get("df_coupling")
+)
+df_coupling_task_plot = (
+    df_coupling_task_good
+    if use_good_stpr and df_coupling_task_good is not None
+    else data.get("df_coupling_task")
+)
+df_coupling_iti_plot = (
+    df_coupling_iti_good
+    if use_good_stpr and df_coupling_iti_good is not None
+    else data.get("df_coupling_iti")
+)
 df_comparison_plot = data.get("df_comparison")
 if plot_label_values is not None and plot_label_min is not None:
     plot_mask = plot_label_values >= float(plot_label_min)
@@ -818,6 +916,12 @@ if plot_label_values is not None and plot_label_min is not None:
         df_comparison_plot = df_comparison_plot[
             df_comparison_plot["cluster_id"].isin(plot_cluster_ids)
         ]
+
+data_for_corr = dict(data)
+data_for_corr["df_firing_rate"] = df_firing_rate
+data_for_corr["df_coupling"] = df_coupling_plot
+data_for_corr["df_coupling_task"] = df_coupling_task_plot
+data_for_corr["df_coupling_iti"] = df_coupling_iti_plot
 
 st.subheader("General Raster")
 variability_choice = st.radio(
@@ -894,6 +998,7 @@ general_sort = st.selectbox(
         "Spont stPR Delay",
         "Spont stPR Strength",
         "Spont stPR Max",
+        "Firing rate",
     ],
     key="general_sort",
 )
@@ -916,6 +1021,7 @@ else:
         df_coupling=df_coupling_plot,
         df_coupling_task=df_coupling_task_plot,
         df_coupling_iti=df_coupling_iti_plot,
+        df_firing_rate=df_firing_rate,
         pupil_features=data.get("pupil_features"),
         pupil_times=data.get("pupil_times"),
         region_colors=region_colors,
@@ -952,6 +1058,7 @@ sort_choice = st.selectbox(
         "Spont stPR Delay",
         "Spont stPR Strength",
         "Spont stPR Max",
+        "Firing rate",
     ],
 )
 
@@ -969,6 +1076,7 @@ fig_trial = plot_trial_raster_plotly(
     df_coupling=df_coupling_plot,
     df_coupling_task=df_coupling_task_plot,
     df_coupling_iti=df_coupling_iti_plot,
+    df_firing_rate=df_firing_rate,
     pupil_features=data.get("pupil_features"),
     pupil_times=data.get("pupil_times"),
     region_colors=region_colors,
@@ -990,6 +1098,7 @@ plot_sort = st.selectbox(
         "Spont stPR Delay",
         "Spont stPR Strength",
         "Spont stPR Max",
+        "Firing rate",
     ],
     index=1,
 )
@@ -1005,11 +1114,13 @@ plot_sort_map = {
     "Spont stPR Delay": "spont",
     "Spont stPR Strength": "spont_strength",
     "Spont stPR Max": "spont_max",
+    "Firing rate": "firing_rate",
 }
 pop_key = (
     pid,
     plot_label_min,
     plot_sort,
+    use_good_stpr,
     plot_config["PLOTLY_TEMPLATE"],
     tuple(config_plot.get("PLOT_REGIONS") or []),
     config_plot.get("POP_BIN_SIZE"),
@@ -1037,6 +1148,7 @@ def _build_population_figs():
                 df_coupling=df_coupling_plot,
                 df_coupling_task=df_coupling_task_plot,
                 df_coupling_iti=df_coupling_iti_plot,
+                df_firing_rate=df_firing_rate,
                 region_acronyms=cfg.get("PLOT_REGIONS"),
                 sort_mode=plot_sort_map[plot_sort],
             )
@@ -1052,6 +1164,7 @@ st.subheader("Coupling")
 coupling_key = (
     pid,
     plot_label_min,
+    use_good_stpr,
     plot_config["PLOTLY_TEMPLATE"],
     tuple(config_plot.get("PLOT_REGIONS") or []),
     config_calc.get("STPR_BIN_SIZE"),
@@ -1107,6 +1220,8 @@ st.subheader("Correlation Matrices")
 corr_key = (
     pid,
     plot_label_min,
+    use_good_stpr,
+    bool(df_firing_rate is not None),
     plot_config["PLOTLY_TEMPLATE"],
     tuple(config_plot.get("PLOT_REGIONS") or []),
 )
@@ -1123,7 +1238,7 @@ def _build_corr_figs():
 
     available_specs = []
     for spec in CORR_VARIABLES:
-        df_src = data.get(spec["df"])
+        df_src = data_for_corr.get(spec["df"])
         if df_src is None:
             continue
         if spec["v1"] not in df_src.columns or spec["v2"] not in df_src.columns:
@@ -1136,7 +1251,7 @@ def _build_corr_figs():
     spec_by_name = {spec["name"]: spec for spec in available_specs}
     var_tables_all = {}
     for spec in available_specs:
-        df_var = _build_variable_table(data.get(spec["df"]), spec, region_lookup)
+        df_var = _build_variable_table(data_for_corr.get(spec["df"]), spec, region_lookup)
         if df_var is None or df_var.empty:
             continue
         var_tables_all[spec["name"]] = df_var
@@ -1186,9 +1301,13 @@ def _build_corr_figs():
                 reliability[name] = np.nan
                 reliability_n[name] = 0
                 continue
-            r_val, n_val = _pearsonr_with_n(df_var[spec["v1"]], df_var[spec["v2"]])
-            reliability[name] = r_val
-            reliability_n[name] = n_val
+            if _is_firing_rate_spec(spec):
+                reliability[name] = np.nan
+                reliability_n[name] = 0
+            else:
+                r_val, n_val = _pearsonr_with_n(df_var[spec["v1"]], df_var[spec["v2"]])
+                reliability[name] = r_val
+                reliability_n[name] = n_val
 
         mean_wide = pd.DataFrame({"cluster_id": region_ids})
         for spec in available_specs:
@@ -1260,6 +1379,8 @@ def _build_corr_figs():
                 if i == j:
                     spec = spec_by_name.get(name_i)
                     if spec is None:
+                        r_val, n_val = np.nan, 0
+                    elif _is_firing_rate_spec(spec):
                         r_val, n_val = np.nan, 0
                     else:
                         r_val, n_val = _spearmanr_with_n(
@@ -1380,7 +1501,7 @@ region_lookup_plot = _build_region_lookup(
 )
 available_specs = []
 for spec in CORR_VARIABLES:
-    df_src = data.get(spec["df"])
+    df_src = data_for_corr.get(spec["df"])
     if df_src is None:
         continue
     if spec["v1"] not in df_src.columns or spec["v2"] not in df_src.columns:
@@ -1439,7 +1560,7 @@ else:
                 ]
 
             fig_corr, corr_msg = _build_pairwise_corr_plot(
-                data,
+                data_for_corr,
                 region_lookup_sel,
                 spec_by_name[var_x],
                 spec_by_name[var_y],

@@ -126,7 +126,7 @@ region_counts = region_counts.merge(region_pid_counts, on="region", how="left")
 region_counts
 
 # %% PIDs that contain a region (label-filtered neurons)
-REGION_QUERY = "VISp"  # set region acronym here
+REGION_QUERY = "AUDp"  # set region acronym here
 
 region_pid_table = (
     neurons_df.loc[neurons_df["region"] == REGION_QUERY]

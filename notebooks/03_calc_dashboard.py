@@ -91,7 +91,7 @@ CONFIG_PLOT = {
 PIDS = None # ['c9664185-d3fd-4e0e-89cf-77c402038938']
 SUBJECT = None # "CSH_ZAD_029"
 # If SUBJECT is None, use REGIONS to find all PIDs from sessions with those atlas acronyms.
-REGIONS = ["VISp"]
+REGIONS = ["AUDp"]
 TAG = "2025_Q3_IBL_et_al_BWM"
 
 

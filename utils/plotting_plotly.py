@@ -321,6 +321,7 @@ def _merge_metric(
     df_coupling=None,
     df_coupling_task=None,
     df_coupling_iti=None,
+    df_firing_rate=None,
 ):
     metric_key = (metric_key or "depth").strip().lower()
     df_units = df_units.copy()
@@ -398,6 +399,20 @@ def _merge_metric(
             df_units["sort_metric"] = df_units["depth"]
             sort_label = "Depth"
         return df_units, sort_label
+
+    if "firing" in metric_key:
+        sort_label = "Firing rate"
+        if df_firing_rate is not None:
+            for col in ("firing_rate", "firing_rate_h1", "firing_rate_h2"):
+                if col in df_firing_rate.columns:
+                    df_units = df_units.merge(
+                        df_firing_rate[["cluster_id", col]].rename(columns={col: "sort_metric"}),
+                        on="cluster_id",
+                        how="left",
+                    )
+                    return df_units, sort_label
+        df_units["sort_metric"] = df_units["depth"]
+        return df_units, "Depth"
 
     if "strength" in metric_key:
         if "spont" in metric_key:
@@ -561,6 +576,7 @@ def plot_trial_raster_plotly(
     df_coupling=None,
     df_coupling_task=None,
     df_coupling_iti=None,
+    df_firing_rate=None,
     pupil_features=None,
     pupil_times=None,
     region_colors=None,
@@ -661,6 +677,7 @@ def plot_trial_raster_plotly(
         df_coupling=df_coupling,
         df_coupling_task=df_coupling_task,
         df_coupling_iti=df_coupling_iti,
+        df_firing_rate=df_firing_rate,
     )
     df_units, region_order, sort_label = _sort_within_regions(df_units, sort_label)
 
@@ -1622,6 +1639,7 @@ def plot_time_window_raster_plotly(
     df_coupling=None,
     df_coupling_task=None,
     df_coupling_iti=None,
+    df_firing_rate=None,
     pupil_features=None,
     pupil_times=None,
     region_colors=None,
@@ -1683,6 +1701,7 @@ def plot_time_window_raster_plotly(
         df_coupling=df_coupling,
         df_coupling_task=df_coupling_task,
         df_coupling_iti=df_coupling_iti,
+        df_firing_rate=df_firing_rate,
     )
     df_units, region_order, sort_label = _sort_within_regions(df_units, sort_label)
 
@@ -1988,6 +2007,7 @@ def plot_population_sorted_plotly(
     df_coupling=None,
     df_coupling_task=None,
     df_coupling_iti=None,
+    df_firing_rate=None,
     region_acronyms=None,
     sort_mode="delay",
 ):
@@ -2229,6 +2249,21 @@ def plot_population_sorted_plotly(
                 df_coupling_iti,
                 ["coupling_max", "coupling_max_odd", "coupling_max_even"],
                 "stPR Max (ITI)",
+                ascending=sort_ascending,
+            )
+            if sorted_result is None:
+                df_sorted = df_region.sort_values(
+                    by=delay_sort_key, ascending=sort_ascending, na_position="last"
+                )
+                sort_label = delay_sort_label
+            else:
+                df_sorted, sort_label = sorted_result
+        elif sort_mode == "firing_rate":
+            sorted_result = _sort_by_coupling_value(
+                df_region,
+                df_firing_rate,
+                ["firing_rate", "firing_rate_h1", "firing_rate_h2"],
+                "Firing rate",
                 ascending=sort_ascending,
             )
             if sorted_result is None:
