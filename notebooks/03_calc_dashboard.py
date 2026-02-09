@@ -27,7 +27,7 @@ from utils.io import (
 )
 import utils.analysis as ana_utils
 
-CALC_VERSION = "2026-02-05-v4"
+CALC_VERSION = "2026-02-06-v5"
 
 CONFIG_CALC = {
     "ATLAS_MAPPING": "Beryl",
@@ -55,7 +55,7 @@ CONFIG_CALC = {
     "STPR_BIN_SIZE": 0.001,
     "STPR_WINDOW_MS": 80,
     "STPR_LOW_PASS_HZ": 20,
-    "STPR_LOW_PASS_ORDER": 2,
+    "STPR_LOW_PASS_ORDER": 3,
     "STPR_POP_USE_GOOD_UNITS": False,
     "TASK_POST_EVENT_S": 1.0,
     "ITI_SKIP_FIRST_LAST": True,
@@ -91,7 +91,7 @@ CONFIG_PLOT = {
 PIDS = None # ['c9664185-d3fd-4e0e-89cf-77c402038938']
 SUBJECT = None # "CSH_ZAD_029"
 # If SUBJECT is None, use REGIONS to find all PIDs from sessions with those atlas acronyms.
-REGIONS = ["AUDp"]
+REGIONS = ["VISp", "AUDpo", "MOs", "GRN", "ZI", "SCm"] 
 TAG = "2025_Q3_IBL_et_al_BWM"
 
 

@@ -197,6 +197,42 @@ def _is_firing_rate_spec(spec):
     return spec.get("df") == "df_firing_rate"
 
 
+def _is_spont_spec(spec):
+    return spec.get("df") == "df_coupling"
+
+
+def _has_spont_interval(meta):
+    if not meta:
+        return False
+    interval = meta.get("spont_interval")
+    if interval is None:
+        return False
+    try:
+        start, end = interval
+    except (TypeError, ValueError):
+        return False
+    if start is None or end is None:
+        return False
+    try:
+        start_val = float(start)
+        end_val = float(end)
+    except (TypeError, ValueError):
+        return False
+    return np.isfinite(start_val) and np.isfinite(end_val) and end_val > start_val
+
+
+def _filter_region_lookup_for_spec(region_lookup, spec, spont_pids):
+    if region_lookup is None or region_lookup.empty:
+        return region_lookup
+    if not _is_spont_spec(spec):
+        return region_lookup
+    if not spont_pids:
+        return region_lookup.iloc[0:0]
+    if "pid" not in region_lookup.columns:
+        return region_lookup
+    return region_lookup[region_lookup["pid"].isin(spont_pids)]
+
+
 def _mean_with_count(values):
     vals = np.asarray(values, dtype=float)
     finite = np.isfinite(vals)
@@ -212,6 +248,7 @@ def _load_cache_tables(cache_dir):
     rows = []
     pid_summary_rows = []
     label_mins = []
+    spont_pids = set()
     data_tables = {
         "df_res": [],
         "df_coupling": [],
@@ -228,6 +265,10 @@ def _load_cache_tables(cache_dir):
             cache = pickle.load(f)
 
         pid = cache.get("pid", path.stem)
+        meta = cache.get("meta") or {}
+        has_spont = _has_spont_interval(meta)
+        if has_spont:
+            spont_pids.add(pid)
         config_calc = cache.get("config_calc") or {}
         label_min_raw = config_calc.get("CALC_LABEL_MIN", DEFAULT_LABEL_MIN)
         try:
@@ -238,14 +279,28 @@ def _load_cache_tables(cache_dir):
 
         df_res = cache.get("df_res")
         if df_res is None or len(df_res) == 0:
-            pid_summary_rows.append({"pid": pid, "n_neurons": 0, "label_min": label_min})
+            pid_summary_rows.append(
+                {
+                    "pid": pid,
+                    "n_neurons": 0,
+                    "label_min": label_min,
+                    "has_spont_interval": has_spont,
+                }
+            )
             continue
 
         if "label" in df_res.columns:
             labels = pd.to_numeric(df_res["label"], errors="coerce")
             df_units = df_res[labels >= label_min].copy()
         else:
-            pid_summary_rows.append({"pid": pid, "n_neurons": 0, "label_min": label_min})
+            pid_summary_rows.append(
+                {
+                    "pid": pid,
+                    "n_neurons": 0,
+                    "label_min": label_min,
+                    "has_spont_interval": has_spont,
+                }
+            )
             continue
 
         if "acronym" in df_units.columns:
@@ -253,14 +308,28 @@ def _load_cache_tables(cache_dir):
         elif "region" in df_units.columns:
             region_col = "region"
         else:
-            pid_summary_rows.append({"pid": pid, "n_neurons": 0, "label_min": label_min})
+            pid_summary_rows.append(
+                {
+                    "pid": pid,
+                    "n_neurons": 0,
+                    "label_min": label_min,
+                    "has_spont_interval": has_spont,
+                }
+            )
             continue
 
         df_units = df_units[["cluster_id", region_col]].copy()
         df_units["cluster_id"] = pd.to_numeric(df_units["cluster_id"], errors="coerce")
         df_units = df_units[np.isfinite(df_units["cluster_id"])].copy()
         if df_units.empty:
-            pid_summary_rows.append({"pid": pid, "n_neurons": 0, "label_min": label_min})
+            pid_summary_rows.append(
+                {
+                    "pid": pid,
+                    "n_neurons": 0,
+                    "label_min": label_min,
+                    "has_spont_interval": has_spont,
+                }
+            )
             continue
         df_units["cluster_id"] = df_units["cluster_id"].astype(int)
         df_units["region"] = df_units[region_col].astype(str)
@@ -269,7 +338,12 @@ def _load_cache_tables(cache_dir):
 
         rows.append(df_units[["pid", "cluster_id", "region"]])
         pid_summary_rows.append(
-            {"pid": pid, "n_neurons": int(len(df_units)), "label_min": label_min}
+            {
+                "pid": pid,
+                "n_neurons": int(len(df_units)),
+                "label_min": label_min,
+                "has_spont_interval": has_spont,
+            }
         )
 
         df_res_copy = df_res.copy()
@@ -358,16 +432,22 @@ def _load_cache_tables(cache_dir):
     for key, tables in data_tables.items():
         data_concat[key] = pd.concat(tables, ignore_index=True) if tables else None
 
-    return neurons_df, pid_summary, region_counts, label_min_text, data_concat
+    return neurons_df, pid_summary, region_counts, label_min_text, data_concat, spont_pids
 
 
 plotly_dark_mode = st.toggle("Plotly dark mode", value=False)
 PLOTLY_TEMPLATE = "plotly_dark" if plotly_dark_mode else "plotly_white"
 pio.templates.default = PLOTLY_TEMPLATE
 
-neurons_df, pid_summary, region_counts, label_min_text, data_concat = _load_cache_tables(
-    CACHE_DIR
-)
+(
+    neurons_df,
+    pid_summary,
+    region_counts,
+    label_min_text,
+    data_concat,
+    spont_pids,
+) = _load_cache_tables(CACHE_DIR)
+spont_pids = set(spont_pids) if spont_pids is not None else set()
 
 st.title("Region Dashboard")
 st.caption(f"Label threshold(s) detected: {label_min_text}")
@@ -480,7 +560,12 @@ else:
 
         var_tables_all = {}
         for spec in available_specs:
-            df_var = _build_variable_table(data_for_corr.get(spec["df"]), spec, region_lookup)
+            region_lookup_spec = _filter_region_lookup_for_spec(
+                region_lookup, spec, spont_pids
+            )
+            df_var = _build_variable_table(
+                data_for_corr.get(spec["df"]), spec, region_lookup_spec
+            )
             if df_var is None or df_var.empty:
                 continue
             var_tables_all[spec["name"]] = df_var
@@ -509,8 +594,11 @@ else:
                         name = spec["name"]
                         if name not in names:
                             continue
+                        region_pid_spec = _filter_region_lookup_for_spec(
+                            region_pid, spec, spont_pids
+                        )
                         df_var = _build_variable_table(
-                            data_for_corr.get(spec["df"]), spec, region_pid
+                            data_for_corr.get(spec["df"]), spec, region_pid_spec
                         )
                         if df_var is None or df_var.empty:
                             continue
@@ -818,11 +906,17 @@ else:
                     region_pid = region_ids.loc[region_ids["pid"] == pid]
                     if region_pid.empty:
                         continue
+                    region_pid_x = _filter_region_lookup_for_spec(
+                        region_pid, spec_x, spont_pids
+                    )
+                    region_pid_y = _filter_region_lookup_for_spec(
+                        region_pid, spec_y, spont_pids
+                    )
                     df_var_x = _build_variable_table(
-                        data_for_corr.get(spec_x["df"]), spec_x, region_pid
+                        data_for_corr.get(spec_x["df"]), spec_x, region_pid_x
                     )
                     df_var_y = _build_variable_table(
-                        data_for_corr.get(spec_y["df"]), spec_y, region_pid
+                        data_for_corr.get(spec_y["df"]), spec_y, region_pid_y
                     )
                     if df_var_x is None or df_var_y is None:
                         continue
@@ -868,11 +962,17 @@ else:
                 rel_y, n_rel_y = _mean_with_count(rel_y_vals)
                 corr_val, n_corr = _mean_with_count(corr_vals)
             else:
+                region_ids_x = _filter_region_lookup_for_spec(
+                    region_ids, spec_x, spont_pids
+                )
+                region_ids_y = _filter_region_lookup_for_spec(
+                    region_ids, spec_y, spont_pids
+                )
                 df_var_x = _build_variable_table(
-                    data_for_corr.get(spec_x["df"]), spec_x, region_ids
+                    data_for_corr.get(spec_x["df"]), spec_x, region_ids_x
                 )
                 df_var_y = _build_variable_table(
-                    data_for_corr.get(spec_y["df"]), spec_y, region_ids
+                    data_for_corr.get(spec_y["df"]), spec_y, region_ids_y
                 )
                 if df_var_x is None or df_var_y is None:
                     continue
@@ -949,17 +1049,32 @@ else:
         if df_plot.empty:
             return None
 
+        highlight_regions = {
+            "VISp",
+            "MOs",
+            "CP",
+            "CA1",
+            "SCm",
+            "ZI",
+            "AUDp",
+            "GRN",
+        }
+
         fig = go.Figure()
         for _, row in df_plot.sort_values("region").iterrows():
             region = row["region"]
             color = region_colors.get(region)
+            marker = dict(size=8, color=color) if color else dict(size=8)
+            if region in highlight_regions:
+                marker["line"] = dict(color="black", width=1)
             fig.add_trace(
                 go.Scatter(
                     x=[row["reliability"]],
                     y=[row["corr"]],
                     mode="markers",
                     name=region,
-                    marker=dict(size=10, color=color) if color else dict(size=10),
+                    marker=marker,
+                    showlegend=region in highlight_regions,
                     hovertemplate=(
                         f"Region: {region}<br>"
                         f"corr={row['corr']:.2f}<br>"
@@ -985,6 +1100,19 @@ else:
             height=600,
             width=900,
         )
+        x_vals = df_plot["reliability"].to_numpy(dtype=float)
+        y_vals = df_plot["corr"].to_numpy(dtype=float)
+        min_val = float(np.nanmin([np.nanmin(x_vals), np.nanmin(y_vals)]))
+        max_val = float(np.nanmax([np.nanmax(x_vals), np.nanmax(y_vals)]))
+        if np.isfinite(min_val) and np.isfinite(max_val) and min_val < max_val:
+            fig.add_shape(
+                type="line",
+                x0=min_val,
+                y0=min_val,
+                x1=max_val,
+                y1=max_val,
+                line=dict(color="red", dash="dash"),
+            )
         return fig
 
     fig_p = _build_scatter("pearson")

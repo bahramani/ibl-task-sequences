@@ -371,15 +371,19 @@ def _stpr_metrics_from_curve(curve, lags_ms):
     zero_idx = int(curve.size // 2)
     strength = float(curve[zero_idx])  # value at lag 0
     peak = float(np.nanmax(curve))
-    stpr_sum = np.nansum(curve)
-    if stpr_sum != 0:
-        delay_val = float(np.nansum(lags_ms[: curve.size] * curve) / stpr_sum)
+    curve_min = np.nanmin(curve)
+    curve_shifted = curve - curve_min
+    stpr_sum = np.nansum(curve_shifted)
+    if stpr_sum > 0:
+        delay_val = float(
+            np.nansum(lags_ms[: curve.size] * curve_shifted) / stpr_sum
+        )
     else:
         delay_val = np.nan
     return delay_val, strength, peak
 
 
-def _lowpass_filter(signal, fs_hz, cutoff_hz, order=2):
+def _lowpass_filter(signal, fs_hz, cutoff_hz, order=3):
     if butter is None or filtfilt is None:
         return signal
     if cutoff_hz is None or cutoff_hz <= 0:
@@ -781,13 +785,16 @@ def compute_population_coupling(
     excluding the neuron under consideration. Coupling strength is the stPR value
     at lag 0, and coupling max is the peak of the stPR curve.
 
+    The stPR curve uses leave-one-out population activity as a mean-normalized
+    population rate.
+
     If intervals is provided, coupling is computed only within those windows, and
     spike-triggered segments that cross interval boundaries are excluded.
     """
     bin_size = config.get("STPR_BIN_SIZE", 0.001)
     window_ms = config.get("STPR_WINDOW_MS", 80)
     lowpass_hz = config.get("STPR_LOW_PASS_HZ", 20)
-    lowpass_order = config.get("STPR_LOW_PASS_ORDER", 2)
+    lowpass_order = 3
     use_good_population = config.get("STPR_POP_USE_GOOD_UNITS", False)
 
     def _base_columns(include_halves):
@@ -1035,7 +1042,9 @@ def compute_population_coupling(
                 else:
                     population_counts_excl = population_counts
 
-                population_rate = population_counts_excl / bin_size if bin_size > 0 else population_counts_excl
+                population_rate = (
+                    population_counts_excl / bin_size if bin_size > 0 else population_counts_excl
+                )
                 mu_i = mean_rate_by_cid.get(cid, 0.0) if cid in population_cluster_set else 0.0
                 sum_mu_excl = sum_mu_all - mu_i
                 if sum_mu_excl <= 0:
@@ -1051,7 +1060,7 @@ def compute_population_coupling(
                         }
                     )
                     continue
-                normalized_pop = (population_rate - sum_mu_excl) / sum_mu_excl
+                pop_trace = (population_rate - sum_mu_excl) / sum_mu_excl
 
                 segments = []
                 for spike_time in neuron_spikes:
@@ -1062,7 +1071,7 @@ def compute_population_coupling(
                         continue
                     if invalid_prefix[end_idx] != invalid_prefix[start_idx]:
                         continue
-                    segments.append(normalized_pop[start_idx:end_idx])
+                    segments.append(pop_trace[start_idx:end_idx])
 
                 if len(segments) == 0:
                     results.append(

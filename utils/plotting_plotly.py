@@ -461,7 +461,7 @@ def _merge_metric(
             )
 
     if "spont" in metric_key:
-        sort_label = "Coupling (Spont)"
+        sort_label = "stPR Delay (Spont)"
         if df_coupling is not None:
             if "sorting_number" in df_coupling.columns:
                 df_units = df_units.merge(
@@ -488,7 +488,7 @@ def _merge_metric(
         return df_units, sort_label
 
     if "task" in metric_key:
-        sort_label = "Coupling (Task)"
+        sort_label = "stPR Delay (Task)"
         if df_coupling_task is not None:
             if "sorting_number" in df_coupling_task.columns:
                 df_units = df_units.merge(
@@ -515,7 +515,7 @@ def _merge_metric(
         return df_units, sort_label
 
     if "iti" in metric_key:
-        sort_label = "Coupling (ITI)"
+        sort_label = "stPR Delay (ITI)"
         if df_coupling_iti is not None:
             if "sorting_number" in df_coupling_iti.columns:
                 df_units = df_units.merge(
@@ -704,18 +704,17 @@ def plot_trial_raster_plotly(
 
     fig = FigureResampler(
         make_subplots(
-            rows=6,
+            rows=5,
             cols=1,
             shared_xaxes=True,
             vertical_spacing=0.02,
-            row_heights=[0.5, 0.12, 0.1, 0.1, 0.09, 0.09],
+            row_heights=[0.55, 0.13, 0.11, 0.11, 0.10],
             subplot_titles=(
                 "Raster",
                 "Avg PSTH",
                 metric_title,
                 "Wheel",
                 "Paw Speed",
-                "Pupil Diameter",
             ),
         )
     )
@@ -902,43 +901,13 @@ def plot_trial_raster_plotly(
             col=1,
         )
 
-    pupil_t = None
-    pupil_diam = None
-    if pupil_features is not None and pupil_times is not None:
-        diam_col = "pupilDiameter_raw"
-        if diam_col in pupil_features.columns:
-            n_frames = min(len(pupil_times), len(pupil_features))
-            pt = pupil_times[:n_frames]
-            pd_vals = pupil_features[diam_col].values[:n_frames]
-            mask_pupil = (pt >= t_start) & (pt <= t_end)
-            pupil_t = pt[mask_pupil] - t_offset
-            pupil_diam = pd_vals[mask_pupil]
-
-    if pupil_diam is not None:
-        fig.add_trace(
-            go.Scatter(x=pupil_t, y=pupil_diam, mode="lines", line=dict(color=base_color)),
-            row=6,
-            col=1,
-        )
-    else:
-        fig.add_annotation(
-            x=0.5,
-            y=0.5,
-            xref="paper",
-            yref="y6",
-            text="Pupil data not available",
-            showarrow=False,
-            row=6,
-            col=1,
-        )
-
     event_lines = [
         ("Stim On", t_stim_on, "blue"),
         ("First Move", t_first_move, "green"),
         ("Feedback", t_feedback, "red"),
     ]
     for name, time_val, color in event_lines:
-        for row in range(1, 7):
+        for row in range(1, 6):
             fig.add_vline(x=time_val - t_offset, line=dict(color=color, width=2), row=row, col=1)
         fig.add_trace(
             go.Scatter(
@@ -970,8 +939,7 @@ def plot_trial_raster_plotly(
     fig.update_yaxes(title_text=metric_title, row=3, col=1)
     fig.update_yaxes(title_text="Wheel (rad)", row=4, col=1)
     fig.update_yaxes(title_text="Paw (px/s)", row=5, col=1)
-    fig.update_yaxes(title_text="Pupil (mm)", row=6, col=1)
-    fig.update_xaxes(title_text=xlabel_text, row=6, col=1)
+    fig.update_xaxes(title_text=xlabel_text, row=5, col=1)
     fig.update_xaxes(range=[t_start - t_offset, t_end - t_offset])
 
     fig.update_layout(
@@ -1727,18 +1695,17 @@ def plot_time_window_raster_plotly(
 
     fig = FigureResampler(
         make_subplots(
-            rows=6,
+            rows=5,
             cols=1,
             shared_xaxes=True,
             vertical_spacing=0.02,
-            row_heights=[0.5, 0.12, 0.1, 0.1, 0.09, 0.09],
+            row_heights=[0.55, 0.13, 0.11, 0.11, 0.10],
             subplot_titles=(
                 "Raster",
                 "Avg PSTH",
                 metric_title,
                 "Wheel",
                 "Paw Speed",
-                "Pupil Diameter",
             ),
         )
     )
@@ -1900,36 +1867,6 @@ def plot_time_window_raster_plotly(
             col=1,
         )
 
-    pupil_t = None
-    pupil_diam = None
-    if pupil_features is not None and pupil_times is not None:
-        diam_col = "pupilDiameter_raw"
-        if diam_col in pupil_features.columns:
-            n_frames = min(len(pupil_times), len(pupil_features))
-            pt = pupil_times[:n_frames]
-            pd_vals = pupil_features[diam_col].values[:n_frames]
-            mask_pupil = (pt >= t_start) & (pt <= t_end)
-            pupil_t = pt[mask_pupil]
-            pupil_diam = pd_vals[mask_pupil]
-
-    if pupil_diam is not None:
-        fig.add_trace(
-            go.Scatter(x=pupil_t, y=pupil_diam, mode="lines", line=dict(color=base_color)),
-            row=6,
-            col=1,
-        )
-    else:
-        fig.add_annotation(
-            x=0.5,
-            y=0.5,
-            xref="paper",
-            yref="y6",
-            text="Pupil data not available",
-            showarrow=False,
-            row=6,
-            col=1,
-        )
-
     event_style_map = {
         "stimOn_times": ("Stim On", "blue"),
         "firstMovement_times": ("First Move", "green"),
@@ -1943,7 +1880,7 @@ def plot_time_window_raster_plotly(
         valid_times = event_times[(event_times >= t_start) & (event_times <= t_end)]
         if len(valid_times) == 0:
             continue
-        for row in range(1, 7):
+        for row in range(1, 6):
             for t_event in valid_times:
                 fig.add_vline(x=t_event, line=dict(color=color, width=1.5), row=row, col=1)
         fig.add_trace(
@@ -1976,8 +1913,7 @@ def plot_time_window_raster_plotly(
     fig.update_yaxes(title_text=metric_title, row=3, col=1)
     fig.update_yaxes(title_text="Wheel (rad)", row=4, col=1)
     fig.update_yaxes(title_text="Paw (px/s)", row=5, col=1)
-    fig.update_yaxes(title_text="Pupil (mm)", row=6, col=1, showticklabels=False)
-    fig.update_xaxes(title_text="Time in session (s)", row=6, col=1)
+    fig.update_xaxes(title_text="Time in session (s)", row=5, col=1)
 
     fig.update_layout(
         title=f"Window {t_start:.2f}-{t_end:.2f}s | Sort: {sort_label}",
@@ -1991,7 +1927,6 @@ def plot_time_window_raster_plotly(
     fig.update_xaxes(range=[t_start, t_end], row=3, col=1)
     fig.update_xaxes(range=[t_start, t_end], row=4, col=1)
     fig.update_xaxes(range=[t_start, t_end], row=5, col=1)
-    fig.update_xaxes(range=[t_start, t_end], row=6, col=1)
 
     return fig
 
@@ -2436,6 +2371,9 @@ def plot_population_coupling_heatmap_plotly(
     zscore_by_region=False,
     colorbar_mode="single",
     colorbar_side="right",
+    zmin=None,
+    zmax=None,
+    zmid=None,
 ):
     """Plot spike-triggered population coupling heatmaps sorted by coupling delay."""
     if df_coupling is None or len(df_coupling) == 0:
@@ -2539,9 +2477,9 @@ def plot_population_coupling_heatmap_plotly(
                 trim_start = int((curve.size - n_bins) // 2)
                 stpr_matrix[row_i, :] = curve[trim_start : trim_start + n_bins]
 
-        zmin = None
-        zmax = None
-        zmid = None
+        zmin_val = zmin
+        zmax_val = zmax
+        zmid_val = zmid
 
         show_scale = False
         if colorbar_mode == "per_row":
@@ -2578,9 +2516,9 @@ def plot_population_coupling_heatmap_plotly(
                 x=lags_ms,
                 y=np.arange(n_neurons),
                 colorscale=cmap_name,
-                zmin=zmin,
-                zmax=zmax,
-                zmid=zmid,
+                zmin=zmin_val,
+                zmax=zmax_val,
+                zmid=zmid_val,
                 colorbar=colorbar,
                 showscale=show_scale,
             ),

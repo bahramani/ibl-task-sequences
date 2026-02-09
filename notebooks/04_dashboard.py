@@ -147,6 +147,26 @@ def _spont_interval_text(interval):
     return f"{start:.2f}-{end:.2f}s"
 
 
+def _has_spont_interval(meta):
+    if not meta:
+        return False
+    interval = meta.get("spont_interval")
+    if interval is None:
+        return False
+    try:
+        start, end = interval
+    except (TypeError, ValueError):
+        return False
+    if start is None or end is None:
+        return False
+    try:
+        start_val = float(start)
+        end_val = float(end)
+    except (TypeError, ValueError):
+        return False
+    return np.isfinite(start_val) and np.isfinite(end_val) and end_val > start_val
+
+
 def _build_region_colors(acronyms):
     if BrainRegions is None:
         return None
@@ -325,6 +345,10 @@ CORR_VARIABLES = [
 
 def _is_firing_rate_spec(spec):
     return spec.get("df") == "df_firing_rate"
+
+
+def _is_spont_spec(spec):
+    return spec.get("df") == "df_coupling"
 
 
 def _pearsonr_with_n(x, y, min_n=CORR_MIN_N):
@@ -733,6 +757,7 @@ elif raw_error is not None and raw_source is not None:
     st.warning(f"Local load failed; using {raw_source} metadata lookup. Details: {raw_error}")
 
 meta = data.get("meta", {})
+spont_available = _has_spont_interval(meta)
 cluster_ids = data.get("cluster_ids")
 cluster_acronyms = data.get("cluster_acronyms_plot")
 
@@ -1077,8 +1102,6 @@ fig_trial = plot_trial_raster_plotly(
     df_coupling_task=df_coupling_task_plot,
     df_coupling_iti=df_coupling_iti_plot,
     df_firing_rate=df_firing_rate,
-    pupil_features=data.get("pupil_features"),
-    pupil_times=data.get("pupil_times"),
     region_colors=region_colors,
 )
 st.plotly_chart(fig_trial, width="stretch")
@@ -1127,32 +1150,38 @@ pop_key = (
     config_plot.get("POP_SMOOTH_SIGMA"),
     config_plot.get("POP_CMAP_NAME"),
     config_plot.get("POP_NORMALIZE"),
+    "hide_colorbar",
 )
 
 def _build_population_figs():
+    def _hide_heatmap_colorbars(fig):
+        if fig is None:
+            return fig
+        fig.update_traces(showscale=False, selector=dict(type="heatmap"))
+        return fig
+
     figs = []
     for event_name in ["stimOn_times", "firstMovement_times", "feedback_times"]:
         cfg = dict(config_plot)
         cfg["PLOT_EVENT"] = event_name
         cfg["PLOT_ONLY_GOOD_UNITS"] = False
         cfg["PLOTLY_TEMPLATE"] = plot_config["PLOTLY_TEMPLATE"]
-        figs.append(
-            plot_population_sorted_plotly(
-                session,
-                spikes,
-                clusters,
-                plot_cluster_ids,
-                plot_cluster_acronyms,
-                data.get("df_res"),
-                cfg,
-                df_coupling=df_coupling_plot,
-                df_coupling_task=df_coupling_task_plot,
-                df_coupling_iti=df_coupling_iti_plot,
-                df_firing_rate=df_firing_rate,
-                region_acronyms=cfg.get("PLOT_REGIONS"),
-                sort_mode=plot_sort_map[plot_sort],
-            )
+        fig = plot_population_sorted_plotly(
+            session,
+            spikes,
+            clusters,
+            plot_cluster_ids,
+            plot_cluster_acronyms,
+            data.get("df_res"),
+            cfg,
+            df_coupling=df_coupling_plot,
+            df_coupling_task=df_coupling_task_plot,
+            df_coupling_iti=df_coupling_iti_plot,
+            df_firing_rate=df_firing_rate,
+            region_acronyms=cfg.get("PLOT_REGIONS"),
+            sort_mode=plot_sort_map[plot_sort],
         )
+        figs.append(_hide_heatmap_colorbars(fig))
     return figs
 
 pop_figs = _get_cached_value("population_analysis_figs", pop_key, _build_population_figs)
@@ -1172,10 +1201,28 @@ coupling_key = (
     plot_config.get("POP_CMAP_NAME"),
     True,
     "per_row_all",
+    "hide_colorbar",
+    "context_titles",
 )
 
 def _build_coupling_figs():
     region_acronyms = config_plot.get("PLOT_REGIONS")
+    def _clamp_coupling_colorbar(fig, zmin=-2, zmax=2):
+        if fig is None:
+            return fig
+        fig.update_traces(zmin=zmin, zmax=zmax, selector=dict(type="heatmap"))
+        return fig
+    def _hide_heatmap_colorbars(fig):
+        if fig is None:
+            return fig
+        fig.update_traces(showscale=False, selector=dict(type="heatmap"))
+        return fig
+    def _set_coupling_title(fig, label):
+        if fig is None:
+            return fig
+        fig.update_layout(title=f"Spike-triggered Population Rate ({label})")
+        return fig
+
     fig_spont = plot_population_coupling_heatmap_plotly(
         df_coupling_plot,
         plot_config,
@@ -1200,6 +1247,15 @@ def _build_coupling_figs():
         zscore_by_region=True,
         colorbar_mode="per_row",
     )
+    fig_spont = _set_coupling_title(
+        _hide_heatmap_colorbars(_clamp_coupling_colorbar(fig_spont)), "Spont"
+    )
+    fig_task = _set_coupling_title(
+        _hide_heatmap_colorbars(_clamp_coupling_colorbar(fig_task)), "Task"
+    )
+    fig_iti = _set_coupling_title(
+        _hide_heatmap_colorbars(_clamp_coupling_colorbar(fig_iti)), "ITI"
+    )
     return fig_spont, fig_task, fig_iti
 
 fig_spont, fig_task, fig_iti = _get_cached_value(
@@ -1222,6 +1278,7 @@ corr_key = (
     plot_label_min,
     use_good_stpr,
     bool(df_firing_rate is not None),
+    spont_available,
     plot_config["PLOTLY_TEMPLATE"],
     tuple(config_plot.get("PLOT_REGIONS") or []),
 )
@@ -1238,6 +1295,8 @@ def _build_corr_figs():
 
     available_specs = []
     for spec in CORR_VARIABLES:
+        if _is_spont_spec(spec) and not spont_available:
+            continue
         df_src = data_for_corr.get(spec["df"])
         if df_src is None:
             continue
@@ -1501,6 +1560,8 @@ region_lookup_plot = _build_region_lookup(
 )
 available_specs = []
 for spec in CORR_VARIABLES:
+    if _is_spont_spec(spec) and not spont_available:
+        continue
     df_src = data_for_corr.get(spec["df"])
     if df_src is None:
         continue

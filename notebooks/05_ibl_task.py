@@ -18,6 +18,10 @@ try:
     from scipy.stats import spearmanr
 except Exception:  # pragma: no cover
     spearmanr = None
+try:
+    from iblatlas.regions import BrainRegions
+except Exception:  # pragma: no cover
+    BrainRegions = None
 
 BASE_PATH = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BASE_PATH))
@@ -35,6 +39,7 @@ from utils.plotting_plotly import (  # noqa: E402
     plot_stpr_curve_halves_plotly,
 )
 import utils.plotting_plotly as plotting_utils
+import utils.analysis as ana_utils
 from utils.io import setup_paths, init_one, load_session_data, build_cluster_id_map
 
 
@@ -107,7 +112,7 @@ ALLOW_REMOTE_METADATA = True
 
 def _load_raw_session(pid, load_wheel=False, load_pose=False, mode="local"):
     _path_data, _path_fig, _path_data_processed, ibl_cache = setup_paths(BASE_PATH)
-    one = init_one(ibl_cache, mode=mode)
+    one = init_one(ibl_cache, mode="remote")
     ssl, spikes, clusters, sl = load_session_data(
         pid,
         one,
@@ -178,6 +183,47 @@ def _get_label_array(clusters, cluster_ids=None):
     return None
 
 
+def _label_values_for_clusters(cluster_ids, clusters, labels):
+    values = plotting_utils._get_label_values(clusters, cluster_ids)
+    if values is not None:
+        return values
+    if labels is None:
+        return None
+    labels = np.asarray(labels)
+    if labels.shape[0] == len(cluster_ids):
+        return labels.astype(float)
+    return None
+
+
+def _get_cluster_firing_rate(clusters, cluster_ids=None):
+    if clusters is None:
+        return None
+    rate = None
+    if hasattr(clusters, "firing_rate"):
+        rate = np.asarray(clusters.firing_rate)
+    elif isinstance(clusters, dict) and "firing_rate" in clusters:
+        rate = np.asarray(clusters.get("firing_rate"))
+    elif hasattr(clusters, "metrics") and hasattr(clusters.metrics, "columns"):
+        if "firing_rate" in clusters.metrics.columns:
+            rate = np.asarray(clusters.metrics["firing_rate"])
+    if rate is None:
+        return None
+    if cluster_ids is None:
+        return rate
+    cluster_ids = np.asarray(cluster_ids)
+    if len(rate) == len(cluster_ids):
+        return rate
+    cluster_id_all = None
+    if hasattr(clusters, "cluster_id"):
+        cluster_id_all = np.asarray(clusters.cluster_id)
+    elif isinstance(clusters, dict) and "cluster_id" in clusters:
+        cluster_id_all = np.asarray(clusters.get("cluster_id"))
+    if cluster_id_all is None or len(cluster_id_all) != len(rate):
+        return None
+    rate_map = dict(zip(cluster_id_all, rate))
+    return np.asarray([rate_map.get(cid, np.nan) for cid in cluster_ids])
+
+
 def _format_seconds(val):
     if val is None or (isinstance(val, float) and np.isnan(val)):
         return "NA"
@@ -191,6 +237,112 @@ def _spont_interval_text(interval):
     if start is None or end is None:
         return "NA"
     return f"{start:.2f}-{end:.2f}s"
+
+
+def _has_spont_interval(meta):
+    if not meta:
+        return False
+    interval = meta.get("spont_interval")
+    if interval is None:
+        return False
+    try:
+        start, end = interval
+    except (TypeError, ValueError):
+        return False
+    if start is None or end is None:
+        return False
+    try:
+        start_val = float(start)
+        end_val = float(end)
+    except (TypeError, ValueError):
+        return False
+    return np.isfinite(start_val) and np.isfinite(end_val) and end_val > start_val
+
+
+def _build_region_colors(acronyms):
+    if BrainRegions is None:
+        return None
+    colors = {}
+    br = BrainRegions()
+    unique_regions = pd.Series(acronyms).astype(str).unique().tolist()
+    for region in unique_regions:
+        try:
+            idx = br.acronym2index(region)[1][0][0]
+            rgb = br.rgb[idx]
+            colors[region] = f"rgb({int(rgb[0])},{int(rgb[1])},{int(rgb[2])})"
+        except Exception:
+            continue
+    return colors
+
+
+def _build_stpr_lags(config_calc, curve_len=None):
+    bin_size_ms = config_calc.get("STPR_BIN_SIZE", 0.001) * 1000
+    if bin_size_ms <= 0:
+        bin_size_ms = 1.0
+    window_ms = config_calc.get("STPR_WINDOW_MS", 80)
+    window_bins = int(round(window_ms / bin_size_ms)) if bin_size_ms > 0 else 0
+    if curve_len is None:
+        return np.arange(-window_bins, window_bins + 1) * bin_size_ms
+    expected_len = window_bins * 2 + 1
+    if curve_len == expected_len:
+        return np.arange(-window_bins, window_bins + 1) * bin_size_ms
+    half = (curve_len - 1) / 2.0
+    return (np.arange(curve_len) - half) * bin_size_ms
+
+
+def _plot_stpr_mean_comparison(
+    df_spont, df_task, df_iti, config_calc, cluster_id, template
+):
+    fig = go.Figure()
+    curve_specs = [
+        ("Spont", df_spont, "#1f77b4"),
+        ("Task", df_task, "#ff7f0e"),
+        ("ITI", df_iti, "#2ca02c"),
+    ]
+    added = False
+    delays = []
+    for label, df_src, color in curve_specs:
+        if df_src is None or len(df_src) == 0:
+            continue
+        row = df_src.loc[df_src["cluster_id"] == cluster_id]
+        if row.empty:
+            continue
+        curve = np.asarray(row.iloc[0].get("stpr_curve", []), dtype=float)
+        delay = row.iloc[0].get("coupling_delay_ms", np.nan)
+        if curve.size == 0:
+            continue
+        lags = _build_stpr_lags(config_calc, curve.size)
+        fig.add_trace(
+            go.Scatter(
+                x=lags,
+                y=curve,
+                mode="lines",
+                line=dict(color=color, width=2),
+                name=f"{label} Mean",
+            )
+        )
+        delays.append((label, delay, color))
+        added = True
+
+    if not added:
+        fig.add_annotation(text="No stPR mean curves available", showarrow=False)
+    else:
+        for label, delay_val, color in delays:
+            if np.isfinite(delay_val):
+                fig.add_vline(x=delay_val, line=dict(color=color, dash="dot"))
+
+    fig.update_layout(
+        title="stPR Mean Curves (Task vs Spont vs ITI)",
+        xaxis_title="Lag (ms)",
+        yaxis_title="stPR (z)",
+        template=template,
+        font=dict(size=13),
+        width=900,
+        height=550,
+        margin=dict(l=60, r=40, t=80, b=60),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+    )
+    return fig
 
 
 def build_region_table(cluster_acronyms, labels):
@@ -343,6 +495,8 @@ def _get_plot_config(data, plot_label_min):
     config_plot["PSTH_WINDOW_START"] = config_calc.get("PSTH_WINDOW_START", -0.2)
     config_plot["PSTH_WINDOW_END"] = config_calc.get("PSTH_WINDOW_END", 0.35)
     config_plot["TRIAL_RASTER_USE_EVENT_WINDOW"] = True
+    config_plot["SINGLE_NEURON_SMOOTH_SIGMA"] = 0.5
+    config_plot["SINGLE_NEURON_BIN_SIZE"] = 0.03
     config_plot["PLOT_LABEL_MIN"] = plot_label_min
     config_plot["PLOTLY_TEMPLATE"] = "plotly_white"
     config_plot["DELAY_UNITS"] = config_calc.get("DELAY_UNITS", "s")
@@ -352,13 +506,14 @@ def _get_plot_config(data, plot_label_min):
 def _filter_by_label_min(data, plot_label_min):
     df_coupling = data.get("df_coupling")
     df_coupling_task = data.get("df_coupling_task")
+    df_coupling_iti = data.get("df_coupling_iti")
     df_comparison = data.get("df_comparison")
     if plot_label_min is None:
-        return df_coupling, df_coupling_task, df_comparison
+        return df_coupling, df_coupling_task, df_coupling_iti, df_comparison
     cluster_ids = data.get("cluster_ids")
     labels = _get_label_array(data.get("clusters"), cluster_ids)
     if labels is None or cluster_ids is None:
-        return df_coupling, df_coupling_task, df_comparison
+        return df_coupling, df_coupling_task, df_coupling_iti, df_comparison
     try:
         labels_float = labels.astype(float)
         plot_cluster_ids = np.asarray(cluster_ids)[labels_float >= float(plot_label_min)]
@@ -370,11 +525,15 @@ def _filter_by_label_min(data, plot_label_min):
         df_coupling_task = df_coupling_task[
             df_coupling_task["cluster_id"].isin(plot_cluster_ids)
         ]
+    if df_coupling_iti is not None:
+        df_coupling_iti = df_coupling_iti[
+            df_coupling_iti["cluster_id"].isin(plot_cluster_ids)
+        ]
     if df_comparison is not None:
         df_comparison = df_comparison[
             df_comparison["cluster_id"].isin(plot_cluster_ids)
         ]
-    return df_coupling, df_coupling_task, df_comparison
+    return df_coupling, df_coupling_task, df_coupling_iti, df_comparison
 
 
 def _choose_trial_row(trials, trial_idx=None):
@@ -401,7 +560,9 @@ if not pid_list:
     raise RuntimeError("No cached sessions found in data/dashboard_cache.")
 
 # Option A: Set PID directly
-PID = "c9664185-d3fd-4e0e-89cf-77c402038938"# None  # Example: "c9664185-d3fd-4e0e-89cf-77c402038938"
+
+# PID = "27bac116-ea57-4512-ad35-714a62d259cd" # "c9664185-d3fd-4e0e-89cf-77c402038938"
+PID = "b2ea68e2-c732-4d17-8166-1a8595fff225" # AUD
 
 if PID is None:
     pid = choose_pid(pid_list, default_index=0)
@@ -413,46 +574,60 @@ else:
 print(f"Selected PID: {pid}")
 
 data = load_cache(pid)
+raw_error = None
+raw_error_remote = None
+raw_source = None
+raw_spikes = None
+raw_clusters = None
+raw_session = None
+
 spikes = data.get("spikes")
 clusters = data.get("clusters")
 session = data.get("session")
-raw_error = None
-raw_error_remote = None
+
 if LOAD_RAW_DATA or spikes is None or clusters is None or session is None:
     try:
-        spikes, clusters, session, _ssl = _load_raw_session(
+        raw_spikes, raw_clusters, raw_session, _ssl = _load_raw_session(
             pid, load_wheel=LOAD_RAW_WHEEL, load_pose=LOAD_RAW_POSE, mode="local"
         )
+        raw_source = "local"
     except Exception as exc:
         raw_error = exc
         if ALLOW_REMOTE_METADATA:
             try:
-                spikes, clusters, session, _ssl = _load_raw_session(
+                raw_spikes, raw_clusters, raw_session, _ssl = _load_raw_session(
                     pid, load_wheel=LOAD_RAW_WHEEL, load_pose=LOAD_RAW_POSE, mode="remote"
                 )
+                raw_source = "remote"
             except Exception as exc_remote:
                 raw_error_remote = exc_remote
 
-    if raw_error is not None:
-        if spikes is None or clusters is None or session is None:
-            msg = (
-                "Raw session data not available in data/raw. "
-                "Run 03_calc_dashboard.py once with remote access to populate the cache."
-            )
-            if raw_error_remote is not None:
-                msg = (
-                    f"{msg}\nLocal error: {type(raw_error).__name__}: {raw_error}\n"
-                    f"Remote error: {type(raw_error_remote).__name__}: {raw_error_remote}"
-                )
-            raise RuntimeError(msg) from raw_error
-        if raw_error_remote is None:
-            print(f"Raw load failed, using cached blobs: {raw_error}")
-        else:
-            print(f"Local load failed; using remote metadata lookup: {raw_error}")
-    else:
-        data["spikes"] = spikes
-        data["clusters"] = clusters
-        data["session"] = session
+spikes = raw_spikes if raw_spikes is not None else spikes
+clusters = raw_clusters if raw_clusters is not None else clusters
+session = raw_session if raw_session is not None else session
+
+if raw_spikes is not None:
+    data["spikes"] = spikes
+if raw_clusters is not None:
+    data["clusters"] = clusters
+if raw_session is not None:
+    data["session"] = session
+
+if (spikes is None or clusters is None or session is None) and raw_error is not None:
+    msg = (
+        "Raw session data not available in data/raw. "
+        "Run 03_calc_dashboard.py once with remote access to populate the cache."
+    )
+    if raw_error_remote is not None:
+        msg = (
+            f"{msg}\nLocal error: {type(raw_error).__name__}: {raw_error}\n"
+            f"Remote error: {type(raw_error_remote).__name__}: {raw_error_remote}"
+        )
+    raise RuntimeError(msg) from raw_error
+if raw_error is not None and raw_source is None:
+    print(f"Raw load failed, using cached blobs: {raw_error}")
+elif raw_error is not None and raw_source is not None:
+    print(f"Local load failed; using {raw_source} metadata lookup: {raw_error}")
 
 # Keep cluster metadata aligned with the live clusters object (same behavior as 04_dashboard).
 cluster_ids = data.get("cluster_ids")
@@ -520,23 +695,48 @@ summarize_df(data.get("df_comparison"), "df_comparison")
 
 # %% Region counts (all vs good)
 labels = _get_label_array(clusters, cluster_ids)
-if cluster_acronyms is not None:
-    region_table = build_region_table(cluster_acronyms, labels)
+plot_cluster_ids = np.asarray(cluster_ids) if cluster_ids is not None else None
+plot_cluster_acronyms = cluster_acronyms
+if cluster_acronyms is not None and cluster_ids is not None:
+    all_counts = pd.Series(cluster_acronyms).value_counts().sort_index()
+    if labels is not None:
+        good_counts = pd.Series(cluster_acronyms[labels == 1]).value_counts().sort_index()
+    else:
+        good_counts = pd.Series(dtype=int)
+    region_table = pd.DataFrame(
+        {"All Neurons": all_counts, "Good Neurons": good_counts}
+    ).fillna(0)
+    region_table = region_table.astype(int)
     display(region_table)
 
 
 # %% Plot configuration
-plot_label_min = 0.5
+config_calc = data.get("config_calc", {})
+calc_label_min = config_calc.get("CALC_LABEL_MIN", None)
+if calc_label_min is None and config_calc.get("CALC_ONLY_GOOD_UNITS", False):
+    calc_label_min = 1.0
+calc_label = "All neurons" if calc_label_min is None else f"Label >= {calc_label_min}"
+print(f"Calculations: {calc_label}")
+
+plot_label_min = float(calc_label_min if calc_label_min is not None else 0.5)
 variability_metric = "fano"  # "fano" or "cv"
-sorting_metric = "depth"  # "depth", "stim", "feedback", "move", "spont", "task"
-population_sort_mode = "delay"  # "delay", "spont", "task", "depth"
 plot_regions = None  # Example: ["VISp", "MOp"] or None for all
 trial_idx = 234  # Set an int to override the default trial selection
 selected_cluster_id = None  # Set an int to override the default cluster selection
 
+calc_label_min = 1.0 ####################
+plot_label_min = 1.0 ####################
+
+calc_label = "All neurons" if calc_label_min is None else f"Label >= {calc_label_min}"
+print(f"Calculations: {calc_label}")
+
 use_dark_theme = False  # True -> plotly_dark for all plots
+use_good_stpr = True  # True -> use good-neuron stPR from cache if available
 
 plot_config, config_calc = _get_plot_config(data, plot_label_min)
+if plot_regions is not None:
+    plot_config["PLOT_REGIONS"] = plot_regions
+
 if use_dark_theme:
     plot_config["PLOTLY_TEMPLATE"] = "plotly_dark"
     plotting_utils.DEFAULT_TEMPLATE = "plotly_dark"
@@ -545,9 +745,139 @@ else:
     plot_config["PLOTLY_TEMPLATE"] = "plotly_white"
     plotting_utils.DEFAULT_TEMPLATE = "plotly_white"
     pio.templates.default = "plotly_white"
-df_coupling_plot, df_coupling_task_plot, df_comparison_plot = _filter_by_label_min(
-    data, plot_label_min
+
+region_colors = (
+    _build_region_colors(cluster_acronyms) if cluster_acronyms is not None else None
 )
+
+sort_map = {
+    "Default (Depth)": "depth",
+    "Delay to Stim On": "stim",
+    "Delay to First Move": "move",
+    "Delay to Response": "response",
+    "Delay to Feedback": "feedback",
+    "Task stPR Delay": "task",
+    "Task stPR Strength": "task_strength",
+    "Task stPR Max": "task_max",
+    "ITI stPR Delay": "iti",
+    "ITI stPR Strength": "iti_strength",
+    "ITI stPR Max": "iti_max",
+    "Spont stPR Delay": "spont",
+    "Spont stPR Strength": "spont_strength",
+    "Spont stPR Max": "spont_max",
+    "Firing rate": "firing_rate",
+}
+plot_sort_map = {
+    "Default (Depth)": "depth",
+    "Own Event Delay": "delay",
+    "Task stPR Delay": "task",
+    "Task stPR Strength": "task_strength",
+    "Task stPR Max": "task_max",
+    "ITI stPR Delay": "iti",
+    "ITI stPR Strength": "iti_strength",
+    "ITI stPR Max": "iti_max",
+    "Spont stPR Delay": "spont",
+    "Spont stPR Strength": "spont_strength",
+    "Spont stPR Max": "spont_max",
+    "Firing rate": "firing_rate",
+}
+
+general_sort = "Task stPR Delay"  # keys in sort_map
+trial_sort = "Task stPR Delay"  # keys in sort_map
+population_sort = "Own Event Delay"  # keys in plot_sort_map
+sorting_metric = sort_map.get(general_sort, general_sort)
+trial_sorting_metric = sort_map.get(trial_sort, trial_sort)
+population_sort_mode = plot_sort_map.get(population_sort, population_sort)
+
+df_coupling_good = data.get("df_coupling_good")
+df_coupling_task_good = data.get("df_coupling_task_good")
+df_coupling_iti_good = data.get("df_coupling_iti_good")
+if use_good_stpr:
+    missing = []
+    if df_coupling_good is None:
+        missing.append("Spont")
+    if df_coupling_task_good is None:
+        missing.append("Task")
+    if df_coupling_iti_good is None:
+        missing.append("ITI")
+    if len(missing) == 3:
+        print(
+            "Good-neuron stPR not available in cache; using all neurons for stPR metrics."
+        )
+        use_good_stpr = False
+    elif missing:
+        print(
+            "Good-neuron stPR missing for: "
+            + ", ".join(missing)
+            + ". Using all neurons for those contexts."
+        )
+
+df_coupling_plot = (
+    df_coupling_good if use_good_stpr and df_coupling_good is not None else data.get("df_coupling")
+)
+df_coupling_task_plot = (
+    df_coupling_task_good
+    if use_good_stpr and df_coupling_task_good is not None
+    else data.get("df_coupling_task")
+)
+df_coupling_iti_plot = (
+    df_coupling_iti_good
+    if use_good_stpr and df_coupling_iti_good is not None
+    else data.get("df_coupling_iti")
+)
+df_comparison_plot = data.get("df_comparison")
+
+plot_label_values = (
+    _label_values_for_clusters(plot_cluster_ids, clusters, labels)
+    if plot_cluster_ids is not None
+    else None
+)
+if plot_label_values is not None and plot_label_min is not None:
+    plot_mask = plot_label_values >= float(plot_label_min)
+    if plot_cluster_ids is not None:
+        plot_cluster_ids = plot_cluster_ids[plot_mask]
+    if plot_cluster_acronyms is not None:
+        plot_cluster_acronyms = np.asarray(plot_cluster_acronyms)[plot_mask]
+    plot_label_values = plot_label_values[plot_mask]
+    if df_coupling_plot is not None:
+        df_coupling_plot = df_coupling_plot[
+            df_coupling_plot["cluster_id"].isin(plot_cluster_ids)
+        ]
+    if df_coupling_task_plot is not None:
+        df_coupling_task_plot = df_coupling_task_plot[
+            df_coupling_task_plot["cluster_id"].isin(plot_cluster_ids)
+        ]
+    if df_coupling_iti_plot is not None:
+        df_coupling_iti_plot = df_coupling_iti_plot[
+            df_coupling_iti_plot["cluster_id"].isin(plot_cluster_ids)
+        ]
+    if df_comparison_plot is not None:
+        df_comparison_plot = df_comparison_plot[
+            df_comparison_plot["cluster_id"].isin(plot_cluster_ids)
+        ]
+
+if plot_cluster_ids is None:
+    plot_cluster_ids = cluster_ids
+if plot_cluster_acronyms is None:
+    plot_cluster_acronyms = cluster_acronyms
+
+cluster_firing_rate = data.get("cluster_firing_rate")
+if cluster_firing_rate is None and clusters is not None:
+    cluster_firing_rate = _get_cluster_firing_rate(clusters, cluster_ids)
+if cluster_firing_rate is not None:
+    cluster_firing_rate = np.asarray(cluster_firing_rate, dtype=float)
+    if cluster_ids is not None and len(cluster_firing_rate) != len(cluster_ids):
+        cluster_firing_rate = None
+
+df_firing_rate = None
+if cluster_firing_rate is not None and cluster_ids is not None:
+    df_firing_rate = pd.DataFrame(
+        {
+            "cluster_id": np.asarray(cluster_ids),
+            "firing_rate_h1": cluster_firing_rate,
+            "firing_rate_h2": cluster_firing_rate,
+        }
+    )
 
 spikes = data.get("spikes")
 clusters = data.get("clusters")
@@ -562,14 +892,14 @@ times = _as_array(spikes, "times")
 if times is not None and len(times) > 0:
     min_time = float(np.nanmin(times))
     max_time = float(np.nanmax(times))
-    t_start = 960.0  # min_time
-    t_end = 966.0  # max_time
+    t_start = float(min_time)
+    t_end = float(min(min_time + 10.0, max_time))
 
     fig_general = plot_time_window_raster_plotly(
         spikes,
         clusters,
-        cluster_ids,
-        cluster_acronyms,
+        plot_cluster_ids,
+        plot_cluster_acronyms,
         session,
         plot_config,
         t_start,
@@ -579,9 +909,11 @@ if times is not None and len(times) > 0:
         df_res=data.get("df_res"),
         df_coupling=df_coupling_plot,
         df_coupling_task=df_coupling_task_plot,
+        df_coupling_iti=df_coupling_iti_plot,
+        df_firing_rate=df_firing_rate,
         pupil_features=data.get("pupil_features"),
         pupil_times=data.get("pupil_times"),
-        region_colors=None,
+        region_colors=region_colors,
     )
     show_fig(fig_general)
 else:
@@ -609,19 +941,21 @@ else:
     fig_trial = plot_trial_raster_plotly(
         spikes,
         clusters,
-        cluster_ids,
-        cluster_acronyms,
+        plot_cluster_ids,
+        plot_cluster_acronyms,
         session,
         plot_config,
         trial_idx,
         variability_metric=variability_metric,
-        sorting_metric=sorting_metric,
+        sorting_metric=trial_sorting_metric,
         df_res=data.get("df_res"),
         df_coupling=df_coupling_plot,
         df_coupling_task=df_coupling_task_plot,
+        df_coupling_iti=df_coupling_iti_plot,
+        df_firing_rate=df_firing_rate,
         pupil_features=data.get("pupil_features"),
         pupil_times=data.get("pupil_times"),
-        region_colors=None,
+        region_colors=region_colors,
     )
     show_fig(fig_trial)
 
@@ -637,12 +971,14 @@ else:
             session,
             spikes,
             clusters,
-            cluster_ids,
-            cluster_acronyms,
+            plot_cluster_ids,
+            plot_cluster_acronyms,
             data.get("df_res"),
             cfg,
             df_coupling=df_coupling_plot,
             df_coupling_task=df_coupling_task_plot,
+            df_coupling_iti=df_coupling_iti_plot,
+            df_firing_rate=df_firing_rate,
             region_acronyms=plot_regions,
             sort_mode=population_sort_mode,
         )
@@ -650,17 +986,73 @@ else:
 
 
 # %% Coupling heatmaps
-if df_coupling_plot is None or df_coupling_task_plot is None:
+if df_coupling_plot is None and df_coupling_task_plot is None and df_coupling_iti_plot is None:
     print("Coupling data missing. Re-run 03_calc_dashboard.py with CALC_SPONT=True.")
 else:
-    fig_spont = plot_population_coupling_heatmap_plotly(
-        df_coupling_plot, plot_config, config_calc, region_acronyms=plot_regions
-    )
-    fig_task = plot_population_coupling_heatmap_plotly(
-        df_coupling_task_plot, plot_config, config_calc, region_acronyms=plot_regions
-    )
-    show_fig(fig_spont)
-    show_fig(fig_task)
+    def _clamp_coupling_colorbar(fig, zmin=-2, zmax=2):
+        if fig is None:
+            return fig
+        fig.update_traces(zmin=zmin, zmax=zmax, selector=dict(type="heatmap"))
+        return fig
+
+    def _hide_heatmap_colorbars(fig):
+        if fig is None:
+            return fig
+        fig.update_traces(showscale=False, selector=dict(type="heatmap"))
+        return fig
+
+    def _set_coupling_title(fig, label):
+        if fig is None:
+            return fig
+        fig.update_layout(title=f"Spike-triggered Population Rate ({label})")
+        return fig
+
+    fig_spont = None
+    fig_task = None
+    fig_iti = None
+    if df_coupling_plot is not None:
+        fig_spont = plot_population_coupling_heatmap_plotly(
+            df_coupling_plot,
+            plot_config,
+            config_calc,
+            region_acronyms=plot_regions,
+            zscore_by_region=True,
+            colorbar_mode="per_row",
+        )
+        fig_spont = _set_coupling_title(
+            _hide_heatmap_colorbars(_clamp_coupling_colorbar(fig_spont)), "Spont"
+        )
+    if df_coupling_task_plot is not None:
+        fig_task = plot_population_coupling_heatmap_plotly(
+            df_coupling_task_plot,
+            plot_config,
+            config_calc,
+            region_acronyms=plot_regions,
+            zscore_by_region=True,
+            colorbar_mode="per_row",
+        )
+        fig_task = _set_coupling_title(
+            _hide_heatmap_colorbars(_clamp_coupling_colorbar(fig_task)), "Task"
+        )
+    if df_coupling_iti_plot is not None:
+        fig_iti = plot_population_coupling_heatmap_plotly(
+            df_coupling_iti_plot,
+            plot_config,
+            config_calc,
+            region_acronyms=plot_regions,
+            zscore_by_region=True,
+            colorbar_mode="per_row",
+        )
+        fig_iti = _set_coupling_title(
+            _hide_heatmap_colorbars(_clamp_coupling_colorbar(fig_iti)), "ITI"
+        )
+
+    if fig_spont is not None:
+        show_fig(fig_spont)
+    if fig_task is not None:
+        show_fig(fig_task)
+    if fig_iti is not None:
+        show_fig(fig_iti)
 
 
 # %% stPR comparison (spont vs task)
@@ -675,14 +1067,14 @@ else:
     fig_strength = plot_coupling_strength_summary_plotly(
         df_comparison_plot,
         region_order=region_order,
-        region_colors=None,
+        region_colors=region_colors,
         template=plot_config["PLOTLY_TEMPLATE"],
         highlight_cluster_id=None,
     )
     fig_delay = plot_coupling_delay_summary_plotly(
         df_comparison_plot,
         region_order=region_order,
-        region_colors=None,
+        region_colors=region_colors,
         template=plot_config["PLOTLY_TEMPLATE"],
         highlight_cluster_id=None,
     )
@@ -692,7 +1084,6 @@ else:
 
 # %% Single neuron plots
 cluster_id = selected_cluster_id or _pick_default_cluster_id(cluster_ids)
-cluster_id = 357
 if cluster_id is None:
     print("No cluster IDs available.")
 else:
@@ -758,6 +1149,28 @@ else:
             split_labels=("Odd trials", "Even trials"),
         )
         show_fig(fig_task_curve)
+    if df_coupling_iti_plot is not None:
+        fig_iti_curve = plot_stpr_curve_halves_plotly(
+            df_coupling_iti_plot,
+            config_calc,
+            cluster_id,
+            title="ITI stPR Curve (Odd vs Even Trials)",
+            template=plot_config["PLOTLY_TEMPLATE"],
+            split_suffixes=("odd", "even"),
+            split_labels=("Odd trials", "Even trials"),
+        )
+        show_fig(fig_iti_curve)
+
+    if df_coupling_plot is not None or df_coupling_task_plot is not None or df_coupling_iti_plot is not None:
+        fig_mean = _plot_stpr_mean_comparison(
+            df_coupling_plot,
+            df_coupling_task_plot,
+            df_coupling_iti_plot,
+            config_calc,
+            cluster_id,
+            plot_config["PLOTLY_TEMPLATE"],
+        )
+        show_fig(fig_mean)
 
 
 # %% Noise-corrected similarity analysis (generic, easy to swap vectors)
@@ -1721,3 +2134,648 @@ if BIN_RUN:
                                                 ),
                                             )
                                             show_fig(fig_corr)
+
+
+# %% Task replay (passive) datasets
+eid = meta.get("eid") if isinstance(meta, dict) else None
+if eid is None:
+    eid = data.get("eid")
+
+if eid is None:
+    print("EID not found in cache metadata. Cannot load task replay datasets.")
+else:
+    _path_data, _path_fig, _path_data_processed, ibl_cache = setup_paths(BASE_PATH)
+    one = init_one(ibl_cache, mode="local")
+
+    def _load_tr_dataset(eid_val, pattern, label):
+        try:
+            return one.load_dataset(eid_val, pattern, collection="alf")
+        except Exception as exc:
+            if ALLOW_REMOTE_METADATA:
+                try:
+                    one_remote = init_one(ibl_cache, mode="remote")
+                    return one_remote.load_dataset(eid_val, pattern, collection="alf")
+                except Exception as exc_remote:
+                    print(
+                        f"{label} load failed. "
+                        f"Local: {type(exc).__name__}: {exc} | "
+                        f"Remote: {type(exc_remote).__name__}: {exc_remote}"
+                    )
+                    return None
+            print(f"{label} load failed: {type(exc).__name__}: {exc}")
+            return None
+
+    def _describe_tr_data(obj, label):
+        if obj is None:
+            print(f"{label}: None")
+            return
+        print(f"{label}: type={type(obj)}")
+        if isinstance(obj, dict):
+            keys = list(obj.keys())
+            print(f"{label}: keys={keys}")
+            for key in keys:
+                try:
+                    arr = np.asarray(obj[key])
+                    print(f"  {key}: shape={arr.shape} dtype={arr.dtype}")
+                except Exception:
+                    print(f"  {key}: type={type(obj[key])}")
+            return
+        if isinstance(obj, (list, tuple)):
+            print(f"{label}: len={len(obj)}")
+            for idx, item in enumerate(obj[:5]):
+                try:
+                    arr = np.asarray(item)
+                    print(f"  [{idx}]: shape={arr.shape} dtype={arr.dtype}")
+                except Exception:
+                    print(f"  [{idx}]: type={type(item)}")
+            if len(obj) > 5:
+                print("  ...")
+            return
+        try:
+            arr = np.asarray(obj)
+            print(f"{label}: shape={arr.shape} dtype={arr.dtype}")
+        except Exception:
+            pass
+
+    # Load visual stimulus task replay events
+    visual_TR = _load_tr_dataset(eid, "*passiveGabor*", "visual_TR")
+    # Load auditory stimulus task replay events
+    auditory_TR = _load_tr_dataset(eid, "*passiveStims*", "auditory_TR")
+
+    _describe_tr_data(visual_TR, "visual_TR")
+    _describe_tr_data(auditory_TR, "auditory_TR")
+
+
+# %% Task replay (passive) population analysis
+PASSIVE_SOURCE = "visual_TR"  # or "auditory_TR"
+passive_population_sort = "Spont stPR Delay" # "Own Event Delay"  # keys in plot_sort_map
+passive_population_sort_mode = plot_sort_map.get(
+    passive_population_sort, passive_population_sort
+)
+visual_TR = globals().get("visual_TR", None)
+auditory_TR = globals().get("auditory_TR", None)
+df_res_noise = None
+noise_event_col = None
+noise_delay_units = None
+
+
+def _extract_tr_field(tr_obj, keys, suffixes=None):
+    if tr_obj is None:
+        return None
+    if hasattr(tr_obj, "keys"):
+        key_list = list(tr_obj.keys())
+        for key in keys:
+            if key in tr_obj:
+                return np.asarray(tr_obj[key])
+        if suffixes:
+            for key in key_list:
+                key_str = str(key)
+                for suffix in suffixes:
+                    if key_str.endswith(suffix):
+                        return np.asarray(tr_obj[key])
+    for key in keys:
+        if hasattr(tr_obj, key):
+            return np.asarray(getattr(tr_obj, key))
+    if suffixes:
+        for suffix in suffixes:
+            if hasattr(tr_obj, suffix):
+                return np.asarray(getattr(tr_obj, suffix))
+    return None
+
+
+def _extract_passive_times_and_contrast(tr_obj):
+    if tr_obj is None:
+        return None, None
+
+    base_obj = tr_obj
+    if isinstance(tr_obj, dict) and "table" in tr_obj:
+        base_obj = tr_obj["table"]
+    elif isinstance(tr_obj, (list, tuple)):
+        if len(tr_obj) == 1:
+            base_obj = tr_obj[0]
+        else:
+            base_obj = None
+            for item in tr_obj:
+                if isinstance(item, pd.DataFrame) and {"start", "contrast"}.issubset(
+                    item.columns
+                ):
+                    base_obj = item
+                    break
+                if hasattr(item, "dtype") and getattr(item.dtype, "names", None):
+                    if {"start", "contrast"}.issubset(set(item.dtype.names)):
+                        base_obj = item
+                        break
+            if base_obj is None and len(tr_obj) > 0:
+                base_obj = tr_obj[0]
+
+    if isinstance(base_obj, pd.DataFrame):
+        if "start" in base_obj.columns:
+            times = base_obj["start"].to_numpy(dtype=float)
+            contrasts = (
+                base_obj["contrast"].to_numpy(dtype=float)
+                if "contrast" in base_obj.columns
+                else np.ones_like(times, dtype=float)
+            )
+            return times, contrasts
+    if hasattr(base_obj, "dtype") and getattr(base_obj.dtype, "names", None):
+        names = set(base_obj.dtype.names)
+        if "start" in names:
+            times = np.asarray(base_obj["start"], dtype=float)
+            if "contrast" in names:
+                contrasts = np.asarray(base_obj["contrast"], dtype=float)
+            else:
+                contrasts = np.ones_like(times, dtype=float)
+            return times, contrasts
+
+    arr_candidate = np.asarray(base_obj)
+    if arr_candidate.ndim == 2 and arr_candidate.shape[1] >= 5:
+        times = np.asarray(arr_candidate[:, 0], dtype=float)
+        contrasts = np.asarray(arr_candidate[:, 3], dtype=float)
+        return times, contrasts
+
+    times = _extract_tr_field(
+        base_obj,
+        keys=("stimOn_times", "times", "stimOn", "onset_times", "event_times", "start"),
+        suffixes=(".times", "times", ".start", "start"),
+    )
+    if times is None and isinstance(base_obj, (list, tuple, np.ndarray)):
+        arr = np.asarray(base_obj)
+        if arr.ndim == 1 and np.issubdtype(arr.dtype, np.number):
+            times = arr
+
+    contrasts = _extract_tr_field(
+        base_obj,
+        keys=("contrast", "contrasts", "stimContrast"),
+        suffixes=(".contrast", "contrast"),
+    )
+    if contrasts is None:
+        contrast_left = _extract_tr_field(
+            base_obj,
+            keys=("contrastLeft",),
+            suffixes=(".contrastLeft", "contrastLeft"),
+        )
+        contrast_right = _extract_tr_field(
+            base_obj,
+            keys=("contrastRight",),
+            suffixes=(".contrastRight", "contrastRight"),
+        )
+        if contrast_left is not None or contrast_right is not None:
+            if contrast_left is None:
+                contrast_left = np.full_like(contrast_right, np.nan, dtype=float)
+            if contrast_right is None:
+                contrast_right = np.full_like(contrast_left, np.nan, dtype=float)
+            contrasts = np.nanmax(
+                np.vstack([np.abs(contrast_left), np.abs(contrast_right)]), axis=0
+            )
+
+    if times is None:
+        return None, None
+
+    times = np.asarray(times, dtype=float)
+    if contrasts is None:
+        contrasts = np.ones_like(times, dtype=float)
+    else:
+        contrasts = np.asarray(contrasts, dtype=float)
+        if contrasts.shape[0] != times.shape[0]:
+            if contrasts.size == 1:
+                contrasts = np.full_like(times, float(contrasts.ravel()[0]))
+            else:
+                contrasts = np.ones_like(times, dtype=float)
+
+    finite_mask = np.isfinite(times)
+    if not np.all(finite_mask):
+        times = times[finite_mask]
+        contrasts = contrasts[finite_mask]
+
+    return times, contrasts
+
+
+passive_source_obj = visual_TR if PASSIVE_SOURCE == "visual_TR" else auditory_TR
+passive_times, passive_contrasts = _extract_passive_times_and_contrast(passive_source_obj)
+
+if passive_times is None or len(passive_times) == 0:
+    print("Passive replay times not found; skipping passive population analysis.")
+else:
+    if passive_contrasts is not None:
+        contrasts_arr = np.asarray(passive_contrasts, dtype=float)
+        times_arr = np.asarray(passive_times, dtype=float)
+        valid_mask = np.isfinite(times_arr) & np.isfinite(contrasts_arr) & (contrasts_arr > 0)
+        passive_times = times_arr[valid_mask]
+        passive_contrasts = contrasts_arr[valid_mask]
+
+    if passive_times is None or len(passive_times) == 0:
+        print("Passive replay times not found after filtering 0% contrast; skipping.")
+        skip_passive = True
+    else:
+        skip_passive = False
+        print(f"Passive replay events ({PASSIVE_SOURCE}, contrast>0): n={len(passive_times)}")
+
+        passive_trials = {"stimOn_times": passive_times}
+        passive_session = {"trials": passive_trials}
+        events_by_name = {"stimOn_times": passive_times}
+        contrasts_by_name = {"stimOn_times": passive_contrasts}
+
+    if not skip_passive:
+        _, cid_to_idx = build_cluster_id_map(clusters)
+        passive_calc_config = dict(config_calc) if isinstance(config_calc, dict) else {}
+        passive_calc_config.setdefault("DELAY_METHOD", "center_of_mass")
+        passive_calc_config.setdefault("DELAY_UNITS", plot_config.get("DELAY_UNITS", "s"))
+        passive_calc_config.setdefault("FULL_CONTRAST_VALUES", (1.0, 100.0))
+        passive_calc_config.setdefault("BIN_SIZE", 0.005)
+        passive_calc_config.setdefault("BASELINE_PRE", 0.2)
+        passive_calc_config.setdefault("PSTH_WINDOW_START", -1.0)
+        passive_calc_config.setdefault("PSTH_WINDOW_END", 1.0)
+        passive_calc_config.setdefault("RESPONSIVE_WINDOW_START", 0.02)
+        passive_calc_config.setdefault("RESPONSIVE_WINDOW_END", 0.35)
+        passive_calc_config.setdefault("SMOOTH_SIGMA", 1)
+        passive_calc_config.setdefault("MIN_TRIALS", 50)
+        passive_calc_config.setdefault("MIN_TRIALS_SPLIT", 25)
+        passive_calc_config.setdefault("CALC_LABEL_MIN", None)
+        passive_calc_config.setdefault("CALC_ONLY_GOOD_UNITS", False)
+        passive_calc_config["EVENT_NAMES"] = ["stimOn_times"]
+        if not isinstance(passive_calc_config.get("DELAY_WINDOWS"), dict):
+            passive_calc_config["DELAY_WINDOWS"] = {}
+        if "stimOn_times" not in passive_calc_config["DELAY_WINDOWS"]:
+            passive_calc_config["DELAY_WINDOWS"]["stimOn_times"] = (0.02, 0.35)
+
+        _, _, path_data_processed, _ = setup_paths(BASE_PATH)
+        passive_out_dir = path_data_processed / "passive_replay"
+        passive_out_dir.mkdir(parents=True, exist_ok=True)
+
+        df_res_passive = ana_utils.calculate_delays(
+            spikes,
+            clusters,
+            cluster_acronyms,
+            events_by_name,
+            contrasts_by_name,
+            passive_calc_config,
+            passive_out_dir,
+            pid,
+            cid_to_idx,
+        )
+
+        if df_res_passive is not None and not df_res_passive.empty:
+            if str(passive_calc_config.get("DELAY_UNITS", "s")).lower().startswith("ms"):
+                delay_cols = [
+                    ana_utils.delay_column_name("stimOn_times"),
+                    ana_utils.delay_split_column_name("stimOn_times", "odd"),
+                    ana_utils.delay_split_column_name("stimOn_times", "even"),
+                ]
+                for col in delay_cols:
+                    if col in df_res_passive.columns:
+                        df_res_passive[col] = df_res_passive[col].astype(float) * 1000.0
+
+        if df_res_passive is None or df_res_passive.empty:
+            print("Passive delay results empty; skipping passive population plot.")
+        else:
+            cfg_passive = dict(plot_config)
+            cfg_passive["PLOT_EVENT"] = "stimOn_times"
+            fig_passive = plot_population_sorted_plotly(
+                passive_session,
+                spikes,
+                clusters,
+                plot_cluster_ids,
+                plot_cluster_acronyms,
+                df_res_passive,
+                cfg_passive,
+                df_coupling=df_coupling_plot,
+                df_coupling_task=df_coupling_task_plot,
+                df_coupling_iti=df_coupling_iti_plot,
+                df_firing_rate=df_firing_rate,
+                region_acronyms=plot_regions,
+                sort_mode=passive_population_sort_mode,
+            )
+            fig_passive.update_layout(
+                title=f"Passive Replay Population PSTH Heatmaps ({PASSIVE_SOURCE}) | Align: Stim On"
+            )
+            show_fig(fig_passive)
+
+
+# %% Task replay (passive) tones/noise population analysis
+auditory_TR = globals().get("auditory_TR", None)
+
+
+def _coerce_passive_stims_table(tr_obj):
+    if tr_obj is None:
+        return None
+    base_obj = tr_obj
+    if isinstance(tr_obj, dict) and "table" in tr_obj:
+        base_obj = tr_obj["table"]
+    elif isinstance(tr_obj, (list, tuple)):
+        if len(tr_obj) == 1:
+            base_obj = tr_obj[0]
+        else:
+            base_obj = None
+            for item in tr_obj:
+                if isinstance(item, pd.DataFrame) and {"toneOn", "noiseOn"}.issubset(
+                    item.columns
+                ):
+                    base_obj = item
+                    break
+                if hasattr(item, "dtype") and getattr(item.dtype, "names", None):
+                    if {"toneOn", "noiseOn"}.issubset(set(item.dtype.names)):
+                        base_obj = item
+                        break
+            if base_obj is None and len(tr_obj) > 0:
+                base_obj = tr_obj[0]
+
+    if isinstance(base_obj, pd.DataFrame):
+        return base_obj.copy()
+
+    if isinstance(base_obj, dict):
+        try:
+            return pd.DataFrame(base_obj)
+        except Exception:
+            return None
+
+    if hasattr(base_obj, "dtype") and getattr(base_obj.dtype, "names", None):
+        try:
+            return pd.DataFrame(
+                {name: np.asarray(base_obj[name]) for name in base_obj.dtype.names}
+            )
+        except Exception:
+            return None
+
+    arr = np.asarray(base_obj)
+    if arr.ndim == 2 and arr.shape[1] >= 6:
+        columns = ["valveOn", "valveOff", "toneOn", "toneOff", "noiseOn", "noiseOff"]
+        return pd.DataFrame(arr[:, :6], columns=columns)
+    return None
+
+
+def _extract_passive_stim_times(table, column_name):
+    if table is None or not hasattr(table, "columns"):
+        return None, None, None
+    if column_name not in table.columns:
+        match = None
+        for col in table.columns:
+            if str(col).endswith(column_name):
+                match = col
+                break
+        if match is None:
+            return None, None, None
+        column_name = match
+    times_all = np.asarray(table[column_name], dtype=float)
+    valid_mask = np.isfinite(times_all)
+    return times_all[valid_mask], np.nonzero(valid_mask)[0], column_name
+
+
+passive_stims_table = _coerce_passive_stims_table(auditory_TR)
+
+if passive_stims_table is None:
+    print("Passive stims table not found in auditory_TR; skipping tone/noise analysis.")
+else:
+    stim_specs = [("Tone", "toneOn"), ("Noise", "noiseOn")]
+    for stim_label, stim_col in stim_specs:
+        stim_times, stim_trial_idx, stim_col = _extract_passive_stim_times(
+            passive_stims_table, stim_col
+        )
+        if stim_times is None or len(stim_times) == 0:
+            print(f"{stim_label}: no valid {stim_col} times found; skipping.")
+            continue
+
+        print(f"{stim_label} events: n={len(stim_times)}")
+
+        stim_trials = {stim_col: stim_times}
+        stim_session = {"trials": stim_trials}
+        events_by_name = {stim_col: stim_times}
+        contrasts_by_name = {stim_col: np.ones_like(stim_times, dtype=float)}
+        trial_idx_by_name = {stim_col: stim_trial_idx}
+
+        _, cid_to_idx = build_cluster_id_map(clusters)
+        stim_calc_config = dict(config_calc) if isinstance(config_calc, dict) else {}
+        # Force auditory-specific delay settings (override cached defaults).
+        stim_calc_config["DELAY_METHOD"] = "psth_peak"
+        stim_calc_config["DELAY_UNITS"] = plot_config.get("DELAY_UNITS", "s")
+        stim_calc_config["FULL_CONTRAST_VALUES"] = (1.0, 100.0)
+        stim_calc_config["BIN_SIZE"] = 0.005
+        stim_calc_config["BASELINE_PRE"] = 0.2
+        stim_calc_config["PSTH_WINDOW_START"] = -1.0
+        stim_calc_config["PSTH_WINDOW_END"] = 1.0
+        stim_calc_config["RESPONSIVE_WINDOW_START"] = 0.0
+        stim_calc_config["RESPONSIVE_WINDOW_END"] = 0.15
+        stim_calc_config["SMOOTH_SIGMA"] = 1
+        stim_calc_config["MIN_TRIALS"] = 20
+        stim_calc_config["MIN_TRIALS_SPLIT"] = 10
+        stim_calc_config["CALC_LABEL_MIN"] = None
+        stim_calc_config["CALC_ONLY_GOOD_UNITS"] = False
+        stim_calc_config["EVENT_NAMES"] = [stim_col]
+        if not isinstance(stim_calc_config.get("DELAY_WINDOWS"), dict):
+            stim_calc_config["DELAY_WINDOWS"] = {}
+        if stim_col not in stim_calc_config["DELAY_WINDOWS"]:
+            stim_calc_config["DELAY_WINDOWS"][stim_col] = (0.0, 0.15)
+
+        _, _, path_data_processed, _ = setup_paths(BASE_PATH)
+        passive_out_dir = path_data_processed / "passive_stims"
+        passive_out_dir.mkdir(parents=True, exist_ok=True)
+
+        df_res_stim = ana_utils.calculate_delays(
+            spikes,
+            clusters,
+            cluster_acronyms,
+            events_by_name,
+            contrasts_by_name,
+            stim_calc_config,
+            passive_out_dir,
+            pid,
+            cid_to_idx,
+            trial_idx_by_name=trial_idx_by_name,
+        )
+
+        delay_units_label = (
+            "ms"
+            if str(stim_calc_config.get("DELAY_UNITS", "s")).lower().startswith("ms")
+            else "s"
+        )
+        if df_res_stim is not None and not df_res_stim.empty:
+            if delay_units_label == "ms":
+                delay_cols = [
+                    ana_utils.delay_column_name(stim_col),
+                    ana_utils.delay_split_column_name(stim_col, "odd"),
+                    ana_utils.delay_split_column_name(stim_col, "even"),
+                ]
+                for col in delay_cols:
+                    if col in df_res_stim.columns:
+                        df_res_stim[col] = df_res_stim[col].astype(float) * 1000.0
+
+        if df_res_stim is None or df_res_stim.empty:
+            print(f"{stim_label} delay results empty; skipping population plot.")
+            continue
+
+        if stim_label == "Noise":
+            df_res_noise = df_res_stim.copy()
+            noise_event_col = stim_col
+            noise_delay_units = delay_units_label
+
+        cfg_stim = dict(plot_config)
+        cfg_stim["PLOT_EVENT"] = stim_col
+        fig_stim = plot_population_sorted_plotly(
+            stim_session,
+            spikes,
+            clusters,
+            plot_cluster_ids,
+            plot_cluster_acronyms,
+            df_res_stim,
+            cfg_stim,
+            df_coupling=df_coupling_plot,
+            df_coupling_task=df_coupling_task_plot,
+            df_coupling_iti=df_coupling_iti_plot,
+            df_firing_rate=df_firing_rate,
+            region_acronyms=plot_regions,
+            sort_mode=passive_population_sort_mode,
+        )
+        fig_stim.update_layout(
+            title=f"Passive Stim Population PSTH Heatmaps ({stim_label}) | Align: {stim_col}"
+        )
+        show_fig(fig_stim)
+
+
+# %% stPR Spont delay vs noise delay correlation (AUDp/AUDd/AUDv)
+target_regions = {"AUDp", "AUDd", "AUDv"}
+
+_corr_min_n_local = globals().get("CORR_MIN_N", 2)
+
+
+def _pearsonr_with_n_local(x, y, min_n=_corr_min_n_local):
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    mask = np.isfinite(x) & np.isfinite(y)
+    n = int(mask.sum())
+    if n < min_n:
+        return np.nan, n
+    x = x[mask]
+    y = y[mask]
+    if np.std(x) == 0 or np.std(y) == 0:
+        return np.nan, n
+    return float(np.corrcoef(x, y)[0, 1]), n
+
+
+def _spearmanr_with_n_local(x, y, min_n=_corr_min_n_local):
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    mask = np.isfinite(x) & np.isfinite(y)
+    n = int(mask.sum())
+    if n < min_n:
+        return np.nan, n
+    x = x[mask]
+    y = y[mask]
+    if "spearmanr" in globals() and spearmanr is not None:
+        res = spearmanr(x, y)
+        return float(res.correlation), n
+    x_rank = pd.Series(x).rank(method="average").to_numpy()
+    y_rank = pd.Series(y).rank(method="average").to_numpy()
+    if np.std(x_rank) == 0 or np.std(y_rank) == 0:
+        return np.nan, n
+    return float(np.corrcoef(x_rank, y_rank)[0, 1]), n
+
+
+def _add_unity_line_local(fig, x_vals, y_vals):
+    if len(x_vals) == 0 or len(y_vals) == 0:
+        return
+    min_val = float(np.nanmin([np.nanmin(x_vals), np.nanmin(y_vals)]))
+    max_val = float(np.nanmax([np.nanmax(x_vals), np.nanmax(y_vals)]))
+    if not (np.isfinite(min_val) and np.isfinite(max_val)):
+        return
+    if min_val == max_val:
+        return
+    fig.add_shape(
+        type="line",
+        x0=min_val,
+        y0=min_val,
+        x1=max_val,
+        y1=max_val,
+        line=dict(color="red", dash="dash"),
+    )
+
+
+if df_res_noise is None or df_res_noise.empty:
+    print("Noise delay results not available; skipping correlation plot.")
+elif df_coupling_plot is None or df_coupling_plot.empty:
+    print("stPR coupling table not available; skipping correlation plot.")
+else:
+    _, cid_to_idx = build_cluster_id_map(clusters)
+    if cluster_acronyms is None or len(cluster_acronyms) == 0:
+        print("Cluster acronyms not available; cannot filter regions.")
+    else:
+        cluster_acronyms_arr = np.asarray(cluster_acronyms).astype(str)
+        region_lookup = {
+            int(cid): cluster_acronyms_arr[idx]
+            for cid, idx in cid_to_idx.items()
+            if idx < len(cluster_acronyms_arr)
+        }
+
+        event_col = noise_event_col or "noiseOn"
+        delay_odd_col = ana_utils.delay_split_column_name(event_col, "odd")
+        delay_even_col = ana_utils.delay_split_column_name(event_col, "even")
+        base_cols = ["cluster_id"]
+        if delay_odd_col in df_res_noise.columns:
+            base_cols.append(delay_odd_col)
+        if delay_even_col in df_res_noise.columns:
+            base_cols.append(delay_even_col)
+        noise_df = df_res_noise[base_cols].copy()
+
+        if delay_odd_col in noise_df.columns and delay_even_col in noise_df.columns:
+            noise_df["noise_delay"] = np.nanmean(
+                noise_df[[delay_odd_col, delay_even_col]].to_numpy(dtype=float),
+                axis=1,
+            )
+        else:
+            fallback_col = ana_utils.delay_column_name(event_col)
+            if fallback_col in df_res_noise.columns:
+                noise_df["noise_delay"] = df_res_noise[fallback_col].astype(float)
+                print(
+                    "Warning: odd/even noise delay columns missing; using overall delay."
+                )
+            else:
+                print("Noise delay columns missing; skipping correlation plot.")
+                noise_df["noise_delay"] = np.nan
+
+        if str(noise_delay_units or "s").lower().startswith("ms"):
+            noise_df["noise_delay_ms"] = noise_df["noise_delay"]
+        else:
+            noise_df["noise_delay_ms"] = noise_df["noise_delay"] * 1000.0
+
+        stpr_df = df_coupling_plot[["cluster_id", "coupling_delay_ms"]].copy()
+        merged = stpr_df.merge(
+            noise_df[["cluster_id", "noise_delay_ms"]], on="cluster_id", how="inner"
+        )
+        merged["region"] = merged["cluster_id"].map(region_lookup)
+        merged = merged[merged["region"].isin(target_regions)]
+
+        x_vals = merged["coupling_delay_ms"].to_numpy(dtype=float)
+        y_vals = merged["noise_delay_ms"].to_numpy(dtype=float)
+        valid_mask = np.isfinite(x_vals) & np.isfinite(y_vals)
+        x_vals = x_vals[valid_mask]
+        y_vals = y_vals[valid_mask]
+
+        r_val, n_val = _pearsonr_with_n_local(x_vals, y_vals)
+        rho_val, n_s = _spearmanr_with_n_local(x_vals, y_vals)
+
+        def _fmt_corr(val):
+            return "NA" if not np.isfinite(val) else f"{val:.2f}"
+
+        fig_corr = go.Figure()
+        fig_corr.add_trace(
+            go.Scatter(
+                x=x_vals,
+                y=y_vals,
+                mode="markers",
+                marker=dict(size=7, opacity=0.75, color="#1f77b4"),
+                name="Units",
+            )
+        )
+        _add_unity_line_local(fig_corr, x_vals, y_vals)
+        fig_corr.update_layout(
+            title=(
+                "Spont stPR Delay vs Noise Delay (AUDp/AUDd/AUDv) | "
+                f"Pearson r={_fmt_corr(r_val)} (n={n_val}) | "
+                f"Spearman rho={_fmt_corr(rho_val)} (n={n_s})"
+            ),
+            xaxis_title="stPR Spont Delay (ms)",
+            yaxis_title="Noise Delay (ms)",
+            width=800,
+            height=600,
+            margin=dict(l=70, r=40, t=90, b=70),
+            template=plot_config["PLOTLY_TEMPLATE"],
+        )
+        show_fig(fig_corr)
