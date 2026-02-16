@@ -413,31 +413,88 @@ def load_task_replay_datasets(eid_val, one_local, one_remote=None, allow_remote=
     return visual_tr, auditory_tr
 
 
-def build_passive_event_times(visual_tr=None, auditory_tr=None):
-    events = {}
-
+def build_passive_visual_contrast_events(
+    visual_tr=None,
+    include_zero_contrast=False,
+    preferred_contrasts=(1.0, 0.5, 0.25, 0.125, 0.0625, 0.0),
+    round_decimals=6,
+):
+    """Return passive visual onset times grouped by contrast."""
     visual_times, visual_contrasts = extract_passive_times_and_contrast(visual_tr)
-    if visual_times is not None and len(visual_times) > 0:
-        times_arr = np.asarray(visual_times, dtype=float)
-        if visual_contrasts is not None:
-            contrasts_arr = np.asarray(visual_contrasts, dtype=float)
-            valid_mask = (
-                np.isfinite(times_arr)
-                & np.isfinite(contrasts_arr)
-                & (contrasts_arr > 0)
-            )
-            times_arr = times_arr[valid_mask]
-        else:
-            times_arr = times_arr[np.isfinite(times_arr)]
-        if len(times_arr) > 0:
-            events["passive_visual"] = times_arr
+    if visual_times is None or visual_contrasts is None:
+        return {}
 
+    times_arr = np.asarray(visual_times, dtype=float)
+    contrasts_arr = np.asarray(visual_contrasts, dtype=float)
+    valid_mask = np.isfinite(times_arr) & np.isfinite(contrasts_arr)
+    if not include_zero_contrast:
+        valid_mask &= contrasts_arr > 0
+    times_arr = times_arr[valid_mask]
+    contrasts_arr = contrasts_arr[valid_mask]
+    if len(times_arr) == 0:
+        return {}
+
+    if round_decimals is not None:
+        contrasts_arr = np.round(contrasts_arr, int(round_decimals))
+        tol = 10.0 ** (-int(round_decimals))
+    else:
+        tol = 1e-9
+
+    unique_contrasts = np.unique(contrasts_arr.astype(float))
+    unique_contrasts = np.asarray(unique_contrasts, dtype=float)
+    ordered_contrasts = []
+    for preferred in preferred_contrasts or []:
+        if np.any(np.isclose(unique_contrasts, float(preferred), atol=tol)):
+            ordered_contrasts.append(float(preferred))
+    for contrast in np.sort(unique_contrasts)[::-1]:
+        if not np.any(np.isclose(contrast, np.asarray(ordered_contrasts), atol=tol)):
+            ordered_contrasts.append(float(contrast))
+
+    events_by_contrast = {}
+    for contrast in ordered_contrasts:
+        mask = np.isclose(contrasts_arr, contrast, atol=tol)
+        contrast_times = np.asarray(times_arr[mask], dtype=float)
+        if len(contrast_times) == 0:
+            continue
+        events_by_contrast[float(contrast)] = np.sort(contrast_times)
+    return events_by_contrast
+
+
+def build_passive_auditory_event_times(auditory_tr=None):
+    """Return passive auditory onset times for valve/tone/noise."""
+    events = {}
     passive_table = coerce_passive_stims_table(auditory_tr)
-    for stim_key, stim_col in (("tone", "toneOn"), ("noise", "noiseOn")):
+    for stim_key, stim_col in (
+        ("valve", "valveOn"),
+        ("tone", "toneOn"),
+        ("noise", "noiseOn"),
+    ):
         stim_times, _stim_idx, _stim_col = extract_passive_stim_times(
             passive_table, stim_col
         )
         if stim_times is not None and len(stim_times) > 0:
-            events[f"passive_{stim_key}"] = np.asarray(stim_times, dtype=float)
+            events[stim_key] = np.sort(np.asarray(stim_times, dtype=float))
+    return events
+
+
+def build_passive_event_times(visual_tr=None, auditory_tr=None):
+    events = {}
+
+    visual_by_contrast = build_passive_visual_contrast_events(
+        visual_tr, include_zero_contrast=False
+    )
+    if visual_by_contrast:
+        visual_times = np.concatenate(
+            [np.asarray(v, dtype=float) for v in visual_by_contrast.values()]
+        )
+        events["passive_visual"] = np.sort(visual_times)
+
+    auditory_events = build_passive_auditory_event_times(auditory_tr)
+    if "valve" in auditory_events:
+        events["passive_valve"] = np.asarray(auditory_events["valve"], dtype=float)
+    if "tone" in auditory_events:
+        events["passive_tone"] = np.asarray(auditory_events["tone"], dtype=float)
+    if "noise" in auditory_events:
+        events["passive_noise"] = np.asarray(auditory_events["noise"], dtype=float)
 
     return events

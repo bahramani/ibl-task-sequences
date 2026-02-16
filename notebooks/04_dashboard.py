@@ -30,6 +30,8 @@ from utils.plotting_plotly import (
     plot_population_coupling_heatmap_plotly,
     plot_single_neuron_plotly,
     plot_single_neuron_conditioned_event_plotly,
+    plot_single_neuron_passive_visual_plotly,
+    plot_single_neuron_passive_auditory_plotly,
     plot_stpr_curve_halves_plotly,
 )
 import utils.plotting_plotly as plotting_utils
@@ -40,6 +42,8 @@ from utils.io import (
     build_cluster_id_map,
     load_task_replay_datasets,
     build_passive_event_times,
+    build_passive_visual_contrast_events,
+    build_passive_auditory_event_times,
 )
 
 try:
@@ -193,9 +197,13 @@ def _check_passive_rfmap(eid_val, allow_remote=True):
 
 
 @st.cache_data(show_spinner=False)
-def _load_passive_event_times(eid_val, allow_remote=True):
+def _load_passive_replay_data(eid_val, allow_remote=True):
     if eid_val is None:
-        return {}
+        return {
+            "event_times": {},
+            "visual_by_contrast": {},
+            "auditory_by_type": {},
+        }
     one_local = _get_one("local")
     one_remote = _get_one("remote") if allow_remote else None
     visual_tr, auditory_tr = load_task_replay_datasets(
@@ -204,7 +212,21 @@ def _load_passive_event_times(eid_val, allow_remote=True):
         one_remote,
         allow_remote=allow_remote,
     )
-    return build_passive_event_times(visual_tr, auditory_tr)
+    return {
+        "event_times": build_passive_event_times(visual_tr, auditory_tr),
+        "visual_by_contrast": build_passive_visual_contrast_events(visual_tr),
+        "auditory_by_type": build_passive_auditory_event_times(auditory_tr),
+    }
+
+
+@st.cache_data(show_spinner=False)
+def _load_passive_event_times(eid_val, allow_remote=True):
+    if eid_val is None:
+        return {}
+    passive_data = _load_passive_replay_data(eid_val, allow_remote=allow_remote)
+    if not isinstance(passive_data, dict):
+        return {}
+    return passive_data.get("event_times", {})
 
 
 def _get_label_array(clusters, cluster_ids=None):
@@ -1061,7 +1083,7 @@ plot_config["PSTH_WINDOW_START"] = config_calc.get("PSTH_WINDOW_START", -0.2)
 plot_config["PSTH_WINDOW_END"] = config_calc.get("PSTH_WINDOW_END", 0.35)
 plot_config["TRIAL_RASTER_USE_EVENT_WINDOW"] = True
 plot_config["SINGLE_NEURON_SMOOTH_SIGMA"] = 0.5
-plot_config["SINGLE_NEURON_BIN_SIZE"] = 0.03
+plot_config["SINGLE_NEURON_BIN_SIZE"] = 0.01
 plot_config["DELAY_UNITS"] = config_calc.get("DELAY_UNITS", "s")
 plotly_dark_mode = st.toggle("Plotly dark mode", value=False)
 plot_config["PLOTLY_TEMPLATE"] = "plotly_dark" if plotly_dark_mode else "plotly_white"
@@ -1234,7 +1256,7 @@ general_sort = st.selectbox(
 show_passive_events = False
 if passive_events_available:
     show_passive_events = st.checkbox(
-        "Show passive replay events (visual/tone/noise)",
+        "Show passive replay events (visual/valve/tone/noise)",
         value=True,
         key="general_show_passive_events",
     )
@@ -1245,6 +1267,7 @@ else:
     passive_event_times = {}
     passive_event_styles = {
         "passive_visual": ("Passive Visual", "#17becf", "dot"),
+        "passive_valve": ("Passive Valve", "#17becf", "solid"),
         "passive_tone": ("Passive Tone", "#bcbd22", "dash"),
         "passive_noise": ("Passive Noise", "#8c564b", "dashdot"),
     }
@@ -2060,6 +2083,51 @@ else:
         title="Feedback Response",
     )
     st.plotly_chart(fig_feedback, width="stretch")
+
+    passive_replay = {
+        "visual_by_contrast": {},
+        "auditory_by_type": {},
+    }
+    if passive_events_available and eid is not None:
+        passive_replay = _load_passive_replay_data(eid, allow_remote=allow_remote)
+        if not isinstance(passive_replay, dict):
+            passive_replay = {"visual_by_contrast": {}, "auditory_by_type": {}}
+
+    st.markdown("**Passive Visual (By Contrast)**")
+    passive_visual_events = passive_replay.get("visual_by_contrast", {})
+    if passive_visual_events:
+        fig_passive_visual = plot_single_neuron_passive_visual_plotly(
+            spikes,
+            cluster_ids,
+            cluster_acronyms,
+            plot_config,
+            selected_cluster_id,
+            passive_visual_events,
+            title="Passive Visual Response",
+        )
+        st.plotly_chart(fig_passive_visual, width="stretch")
+    elif task_replay_visual is False:
+        st.info("Passive visual replay is not available for this PID.")
+    else:
+        st.info("Passive visual replay events are unavailable for this PID.")
+
+    st.markdown("**Passive Auditory (Valve vs Tone vs Noise)**")
+    passive_auditory_events = passive_replay.get("auditory_by_type", {})
+    if passive_auditory_events:
+        fig_passive_auditory = plot_single_neuron_passive_auditory_plotly(
+            spikes,
+            cluster_ids,
+            cluster_acronyms,
+            plot_config,
+            selected_cluster_id,
+            passive_auditory_events,
+            title="Passive Auditory Response (Valve vs Tone vs Noise)",
+        )
+        st.plotly_chart(fig_passive_auditory, width="stretch")
+    elif task_replay_auditory is False:
+        st.info("Passive auditory replay is not available for this PID.")
+    else:
+        st.info("Passive auditory replay events are unavailable for this PID.")
 
     col_task, col_spont, col_iti = st.columns(3)
     with col_task:
