@@ -1131,3 +1131,110 @@ else:
             st.info("No data for Spearman plot.")
         else:
             st.plotly_chart(fig_s, width="stretch")
+
+st.subheader("Δ stPR Strength (Task - Spont): Mean vs Variance")
+spec_spont_strength = next(
+    (spec for spec in CORR_VARIABLES if spec["name"] == "stPR Strength (Spont)"),
+    None,
+)
+spec_task_strength = next(
+    (spec for spec in CORR_VARIABLES if spec["name"] == "stPR Strength (Task)"),
+    None,
+)
+if spec_spont_strength is None or spec_task_strength is None:
+    st.warning("stPR strength specs missing.")
+else:
+    df_spont_src = data_for_corr.get(spec_spont_strength["df"])
+    df_task_src = data_for_corr.get(spec_task_strength["df"])
+    if df_spont_src is None or df_task_src is None:
+        st.warning("stPR strength tables missing.")
+    else:
+        region_lookup_all = neurons_df_calc[["pid", "cluster_id", "region"]]
+        region_lookup_spont = _filter_region_lookup_for_spec(
+            region_lookup_all, spec_spont_strength, spont_pids
+        )
+        df_spont = _build_variable_table(
+            df_spont_src, spec_spont_strength, region_lookup_spont
+        )
+        df_task = _build_variable_table(df_task_src, spec_task_strength, region_lookup_all)
+        if df_spont is None or df_task is None or df_spont.empty or df_task.empty:
+            st.warning("stPR strength data not available after filtering.")
+        else:
+            df_merge = df_task.merge(
+                df_spont,
+                on=["pid", "cluster_id", "region"],
+                suffixes=("_task", "_spont"),
+            )
+            if df_merge.empty:
+                st.warning("No overlapping neurons between task and spont stPR tables.")
+            else:
+                df_merge["diff"] = df_merge["mean_task"] - df_merge["mean_spont"]
+                if avg_by_pid_toggle:
+                    df_pid = (
+                        df_merge.groupby(["region", "pid"])["diff"]
+                        .agg(mean="mean", var="var", n="count")
+                        .reset_index()
+                    )
+                    region_stats = (
+                        df_pid.groupby("region")
+                        .agg(
+                            mean_diff=("mean", "mean"),
+                            var_diff=("var", "mean"),
+                            n_pids=("pid", "nunique"),
+                            n_neurons=("n", "sum"),
+                        )
+                        .reset_index()
+                    )
+                else:
+                    region_stats = (
+                        df_merge.groupby("region")["diff"]
+                        .agg(mean_diff="mean", var_diff="var", n_neurons="count")
+                        .reset_index()
+                    )
+                    region_stats["n_pids"] = (
+                        df_merge.groupby("region")["pid"].nunique().to_numpy()
+                    )
+
+                region_stats = region_stats.replace([np.inf, -np.inf], np.nan)
+                region_stats = region_stats.dropna(subset=["mean_diff", "var_diff"])
+                if region_stats.empty:
+                    st.info("No finite region statistics available.")
+                else:
+                    region_colors = _build_region_colors(region_stats["region"])
+                    fig = go.Figure()
+                    for _, row in region_stats.sort_values("region").iterrows():
+                        region = row["region"]
+                        color = region_colors.get(region)
+                        marker = dict(size=8, color=color) if color else dict(size=8)
+                        fig.add_trace(
+                            go.Scatter(
+                                x=[row["mean_diff"]],
+                                y=[row["var_diff"]],
+                                mode="markers",
+                                name=region,
+                                marker=marker,
+                                hovertemplate=(
+                                    f"Region: {region}<br>"
+                                    f"mean Δ={row['mean_diff']:.3f}<br>"
+                                    f"var Δ={row['var_diff']:.3f}<br>"
+                                    f"n_neurons={int(row['n_neurons'])}<br>"
+                                    f"n_pids={int(row['n_pids'])}<extra></extra>"
+                                ),
+                                showlegend=False,
+                            )
+                        )
+
+                    avg_text = " (avg across PIDs)" if avg_by_pid_toggle else ""
+                    fig.update_layout(
+                        title=(
+                            "Region-wise Δ stPR strength (Task - Spont) "
+                            f"{avg_text} | {label_filter_text}"
+                        ),
+                        xaxis_title="Mean Δ stPR strength (Task - Spont)",
+                        yaxis_title="Variance of Δ stPR strength",
+                        template=PLOTLY_TEMPLATE,
+                        margin=dict(l=70, r=40, t=80, b=60),
+                        height=520,
+                        width=900,
+                    )
+                    st.plotly_chart(fig, width="stretch")

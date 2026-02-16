@@ -1,5 +1,6 @@
 # %% Imports
 from pathlib import Path
+import fnmatch
 import pickle
 import sys
 
@@ -14,6 +15,7 @@ except Exception:  # pragma: no cover
 import plotly.io as pio
 import plotly.express as px
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 try:
     from scipy.stats import spearmanr
 except Exception:  # pragma: no cover
@@ -40,7 +42,14 @@ from utils.plotting_plotly import (  # noqa: E402
 )
 import utils.plotting_plotly as plotting_utils
 import utils.analysis as ana_utils
-from utils.io import setup_paths, init_one, load_session_data, build_cluster_id_map
+from utils.io import (
+    setup_paths,
+    init_one,
+    load_session_data,
+    build_cluster_id_map,
+    load_task_replay_datasets,
+    build_passive_event_times,
+)
 
 
 def _in_notebook():
@@ -107,10 +116,21 @@ CACHE_DIR = BASE_PATH / "data" / "dashboard_cache"
 LOAD_RAW_DATA = True
 LOAD_RAW_WHEEL = False
 LOAD_RAW_POSE = False
+LOAD_RAW_MOTION_ENERGY = True
+LOAD_RAW_PUPIL = True
+MOTION_ENERGY_VIEWS = ("left", "right")
 ALLOW_REMOTE_METADATA = True
 
 
-def _load_raw_session(pid, load_wheel=False, load_pose=False, mode="local"):
+def _load_raw_session(
+    pid,
+    load_wheel=False,
+    load_pose=False,
+    load_motion_energy=False,
+    load_pupil=False,
+    motion_energy_views=None,
+    mode="local",
+):
     _path_data, _path_fig, _path_data_processed, ibl_cache = setup_paths(BASE_PATH)
     one = init_one(ibl_cache, mode="remote")
     ssl, spikes, clusters, sl = load_session_data(
@@ -118,6 +138,9 @@ def _load_raw_session(pid, load_wheel=False, load_pose=False, mode="local"):
         one,
         load_wheel=load_wheel,
         load_pose=load_pose,
+        load_motion_energy=load_motion_energy,
+        load_pupil=load_pupil,
+        motion_energy_views=motion_energy_views,
     )
     return spikes, clusters, sl, ssl
 
@@ -164,6 +187,14 @@ def _as_array(obj, key):
     if isinstance(obj, dict) and key in obj:
         return np.asarray(obj[key])
     return None
+
+
+def _get_session_attr(session_obj, name):
+    if session_obj is None:
+        return None
+    if isinstance(session_obj, dict):
+        return session_obj.get(name)
+    return getattr(session_obj, name, None)
 
 
 def _get_label_array(clusters, cluster_ids=None):
@@ -488,6 +519,294 @@ def describe_clusters(clusters):
         print(f"clusters.metrics: shape={metrics.shape}, columns={list(metrics.columns)[:12]}")
 
 
+def _infer_time_col(df):
+    for col in ("times", "time", "timestamp", "timestamps"):
+        if col in df.columns:
+            return col
+    return None
+
+
+def _numeric_cols(df, exclude=None):
+    exclude_set = set(exclude or [])
+    cols = []
+    for col in df.columns:
+        if col in exclude_set:
+            continue
+        if pd.api.types.is_numeric_dtype(df[col]):
+            cols.append(col)
+    return cols
+
+
+def _downsample_df(df, max_points=5000):
+    if max_points is None or len(df) <= max_points:
+        return df
+    step = int(np.ceil(len(df) / max_points))
+    return df.iloc[::step].reset_index(drop=True)
+
+
+def _plot_df_signal(df, title, max_points=5000):
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        print(f"{title}: empty or not a DataFrame")
+        return None
+    time_col = _infer_time_col(df)
+    value_cols = _numeric_cols(df, exclude=[time_col] if time_col else None)
+    if not value_cols:
+        print(f"{title}: no numeric columns to plot")
+        return None
+    cols = ([time_col] if time_col else []) + value_cols
+    df_plot = _downsample_df(df[cols].copy(), max_points=max_points)
+    x_vals = df_plot[time_col] if time_col else np.arange(len(df_plot))
+    fig = go.Figure()
+    for col in value_cols:
+        fig.add_trace(go.Scatter(x=x_vals, y=df_plot[col], mode="lines", name=col))
+    fig.update_layout(
+        title=title,
+        xaxis_title="Time (s)" if time_col else "Sample",
+        yaxis_title="Value",
+        width=900,
+        height=350,
+    )
+    return fig
+
+
+def _extract_motion_energy_series(df, max_points=5000):
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return None, None, None
+    time_col = _infer_time_col(df)
+    value_col = None
+    for candidate in ("whiskerMotionEnergy", "motionEnergy", "energy"):
+        if candidate in df.columns:
+            value_col = candidate
+            break
+    if value_col is None:
+        numeric_cols = _numeric_cols(df, exclude=[time_col] if time_col else None)
+        if numeric_cols:
+            value_col = numeric_cols[0]
+    if value_col is None:
+        return None, None, None
+    cols = [value_col] if time_col is None else [time_col, value_col]
+    df_plot = _downsample_df(df[cols].copy(), max_points=max_points)
+    x_vals = df_plot[time_col] if time_col else np.arange(len(df_plot))
+    y_vals = df_plot[value_col]
+    return x_vals, y_vals, value_col
+
+
+def _plot_motion_energy_lr(motion_energy, max_points=5000):
+    if not isinstance(motion_energy, dict):
+        print("motion_energy not available to plot left/right cameras.")
+        return None
+    left_df = motion_energy.get("leftCamera")
+    right_df = motion_energy.get("rightCamera")
+    x_left, y_left, col_left = _extract_motion_energy_series(left_df, max_points=max_points)
+    x_right, y_right, col_right = _extract_motion_energy_series(
+        right_df, max_points=max_points
+    )
+    if x_left is None or x_right is None:
+        print("Motion energy columns not found for one or both cameras.")
+        return None
+    fig = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.08,
+        subplot_titles=(
+            f"Left camera ({col_left})",
+            f"Right camera ({col_right})",
+        ),
+    )
+    fig.add_trace(go.Scatter(x=x_left, y=y_left, mode="lines", name="Left"), row=1, col=1)
+    fig.add_trace(
+        go.Scatter(x=x_right, y=y_right, mode="lines", name="Right"), row=2, col=1
+    )
+    fig.update_yaxes(title_text="Motion energy", row=1, col=1)
+    fig.update_yaxes(title_text="Motion energy", row=2, col=1)
+    fig.update_xaxes(title_text="Time (s)", row=2, col=1)
+    fig.update_layout(
+        title="Motion energy (left vs right cameras)",
+        width=900,
+        height=600,
+        showlegend=False,
+    )
+    return fig
+
+
+def _preview_motion_energy(motion_energy, max_points=5000):
+    if motion_energy is None:
+        print("motion_energy: None")
+        return
+    if isinstance(motion_energy, pd.DataFrame):
+        print(
+            f"motion_energy: DataFrame shape={motion_energy.shape}, "
+            f"columns={list(motion_energy.columns)}"
+        )
+        display(motion_energy.head(5))
+        fig = _plot_df_signal(motion_energy, "Motion energy", max_points=max_points)
+        if fig is not None:
+            show_fig(fig)
+        return
+    if isinstance(motion_energy, dict):
+        print(f"motion_energy keys: {list(motion_energy.keys())}")
+        for view, df in motion_energy.items():
+            if df is None:
+                print(f"motion_energy[{view}]: None")
+                continue
+            if not isinstance(df, pd.DataFrame):
+                print(f"motion_energy[{view}]: {type(df).__name__}")
+                continue
+            print(
+                f"motion_energy[{view}]: shape={df.shape}, columns={list(df.columns)}"
+            )
+            if "times" in df.columns:
+                print(f"{view} times head: {df['times'].head(5).to_numpy()}")
+            if "whiskerMotionEnergy" in df.columns:
+                print(
+                    f"{view} whiskerMotionEnergy head: "
+                    f"{df['whiskerMotionEnergy'].head(5).to_numpy()}"
+                )
+            display(df.head(5))
+            fig = _plot_df_signal(df, f"Motion energy ({view})", max_points=max_points)
+            if fig is not None:
+                show_fig(fig)
+        return
+    print(f"motion_energy: {type(motion_energy).__name__}")
+
+
+def _preview_pupil(pupil, max_points=5000):
+    if pupil is None:
+        print("pupil: None")
+        return
+    if isinstance(pupil, pd.DataFrame):
+        print(f"pupil: DataFrame shape={pupil.shape}, columns={list(pupil.columns)}")
+        display(pupil.head(5))
+        fig = _plot_df_signal(pupil, "Pupil", max_points=max_points)
+        if fig is not None:
+            show_fig(fig)
+        return
+    if isinstance(pupil, dict):
+        print(f"pupil keys: {list(pupil.keys())}")
+        for key, df in pupil.items():
+            if df is None:
+                print(f"pupil[{key}]: None")
+                continue
+            if not isinstance(df, pd.DataFrame):
+                print(f"pupil[{key}]: {type(df).__name__}")
+                continue
+            print(f"pupil[{key}]: shape={df.shape}, columns={list(df.columns)}")
+            display(df.head(5))
+            fig = _plot_df_signal(df, f"Pupil ({key})", max_points=max_points)
+            if fig is not None:
+                show_fig(fig)
+        return
+    print(f"pupil: {type(pupil).__name__}")
+
+
+def _availability_label(flag):
+    if flag is None:
+        return "Unknown"
+    return "Yes" if flag else "No"
+
+
+def _merge_availability(*flags):
+    if any(flag is True for flag in flags):
+        return True
+    if any(flag is None for flag in flags):
+        return None
+    return False
+
+
+def _session_has_data(session_obj, name):
+    if session_obj is None:
+        return None
+    obj = _get_session_attr(session_obj, name)
+    if obj is None:
+        return False
+    if isinstance(obj, pd.DataFrame):
+        return not obj.empty
+    if isinstance(obj, dict):
+        return len(obj) > 0
+    try:
+        return len(obj) > 0
+    except TypeError:
+        return True
+
+
+def _normalize_dataset_list(dsets):
+    if dsets is None:
+        return None
+    if isinstance(dsets, pd.DataFrame):
+        cols = [
+            col
+            for col in (
+                "rel_path",
+                "path",
+                "file_name",
+                "filename",
+                "dataset",
+                "name",
+                "dataset_type",
+            )
+            if col in dsets.columns
+        ]
+        if cols:
+            return dsets[cols].astype(str).agg(" ".join, axis=1).tolist()
+        return dsets.astype(str).agg(" ".join, axis=1).tolist()
+    if isinstance(dsets, (list, tuple, np.ndarray, pd.Index)):
+        return [str(item) for item in dsets]
+    return [str(dsets)]
+
+
+def _list_datasets_for_eid(eid_val, allow_remote=True):
+    if eid_val is None:
+        return None
+    _path_data, _path_fig, _path_data_processed, ibl_cache = setup_paths(BASE_PATH)
+    try:
+        one_local = init_one(ibl_cache, mode="local")
+        dsets = one_local.list_datasets(eid_val, details=True)
+        return _normalize_dataset_list(dsets)
+    except Exception:
+        if not allow_remote:
+            return None
+        try:
+            one_remote = init_one(ibl_cache, mode="remote")
+            dsets = one_remote.list_datasets(eid_val, details=True)
+            return _normalize_dataset_list(dsets)
+        except Exception:
+            return None
+
+
+def _has_dataset_pattern(dsets, patterns):
+    if dsets is None:
+        return None
+    for pattern in patterns:
+        for item in dsets:
+            if fnmatch.fnmatch(item, pattern) or pattern.strip("*") in item:
+                return True
+    return False
+
+
+def _check_passive_rfmap(eid_val, allow_remote=True):
+    if eid_val is None:
+        return None
+    try:
+        from brainbox.io.one import load_passive_rfmap
+    except Exception:
+        return None
+    _path_data, _path_fig, _path_data_processed, ibl_cache = setup_paths(BASE_PATH)
+    try:
+        one_local = init_one(ibl_cache, mode="local")
+        rfmap = load_passive_rfmap(eid_val, one=one_local)
+        return rfmap is not None
+    except Exception:
+        if not allow_remote:
+            return False
+        try:
+            one_remote = init_one(ibl_cache, mode="remote")
+            rfmap = load_passive_rfmap(eid_val, one=one_remote)
+            return rfmap is not None
+        except Exception:
+            return False
+
+
 def _get_plot_config(data, plot_label_min):
     config_plot = dict(data.get("config_plot", {}))
     config_calc = data.get("config_calc", {})
@@ -561,8 +880,9 @@ if not pid_list:
 
 # Option A: Set PID directly
 
-# PID = "27bac116-ea57-4512-ad35-714a62d259cd" # "c9664185-d3fd-4e0e-89cf-77c402038938"
-PID = "b2ea68e2-c732-4d17-8166-1a8595fff225" # AUD
+# PID = "c9664185-d3fd-4e0e-89cf-77c402038938"
+# PID = "b2ea68e2-c732-4d17-8166-1a8595fff225" # AUD
+PID = "27bac116-ea57-4512-ad35-714a62d259cd" # VISp with passive
 
 if PID is None:
     pid = choose_pid(pid_list, default_index=0)
@@ -588,7 +908,13 @@ session = data.get("session")
 if LOAD_RAW_DATA or spikes is None or clusters is None or session is None:
     try:
         raw_spikes, raw_clusters, raw_session, _ssl = _load_raw_session(
-            pid, load_wheel=LOAD_RAW_WHEEL, load_pose=LOAD_RAW_POSE, mode="local"
+            pid,
+            load_wheel=LOAD_RAW_WHEEL,
+            load_pose=LOAD_RAW_POSE,
+            load_motion_energy=LOAD_RAW_MOTION_ENERGY,
+            load_pupil=LOAD_RAW_PUPIL,
+            motion_energy_views=MOTION_ENERGY_VIEWS,
+            mode="local",
         )
         raw_source = "local"
     except Exception as exc:
@@ -596,7 +922,13 @@ if LOAD_RAW_DATA or spikes is None or clusters is None or session is None:
         if ALLOW_REMOTE_METADATA:
             try:
                 raw_spikes, raw_clusters, raw_session, _ssl = _load_raw_session(
-                    pid, load_wheel=LOAD_RAW_WHEEL, load_pose=LOAD_RAW_POSE, mode="remote"
+                    pid,
+                    load_wheel=LOAD_RAW_WHEEL,
+                    load_pose=LOAD_RAW_POSE,
+                    load_motion_energy=LOAD_RAW_MOTION_ENERGY,
+                    load_pupil=LOAD_RAW_PUPIL,
+                    motion_energy_views=MOTION_ENERGY_VIEWS,
+                    mode="remote",
                 )
                 raw_source = "remote"
             except Exception as exc_remote:
@@ -612,6 +944,21 @@ if raw_clusters is not None:
     data["clusters"] = clusters
 if raw_session is not None:
     data["session"] = session
+
+motion_energy = data.get("motion_energy")
+pupil = data.get("pupil")
+if motion_energy is None:
+    motion_energy = _get_session_attr(raw_session, "motion_energy")
+    if motion_energy is None:
+        motion_energy = _get_session_attr(session, "motion_energy")
+if pupil is None:
+    pupil = _get_session_attr(raw_session, "pupil")
+    if pupil is None:
+        pupil = _get_session_attr(session, "pupil")
+if motion_energy is not None:
+    data["motion_energy"] = motion_energy
+if pupil is not None:
+    data["pupil"] = pupil
 
 if (spikes is None or clusters is None or session is None) and raw_error is not None:
     msg = (
@@ -651,6 +998,8 @@ print(f"Cache keys ({len(cache_keys)}): {cache_keys}")
 overview = pd.concat(
     [
         _df_overview(data.get("trials"), "trials"),
+        _df_overview(data.get("motion_energy"), "motion_energy"),
+        _df_overview(data.get("pupil"), "pupil"),
         _df_overview(data.get("df_res"), "df_res"),
         _df_overview(data.get("df_coupling"), "df_coupling"),
         _df_overview(data.get("df_coupling_task"), "df_coupling_task"),
@@ -666,6 +1015,59 @@ describe_spikes(data.get("spikes"))
 describe_clusters(data.get("clusters"))
 
 meta = data.get("meta", {})
+eid = meta.get("eid") if isinstance(meta, dict) else None
+if eid is None:
+    eid = data.get("eid")
+
+dsets = _list_datasets_for_eid(eid, allow_remote=ALLOW_REMOTE_METADATA)
+wheel_available = _merge_availability(
+    _session_has_data(session, "wheel"),
+    _has_dataset_pattern(dsets, ["*wheel*", "*_ibl_wheel*"]),
+)
+pose_available = _merge_availability(
+    _session_has_data(session, "pose"),
+    _has_dataset_pattern(
+        dsets,
+        [
+            "*camera.dlc*",
+            "*Camera.dlc*",
+            "*Camera*dlc*",
+            "*camera*dlc*",
+            "*dlc.pqt*",
+        ],
+    ),
+)
+motion_energy_available = _merge_availability(
+    _session_has_data(session, "motion_energy"),
+    _has_dataset_pattern(dsets, ["*motionEnergy*", "*motion_energy*", "*motionenergy*"]),
+)
+pupil_available = _merge_availability(
+    _session_has_data(session, "pupil"),
+    _has_dataset_pattern(
+        dsets, ["*pupil*", "*Pupil*", "*pupilDiameter*", "*pupil_diameter*"]
+    ),
+)
+task_replay_visual = _has_dataset_pattern(dsets, ["*passiveGabor*"])
+task_replay_auditory = _has_dataset_pattern(dsets, ["*passiveStims*"])
+rfmap_available = _check_passive_rfmap(eid, allow_remote=ALLOW_REMOTE_METADATA)
+passive_event_times = {}
+visual_TR = None
+auditory_TR = None
+passive_events_available = (task_replay_visual is not False) or (
+    task_replay_auditory is not False
+)
+if eid is not None and passive_events_available:
+    _path_data, _path_fig, _path_data_processed, ibl_cache = setup_paths(BASE_PATH)
+    one_local = init_one(ibl_cache, mode="local")
+    one_remote = init_one(ibl_cache, mode="remote") if ALLOW_REMOTE_METADATA else None
+    visual_TR, auditory_TR = load_task_replay_datasets(
+        eid,
+        one_local,
+        one_remote,
+        allow_remote=ALLOW_REMOTE_METADATA,
+    )
+    passive_event_times = build_passive_event_times(visual_TR, auditory_TR)
+
 info = {
     "Lab": meta.get("lab"),
     "Num trials": meta.get("num_trials"),
@@ -677,6 +1079,13 @@ info = {
     "Spont length": _format_seconds(meta.get("spont_length_s")),
     "Subject": meta.get("subject"),
     "Spont interval": _spont_interval_text(meta.get("spont_interval")),
+    "Wheel data": _availability_label(wheel_available),
+    "Pose data": _availability_label(pose_available),
+    "Motion energy data": _availability_label(motion_energy_available),
+    "Pupil data": _availability_label(pupil_available),
+    "Task replay (visual)": _availability_label(task_replay_visual),
+    "Task replay (auditory)": _availability_label(task_replay_auditory),
+    "Passive RF map": _availability_label(rfmap_available),
 }
 info_df = pd.DataFrame(info, index=[0]).T
 info_df.columns = ["Value"]
@@ -691,6 +1100,39 @@ summarize_df(data.get("df_coupling_task"), "df_coupling_task")
 summarize_df(data.get("df_coupling_task_tf"), "df_coupling_task_tf")
 summarize_df(data.get("df_coupling_iti"), "df_coupling_iti")
 summarize_df(data.get("df_comparison"), "df_comparison")
+
+
+# %% Motion energy left/right quick access
+motion_energy = data.get("motion_energy")
+if not isinstance(motion_energy, dict):
+    print("motion_energy not available to extract left/right camera tables.")
+else:
+    a = motion_energy.get("leftCamera")
+    b = motion_energy.get("rightCamera")
+
+    if isinstance(a, pd.DataFrame):
+        print(f"leftCamera columns: {list(a.columns)}")
+        if "times" in a.columns:
+            display(a["times"].head(5))
+        if "whiskerMotionEnergy" in a.columns:
+            display(a["whiskerMotionEnergy"].head(5))
+    else:
+        print(f"leftCamera: {type(a).__name__}")
+
+    if isinstance(b, pd.DataFrame):
+        print(f"rightCamera columns: {list(b.columns)}")
+        if "times" in b.columns:
+            display(b["times"].head(5))
+        if "whiskerMotionEnergy" in b.columns:
+            display(b["whiskerMotionEnergy"].head(5))
+    else:
+        print(f"rightCamera: {type(b).__name__}")
+
+
+# %% Motion energy left/right plot
+fig_motion_lr = _plot_motion_energy_lr(data.get("motion_energy"))
+if fig_motion_lr is not None:
+    show_fig(fig_motion_lr)
 
 
 # %% Region counts (all vs good)
@@ -895,6 +1337,11 @@ if times is not None and len(times) > 0:
     t_start = float(min_time)
     t_end = float(min(min_time + 10.0, max_time))
 
+    passive_event_styles = {
+        "passive_visual": ("Passive Visual", "#17becf", "dot"),
+        "passive_tone": ("Passive Tone", "#bcbd22", "dash"),
+        "passive_noise": ("Passive Noise", "#8c564b", "dashdot"),
+    }
     fig_general = plot_time_window_raster_plotly(
         spikes,
         clusters,
@@ -914,6 +1361,8 @@ if times is not None and len(times) > 0:
         pupil_features=data.get("pupil_features"),
         pupil_times=data.get("pupil_times"),
         region_colors=region_colors,
+        extra_event_times=passive_event_times or None,
+        extra_event_styles=passive_event_styles,
     )
     show_fig(fig_general)
 else:
@@ -2145,25 +2594,15 @@ if eid is None:
     print("EID not found in cache metadata. Cannot load task replay datasets.")
 else:
     _path_data, _path_fig, _path_data_processed, ibl_cache = setup_paths(BASE_PATH)
-    one = init_one(ibl_cache, mode="local")
-
-    def _load_tr_dataset(eid_val, pattern, label):
-        try:
-            return one.load_dataset(eid_val, pattern, collection="alf")
-        except Exception as exc:
-            if ALLOW_REMOTE_METADATA:
-                try:
-                    one_remote = init_one(ibl_cache, mode="remote")
-                    return one_remote.load_dataset(eid_val, pattern, collection="alf")
-                except Exception as exc_remote:
-                    print(
-                        f"{label} load failed. "
-                        f"Local: {type(exc).__name__}: {exc} | "
-                        f"Remote: {type(exc_remote).__name__}: {exc_remote}"
-                    )
-                    return None
-            print(f"{label} load failed: {type(exc).__name__}: {exc}")
-            return None
+    one_local = init_one(ibl_cache, mode="local")
+    one_remote = init_one(ibl_cache, mode="remote") if ALLOW_REMOTE_METADATA else None
+    if visual_TR is None or auditory_TR is None:
+        visual_TR, auditory_TR = load_task_replay_datasets(
+            eid,
+            one_local,
+            one_remote,
+            allow_remote=ALLOW_REMOTE_METADATA,
+        )
 
     def _describe_tr_data(obj, label):
         if obj is None:
@@ -2196,11 +2635,6 @@ else:
             print(f"{label}: shape={arr.shape} dtype={arr.dtype}")
         except Exception:
             pass
-
-    # Load visual stimulus task replay events
-    visual_TR = _load_tr_dataset(eid, "*passiveGabor*", "visual_TR")
-    # Load auditory stimulus task replay events
-    auditory_TR = _load_tr_dataset(eid, "*passiveStims*", "auditory_TR")
 
     _describe_tr_data(visual_TR, "visual_TR")
     _describe_tr_data(auditory_TR, "auditory_TR")
@@ -2779,3 +3213,6 @@ else:
             template=plot_config["PLOTLY_TEMPLATE"],
         )
         show_fig(fig_corr)
+
+# %%
+a = 2

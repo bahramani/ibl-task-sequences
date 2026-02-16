@@ -1,5 +1,6 @@
 # %% 
 from pathlib import Path
+import fnmatch
 import pickle
 import sys
 
@@ -10,6 +11,7 @@ import streamlit as st
 import plotly.graph_objects as go
 import plotly.io as pio
 from plotly.colors import qualitative
+from plotly.subplots import make_subplots
 try:
     from scipy.stats import spearmanr
 except Exception:  # pragma: no cover
@@ -31,7 +33,14 @@ from utils.plotting_plotly import (
     plot_stpr_curve_halves_plotly,
 )
 import utils.plotting_plotly as plotting_utils
-from utils.io import setup_paths, init_one, load_session_data, build_cluster_id_map
+from utils.io import (
+    setup_paths,
+    init_one,
+    load_session_data,
+    build_cluster_id_map,
+    load_task_replay_datasets,
+    build_passive_event_times,
+)
 
 try:
     from iblatlas.regions import BrainRegions
@@ -65,15 +74,137 @@ def _get_one(mode):
 
 
 @st.cache_resource(show_spinner=False)
-def _load_raw_session(pid, load_wheel, load_pose, mode):
+def _load_raw_session(pid, load_wheel, load_pose, load_motion_energy, mode):
     one = _get_one(mode)
     ssl, spikes, clusters, sl = load_session_data(
         pid,
         one,
         load_wheel=load_wheel,
         load_pose=load_pose,
+        load_motion_energy=load_motion_energy,
     )
     return spikes, clusters, sl, ssl
+
+
+def _availability_label(flag):
+    if flag is None:
+        return "Unknown"
+    return "Yes" if flag else "No"
+
+
+def _merge_availability(*flags):
+    if any(flag is True for flag in flags):
+        return True
+    if any(flag is None for flag in flags):
+        return None
+    return False
+
+
+def _session_has_data(session_obj, name):
+    if session_obj is None:
+        return None
+    if isinstance(session_obj, dict):
+        obj = session_obj.get(name)
+    else:
+        obj = getattr(session_obj, name, None)
+    if obj is None:
+        return False
+    if isinstance(obj, pd.DataFrame):
+        return not obj.empty
+    if isinstance(obj, dict):
+        return len(obj) > 0
+    try:
+        return len(obj) > 0
+    except TypeError:
+        return True
+
+
+def _normalize_dataset_list(dsets):
+    if dsets is None:
+        return None
+    if isinstance(dsets, pd.DataFrame):
+        cols = [
+            col
+            for col in (
+                "rel_path",
+                "path",
+                "file_name",
+                "filename",
+                "dataset",
+                "name",
+                "dataset_type",
+            )
+            if col in dsets.columns
+        ]
+        if cols:
+            return dsets[cols].astype(str).agg(" ".join, axis=1).tolist()
+        return dsets.astype(str).agg(" ".join, axis=1).tolist()
+    if isinstance(dsets, (list, tuple, np.ndarray, pd.Index)):
+        return [str(item) for item in dsets]
+    return [str(dsets)]
+
+
+@st.cache_data(show_spinner=False)
+def _list_datasets_cached(eid_val, allow_remote=True):
+    if eid_val is None:
+        return None
+    try:
+        dsets = _get_one("local").list_datasets(eid_val, details=True)
+        return _normalize_dataset_list(dsets)
+    except Exception:
+        if not allow_remote:
+            return None
+        try:
+            dsets = _get_one("remote").list_datasets(eid_val, details=True)
+            return _normalize_dataset_list(dsets)
+        except Exception:
+            return None
+
+
+def _has_dataset_pattern(dsets, patterns):
+    if dsets is None:
+        return None
+    for pattern in patterns:
+        for item in dsets:
+            if fnmatch.fnmatch(item, pattern) or pattern.strip("*") in item:
+                return True
+    return False
+
+
+@st.cache_data(show_spinner=False)
+def _check_passive_rfmap(eid_val, allow_remote=True):
+    if eid_val is None:
+        return None
+    try:
+        from brainbox.io.one import load_passive_rfmap
+    except Exception:
+        return None
+    try:
+        rfmap = load_passive_rfmap(eid_val, one=_get_one("local"))
+        return rfmap is not None
+    except Exception:
+        if not allow_remote:
+            return False
+        try:
+            rfmap = load_passive_rfmap(eid_val, one=_get_one("remote"))
+            return rfmap is not None
+        except Exception:
+            return False
+
+
+@st.cache_data(show_spinner=False)
+def _load_passive_event_times(eid_val, allow_remote=True):
+    if eid_val is None:
+        return {}
+    one_local = _get_one("local")
+    one_remote = _get_one("remote") if allow_remote else None
+    visual_tr, auditory_tr = load_task_replay_datasets(
+        eid_val,
+        one_local,
+        one_remote,
+        allow_remote=allow_remote,
+    )
+    return build_passive_event_times(visual_tr, auditory_tr)
 
 
 def _get_label_array(clusters, cluster_ids=None):
@@ -467,6 +598,20 @@ def _add_unity_line(fig, x_vals, y_vals):
     )
 
 
+def _pick_coupling_strength_col(df):
+    if df is None or not hasattr(df, "columns"):
+        return None
+    for col in ("coupling_strength", "coupling_strength_mean"):
+        if col in df.columns:
+            return col
+    for col in df.columns:
+        if "coupling_strength" in col:
+            if any(suffix in col for suffix in ("_odd", "_even", "_h1", "_h2")):
+                continue
+            return col
+    return None
+
+
 def _scatter_by_region(
     x_vals,
     y_vals,
@@ -710,6 +855,7 @@ pid = st.sidebar.selectbox("Select PID", pid_list)
 st.sidebar.subheader("Raw data")
 load_wheel = st.sidebar.toggle("Load wheel data", value=False)
 load_pose = st.sidebar.toggle("Load pose data", value=False)
+load_motion_energy = st.sidebar.toggle("Load motion energy data", value=False)
 allow_remote = st.sidebar.toggle("Allow Alyx lookup (online)", value=True)
 
 with st.spinner("Loading session cache..."):
@@ -724,7 +870,11 @@ raw_session = None
 with st.spinner("Loading raw session data (data/raw)..."):
     try:
         raw_spikes, raw_clusters, raw_session, _ssl = _load_raw_session(
-            pid, load_wheel=load_wheel, load_pose=load_pose, mode="local"
+            pid,
+            load_wheel=load_wheel,
+            load_pose=load_pose,
+            load_motion_energy=load_motion_energy,
+            mode="local",
         )
         raw_source = "local"
     except Exception as exc:
@@ -732,7 +882,11 @@ with st.spinner("Loading raw session data (data/raw)..."):
         if allow_remote:
             try:
                 raw_spikes, raw_clusters, raw_session, _ssl = _load_raw_session(
-                    pid, load_wheel=load_wheel, load_pose=load_pose, mode="remote"
+                    pid,
+                    load_wheel=load_wheel,
+                    load_pose=load_pose,
+                    load_motion_energy=load_motion_energy,
+                    mode="remote",
                 )
                 raw_source = "remote"
             except Exception as exc_remote:
@@ -800,6 +954,48 @@ if trials is None:
     st.stop()
 
 st.subheader("Session Info")
+eid = meta.get("eid")
+if eid is None:
+    try:
+        eid, _ = _get_one("local").pid2eid(pid)
+    except Exception:
+        eid = None
+
+dsets = _list_datasets_cached(eid, allow_remote=allow_remote)
+wheel_available = _merge_availability(
+    _session_has_data(session, "wheel"),
+    _has_dataset_pattern(dsets, ["*wheel*", "*_ibl_wheel*"]),
+)
+pose_available = _merge_availability(
+    _session_has_data(session, "pose"),
+    _has_dataset_pattern(
+        dsets,
+        [
+            "*camera.dlc*",
+            "*Camera.dlc*",
+            "*Camera*dlc*",
+            "*camera*dlc*",
+            "*dlc.pqt*",
+        ],
+    ),
+)
+motion_energy_available = _merge_availability(
+    _session_has_data(session, "motion_energy"),
+    _has_dataset_pattern(dsets, ["*motionEnergy*", "*motion_energy*", "*motionenergy*"]),
+)
+pupil_available = _merge_availability(
+    _session_has_data(session, "pupil"),
+    _has_dataset_pattern(
+        dsets, ["*pupil*", "*Pupil*", "*pupilDiameter*", "*pupil_diameter*"]
+    ),
+)
+task_replay_visual = _has_dataset_pattern(dsets, ["*passiveGabor*"])
+task_replay_auditory = _has_dataset_pattern(dsets, ["*passiveStims*"])
+rfmap_available = _check_passive_rfmap(eid, allow_remote=allow_remote)
+passive_events_available = (task_replay_visual is not False) or (
+    task_replay_auditory is not False
+)
+
 info = {
     "Lab": meta.get("lab"),
     "Num trials": meta.get("num_trials"),
@@ -811,6 +1007,13 @@ info = {
     "Spont length": _format_seconds(meta.get("spont_length_s")),
     "Subject": meta.get("subject"),
     "Spont interval": _spont_interval_text(meta.get("spont_interval")),
+    "Wheel data": _availability_label(wheel_available),
+    "Pose data": _availability_label(pose_available),
+    "Motion energy data": _availability_label(motion_energy_available),
+    "Pupil data": _availability_label(pupil_available),
+    "Task replay (visual)": _availability_label(task_replay_visual),
+    "Task replay (auditory)": _availability_label(task_replay_auditory),
+    "Passive RF map": _availability_label(rfmap_available),
 }
 info_df = pd.DataFrame(info, index=[0]).T
 info_df.columns = ["Value"]
@@ -1028,9 +1231,26 @@ general_sort = st.selectbox(
     key="general_sort",
 )
 
+show_passive_events = False
+if passive_events_available:
+    show_passive_events = st.checkbox(
+        "Show passive replay events (visual/tone/noise)",
+        value=True,
+        key="general_show_passive_events",
+    )
+
 if t_end <= t_start:
     st.warning("End time must be greater than start time.")
 else:
+    passive_event_times = {}
+    passive_event_styles = {
+        "passive_visual": ("Passive Visual", "#17becf", "dot"),
+        "passive_tone": ("Passive Tone", "#bcbd22", "dash"),
+        "passive_noise": ("Passive Noise", "#8c564b", "dashdot"),
+    }
+    if show_passive_events and passive_events_available and eid is not None:
+        passive_event_times = _load_passive_event_times(eid, allow_remote=allow_remote)
+
     fig_session = plot_time_window_raster_plotly(
         spikes,
         clusters,
@@ -1050,6 +1270,8 @@ else:
         pupil_features=data.get("pupil_features"),
         pupil_times=data.get("pupil_times"),
         region_colors=region_colors,
+        extra_event_times=passive_event_times if show_passive_events else None,
+        extra_event_styles=passive_event_styles,
     )
     st.plotly_chart(fig_session, width="stretch")
 
@@ -1271,6 +1493,142 @@ with col2:
 with col3:
     st.markdown("**ITI Coupling**")
     st.plotly_chart(fig_iti, width="stretch")
+
+st.subheader("stPR Strength by Region (Spont vs Task)")
+if (
+    df_coupling_plot is None
+    or df_coupling_task_plot is None
+    or plot_cluster_ids is None
+    or plot_cluster_acronyms is None
+):
+    st.warning("stPR coupling tables or cluster metadata missing.")
+else:
+    strength_col_spont = _pick_coupling_strength_col(df_coupling_plot)
+    strength_col_task = _pick_coupling_strength_col(df_coupling_task_plot)
+    if strength_col_spont is None or strength_col_task is None:
+        st.warning("Coupling strength columns not found in stPR tables.")
+    else:
+        region_list = [
+            region
+            for region in pd.Series(plot_cluster_acronyms).astype(str).unique().tolist()
+            if region not in ("void", "root")
+        ]
+        if not region_list:
+            st.warning("No valid regions found (excluding void/root).")
+        else:
+            color_map = _resolve_region_colors(region_list, region_colors)
+            map_spont = dict(
+                zip(
+                    df_coupling_plot["cluster_id"],
+                    df_coupling_plot[strength_col_spont],
+                )
+            )
+            map_task = dict(
+                zip(
+                    df_coupling_task_plot["cluster_id"],
+                    df_coupling_task_plot[strength_col_task],
+                )
+            )
+            template = plot_config.get("PLOTLY_TEMPLATE", pio.templates.default)
+            for region in region_list:
+                region_mask = np.asarray(plot_cluster_acronyms).astype(str) == region
+                region_cluster_ids = np.asarray(plot_cluster_ids)[region_mask]
+                if len(region_cluster_ids) == 0:
+                    continue
+                y_spont = np.array(
+                    [map_spont.get(cid, np.nan) for cid in region_cluster_ids],
+                    dtype=float,
+                )
+                y_task = np.array(
+                    [map_task.get(cid, np.nan) for cid in region_cluster_ids],
+                    dtype=float,
+                )
+                sort_key = np.nanmean(np.vstack([y_spont, y_task]), axis=0)
+                sort_key = np.where(np.isfinite(sort_key), sort_key, np.inf)
+                order = np.argsort(sort_key)
+                region_cluster_ids = region_cluster_ids[order]
+                y_spont = y_spont[order]
+                y_task = y_task[order]
+                neuron_idx = np.arange(1, len(region_cluster_ids) + 1)
+                color = color_map.get(region)
+                marker_base = dict(size=7, opacity=0.8)
+                if color:
+                    marker_base["color"] = color
+                diff_vals = y_task - y_spont
+                diff_vals = diff_vals[np.isfinite(diff_vals)]
+                fig_region = make_subplots(
+                    rows=1,
+                    cols=2,
+                    column_widths=[0.28, 0.72],
+                    horizontal_spacing=0.08,
+                    subplot_titles=("Task - Spont stPR", f"{region}"),
+                )
+                fig_region.add_trace(
+                    go.Histogram(
+                        x=diff_vals,
+                        nbinsx=40,
+                        marker=dict(color=color or "#888888", opacity=0.7),
+                        showlegend=False,
+                    ),
+                    row=1,
+                    col=1,
+                )
+                fig_region.add_trace(
+                    go.Scatter(
+                        x=neuron_idx,
+                        y=y_spont,
+                        mode="markers",
+                        marker=dict(**marker_base, symbol="circle"),
+                        name="Spont",
+                        customdata=region_cluster_ids,
+                        hovertemplate=(
+                            "Neuron %{x}<br>Cluster %{customdata}<br>"
+                            "Spont stPR=%{y:.3f}<extra></extra>"
+                        ),
+                    ),
+                    row=1,
+                    col=2,
+                )
+                fig_region.add_trace(
+                    go.Scatter(
+                        x=neuron_idx,
+                        y=y_task,
+                        mode="markers",
+                        marker=dict(**marker_base, symbol="triangle-up"),
+                        name="Task",
+                        customdata=region_cluster_ids,
+                        hovertemplate=(
+                            "Neuron %{x}<br>Cluster %{customdata}<br>"
+                            "Task stPR=%{y:.3f}<extra></extra>"
+                        ),
+                    ),
+                    row=1,
+                    col=2,
+                )
+                fig_region.update_xaxes(title_text="Δ stPR (Task - Spont)", row=1, col=1)
+                fig_region.update_yaxes(title_text="Count", row=1, col=1)
+                fig_region.add_vline(
+                    x=0.0,
+                    line=dict(color="gray", dash="dash", width=1.5),
+                    row=1,
+                    col=1,
+                )
+                fig_region.update_xaxes(
+                    title_text="Neuron # in region (sorted by stPR strength)", row=1, col=2
+                )
+                fig_region.update_yaxes(title_text="stPR strength", row=1, col=2)
+                fig_region.update_layout(
+                    height=320,
+                    template=template,
+                    legend=dict(
+                        orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0
+                    ),
+                    margin=dict(l=60, r=30, t=60, b=50),
+                )
+                with st.expander(
+                    f"{region} ({len(region_cluster_ids)} neurons)", expanded=False
+                ):
+                    st.plotly_chart(fig_region, width="stretch")
 
 st.subheader("Correlation Matrices")
 corr_key = (

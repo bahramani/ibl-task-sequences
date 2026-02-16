@@ -78,6 +78,38 @@ def _get_session_field(sl, key):
     return getattr(sl, key, None)
 
 
+def _extract_motion_energy_series(motion_energy, camera_key, t_start, t_end, t_offset=0.0):
+    if motion_energy is None or camera_key not in motion_energy:
+        return np.array([]), np.array([])
+    df = motion_energy.get(camera_key)
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return np.array([]), np.array([])
+    time_col = "times" if "times" in df.columns else None
+    if time_col is None:
+        times = df.index.values
+    else:
+        times = df[time_col].values
+    value_col = None
+    for candidate in ("whiskerMotionEnergy", "motionEnergy", "energy"):
+        if candidate in df.columns:
+            value_col = candidate
+            break
+    if value_col is None:
+        numeric_cols = [
+            col
+            for col in df.columns
+            if col != time_col and pd.api.types.is_numeric_dtype(df[col])
+        ]
+        if numeric_cols:
+            value_col = numeric_cols[0]
+    if value_col is None:
+        return np.array([]), np.array([])
+    mask = (times >= t_start) & (times <= t_end)
+    if not np.any(mask):
+        return np.array([]), np.array([])
+    return times[mask] - t_offset, df[value_col].values[mask]
+
+
 def _get_trials_array_field(trials, key):
     if trials is None:
         return None
@@ -585,6 +617,7 @@ def plot_trial_raster_plotly(
     trials = _get_session_field(sl, "trials")
     wheel = _get_session_field(sl, "wheel")
     pose = _get_session_field(sl, "pose")
+    motion_energy = _get_session_field(sl, "motion_energy")
     if trials is None:
         return go.Figure()
 
@@ -704,17 +737,18 @@ def plot_trial_raster_plotly(
 
     fig = FigureResampler(
         make_subplots(
-            rows=5,
+            rows=6,
             cols=1,
             shared_xaxes=True,
             vertical_spacing=0.02,
-            row_heights=[0.55, 0.13, 0.11, 0.11, 0.10],
+            row_heights=[0.52, 0.12, 0.10, 0.10, 0.08, 0.08],
             subplot_titles=(
                 "Raster",
                 "Avg PSTH",
                 metric_title,
                 "Wheel",
                 "Paw Speed",
+                "Motion energy (L/R)",
             ),
         )
     )
@@ -901,13 +935,58 @@ def plot_trial_raster_plotly(
             col=1,
         )
 
+    left_t, left_me = _extract_motion_energy_series(
+        motion_energy, "leftCamera", t_start, t_end, t_offset=t_offset
+    )
+    right_t, right_me = _extract_motion_energy_series(
+        motion_energy, "rightCamera", t_start, t_end, t_offset=t_offset
+    )
+    if left_t.size > 0 or right_t.size > 0:
+        if left_t.size > 0:
+            fig.add_trace(
+                go.Scatter(
+                    x=left_t,
+                    y=left_me,
+                    mode="lines",
+                    line=dict(color="#1f77b4"),
+                    name="Motion L",
+                    showlegend=True,
+                ),
+                row=6,
+                col=1,
+            )
+        if right_t.size > 0:
+            fig.add_trace(
+                go.Scatter(
+                    x=right_t,
+                    y=right_me,
+                    mode="lines",
+                    line=dict(color="#ff7f0e"),
+                    name="Motion R",
+                    showlegend=True,
+                ),
+                row=6,
+                col=1,
+            )
+    else:
+        fig.add_annotation(
+            x=0.5,
+            y=0.5,
+            xref="paper",
+            yref="y6",
+            text="Motion energy not available",
+            showarrow=False,
+            row=6,
+            col=1,
+        )
+
     event_lines = [
         ("Stim On", t_stim_on, "blue"),
         ("First Move", t_first_move, "green"),
         ("Feedback", t_feedback, "red"),
     ]
     for name, time_val, color in event_lines:
-        for row in range(1, 6):
+        for row in range(1, 7):
             fig.add_vline(x=time_val - t_offset, line=dict(color=color, width=2), row=row, col=1)
         fig.add_trace(
             go.Scatter(
@@ -939,12 +1018,13 @@ def plot_trial_raster_plotly(
     fig.update_yaxes(title_text=metric_title, row=3, col=1)
     fig.update_yaxes(title_text="Wheel (rad)", row=4, col=1)
     fig.update_yaxes(title_text="Paw (px/s)", row=5, col=1)
-    fig.update_xaxes(title_text=xlabel_text, row=5, col=1)
+    fig.update_yaxes(title_text="Motion energy", row=6, col=1)
+    fig.update_xaxes(title_text=xlabel_text, row=6, col=1)
     fig.update_xaxes(range=[t_start - t_offset, t_end - t_offset])
 
     fig.update_layout(
         title=f"{plot_title} | Sort: {sort_label}",
-        height=980,
+        height=1120,
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
         hovermode="closest",
         margin=dict(l=70, r=40, t=80, b=60),
@@ -1591,6 +1671,51 @@ def plot_stpr_curve_halves_plotly(
     return fig
 
 
+def _add_event_vlines(
+    fig,
+    times,
+    label,
+    color,
+    t_start,
+    t_end,
+    n_rows=6,
+    dash=None,
+):
+    if fig is None or times is None:
+        return
+    times_arr = np.asarray(times, dtype=float)
+    if times_arr.size == 0:
+        return
+    if t_start is not None and t_end is not None:
+        mask = (times_arr >= t_start) & (times_arr <= t_end) & np.isfinite(times_arr)
+    else:
+        mask = np.isfinite(times_arr)
+    times_arr = times_arr[mask]
+    if times_arr.size == 0:
+        return
+    line = dict(color=color, width=1.5)
+    if dash:
+        line["dash"] = dash
+    for row in range(1, n_rows + 1):
+        for t_event in times_arr:
+            fig.add_vline(x=float(t_event), line=line, row=row, col=1)
+    legend_line = dict(color=color, width=2)
+    if dash:
+        legend_line["dash"] = dash
+    fig.add_trace(
+        go.Scatter(
+            x=[None],
+            y=[None],
+            mode="lines",
+            line=legend_line,
+            name=label,
+            showlegend=True,
+        ),
+        row=1,
+        col=1,
+    )
+
+
 def plot_time_window_raster_plotly(
     spikes,
     clusters,
@@ -1611,6 +1736,8 @@ def plot_time_window_raster_plotly(
     pupil_features=None,
     pupil_times=None,
     region_colors=None,
+    extra_event_times=None,
+    extra_event_styles=None,
 ):
     """Plot a session-time raster for a specified time window."""
     if t_start >= t_end:
@@ -1619,6 +1746,7 @@ def plot_time_window_raster_plotly(
     trials = _get_session_field(sl, "trials")
     wheel = _get_session_field(sl, "wheel")
     pose = _get_session_field(sl, "pose")
+    motion_energy = _get_session_field(sl, "motion_energy")
     if trials is None:
         return go.Figure()
 
@@ -1695,17 +1823,18 @@ def plot_time_window_raster_plotly(
 
     fig = FigureResampler(
         make_subplots(
-            rows=5,
+            rows=6,
             cols=1,
             shared_xaxes=True,
             vertical_spacing=0.02,
-            row_heights=[0.55, 0.13, 0.11, 0.11, 0.10],
+            row_heights=[0.52, 0.12, 0.10, 0.10, 0.08, 0.08],
             subplot_titles=(
                 "Raster",
                 "Avg PSTH",
                 metric_title,
                 "Wheel",
                 "Paw Speed",
+                "Motion energy (L/R)",
             ),
         )
     )
@@ -1839,15 +1968,22 @@ def plot_time_window_raster_plotly(
         mask_pose = (pose_timestamps >= t_start) & (pose_timestamps <= t_end)
         pose_t = pose_timestamps[mask_pose]
         paw_key = "paw_r" if "paw_r_x" in pose_df.columns else "paw_l"
-        if f"{paw_key}_x" in pose_df.columns:
-            dx = np.gradient(pose_df[f"{paw_key}_x"].values[mask_pose])
-            dy = np.gradient(pose_df[f"{paw_key}_y"].values[mask_pose])
-            dt = np.gradient(pose_t)
-            dt[dt == 0] = np.nan
-            speed_raw = np.sqrt(dx**2 + dy**2) / dt
-            paw_speed = (
-                pd.Series(speed_raw).fillna(0).rolling(window=5, center=True).mean().values
-            )
+        if f"{paw_key}_x" in pose_df.columns and pose_t.size >= 2:
+            x_vals = pose_df[f"{paw_key}_x"].values[mask_pose]
+            y_vals = pose_df[f"{paw_key}_y"].values[mask_pose]
+            if x_vals.size >= 2 and y_vals.size >= 2:
+                dx = np.gradient(x_vals)
+                dy = np.gradient(y_vals)
+                dt = np.gradient(pose_t)
+                dt[dt == 0] = np.nan
+                speed_raw = np.sqrt(dx**2 + dy**2) / dt
+                paw_speed = (
+                    pd.Series(speed_raw)
+                    .fillna(0)
+                    .rolling(window=5, center=True)
+                    .mean()
+                    .values
+                )
 
     if paw_speed is not None:
         fig.add_trace(
@@ -1867,34 +2003,104 @@ def plot_time_window_raster_plotly(
             col=1,
         )
 
+    left_t, left_me = _extract_motion_energy_series(
+        motion_energy, "leftCamera", t_start, t_end, t_offset=0.0
+    )
+    right_t, right_me = _extract_motion_energy_series(
+        motion_energy, "rightCamera", t_start, t_end, t_offset=0.0
+    )
+    if left_t.size > 0 or right_t.size > 0:
+        if left_t.size > 0:
+            fig.add_trace(
+                go.Scatter(
+                    x=left_t,
+                    y=left_me,
+                    mode="lines",
+                    line=dict(color="#1f77b4"),
+                    name="Motion L",
+                    showlegend=True,
+                ),
+                row=6,
+                col=1,
+            )
+        if right_t.size > 0:
+            fig.add_trace(
+                go.Scatter(
+                    x=right_t,
+                    y=right_me,
+                    mode="lines",
+                    line=dict(color="#ff7f0e"),
+                    name="Motion R",
+                    showlegend=True,
+                ),
+                row=6,
+                col=1,
+            )
+    else:
+        fig.add_annotation(
+            x=0.5,
+            y=0.5,
+            xref="paper",
+            yref="y6",
+            text="Motion energy not available",
+            showarrow=False,
+            row=6,
+            col=1,
+        )
+
     event_style_map = {
-        "stimOn_times": ("Stim On", "blue"),
-        "firstMovement_times": ("First Move", "green"),
-        "response_times": ("Response", "purple"),
-        "feedback_times": ("Feedback", "red"),
+        "stimOn_times": ("Stim On", "blue", None),
+        "firstMovement_times": ("First Move", "green", None),
+        "response_times": ("Response", "purple", None),
+        "feedback_times": ("Feedback", "red", None),
     }
-    for event_name, (label, color) in event_style_map.items():
+    for event_name, (label, color, dash) in event_style_map.items():
         if event_name not in trials.keys():
             continue
         event_times = np.asarray(trials[event_name])
-        valid_times = event_times[(event_times >= t_start) & (event_times <= t_end)]
-        if len(valid_times) == 0:
-            continue
-        for row in range(1, 6):
-            for t_event in valid_times:
-                fig.add_vline(x=t_event, line=dict(color=color, width=1.5), row=row, col=1)
-        fig.add_trace(
-            go.Scatter(
-                x=[None],
-                y=[None],
-                mode="lines",
-                line=dict(color=color, width=2),
-                name=label,
-                showlegend=True,
-            ),
-            row=1,
-            col=1,
+        _add_event_vlines(
+            fig,
+            event_times,
+            label,
+            color,
+            t_start,
+            t_end,
+            n_rows=6,
+            dash=dash,
         )
+
+    if extra_event_times:
+        styles = extra_event_styles or {}
+        if isinstance(extra_event_times, dict):
+            items = list(extra_event_times.items())
+        else:
+            items = list(extra_event_times)
+        for key, times in items:
+            style = styles.get(key)
+            label = str(key)
+            color = "#666666"
+            dash = None
+            if isinstance(style, dict):
+                label = style.get("label", label)
+                color = style.get("color", color)
+                dash = style.get("dash", dash)
+            elif isinstance(style, (list, tuple)):
+                if len(style) > 0 and style[0] is not None:
+                    label = style[0]
+                if len(style) > 1 and style[1] is not None:
+                    color = style[1]
+                if len(style) > 2 and style[2] is not None:
+                    dash = style[2]
+            _add_event_vlines(
+                fig,
+                times,
+                label,
+                color,
+                t_start,
+                t_end,
+                n_rows=6,
+                dash=dash,
+            )
 
     ylabel_text = (
         f"Good Units (n={len(df_units)})"
@@ -1913,11 +2119,12 @@ def plot_time_window_raster_plotly(
     fig.update_yaxes(title_text=metric_title, row=3, col=1)
     fig.update_yaxes(title_text="Wheel (rad)", row=4, col=1)
     fig.update_yaxes(title_text="Paw (px/s)", row=5, col=1)
-    fig.update_xaxes(title_text="Time in session (s)", row=5, col=1)
+    fig.update_yaxes(title_text="Motion energy", row=6, col=1)
+    fig.update_xaxes(title_text="Time in session (s)", row=6, col=1)
 
     fig.update_layout(
         title=f"Window {t_start:.2f}-{t_end:.2f}s | Sort: {sort_label}",
-        height=980,
+        height=1120,
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
         margin=dict(l=70, r=40, t=80, b=60),
     )

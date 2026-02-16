@@ -66,13 +66,17 @@ def load_session_data(
     load_trials=True,
     load_wheel=True,
     load_pose=True,
+    load_motion_energy=False,
+    load_pupil=False,
     pose_views=("left", "right"),
+    motion_energy_views=("left", "right"),
 ):
     """Load spikes, clusters, and session data for a given probe insertion."""
     if ba is None:
         ba = AllenAtlas()
     ssl = SpikeSortingLoader(pid=pid, one=one, atlas=ba)
-    print(f"Session ID (EID): {ssl.eid}")
+    eid, _ = one.pid2eid(pid)
+    print(f"Session ID (EID): {eid}")
     print(f"Probe Name: {ssl.pname}")
 
     spikes, clusters, channels = ssl.load_spike_sorting()
@@ -81,7 +85,15 @@ def load_session_data(
     if "acronym" in clusters:
         print(f"Cluster regions found: {set(clusters.acronym)}")
 
-    sl = SessionLoader(eid=ssl.eid, one=one)
+    sl = SessionLoader(
+        eid=eid,
+        one=one,
+        trials=load_trials,
+        wheel=load_wheel,
+        pose=load_pose,
+        motion_energy=load_motion_energy,
+        pupil=load_pupil,
+    )
     if load_trials:
         sl.load_trials()
         print(f"Trials loaded. Found keys: {list(sl.trials.keys())}")
@@ -101,6 +113,39 @@ def load_session_data(
         print(f"Pose data loaded. Found keys: {list(sl.pose.keys())}")
     else:
         sl.pose = None
+
+    if load_motion_energy:
+        try:
+            views = list(motion_energy_views) if motion_energy_views is not None else None
+            if views is None:
+                sl.load_motion_energy()
+            else:
+                sl.load_motion_energy(views=views)
+            print(
+                "Motion energy data loaded. "
+                f"Found keys: {list(getattr(sl, 'motion_energy', {}).keys())}"
+            )
+        except Exception as exc:
+            sl.motion_energy = None
+            print(f"Motion energy data not available: {exc}")
+    else:
+        sl.motion_energy = None
+
+    if load_pupil:
+        try:
+            sl.load_pupil()
+            pupil_cols = None
+            if isinstance(sl.pupil, pd.DataFrame):
+                pupil_cols = list(sl.pupil.columns)
+            print(
+                "Pupil data loaded. "
+                f"Columns: {pupil_cols if pupil_cols is not None else 'NA'}"
+            )
+        except Exception as exc:
+            sl.pupil = None
+            print(f"Pupil data not available: {exc}")
+    else:
+        sl.pupil = None
 
     return ssl, spikes, clusters, sl
 
@@ -150,3 +195,249 @@ def get_cluster_labels_array(clusters):
     if isinstance(clusters, dict) and "label" in clusters:
         return np.asarray(clusters.get("label"))
     return None
+
+
+def _extract_tr_field(tr_obj, keys, suffixes=None):
+    if tr_obj is None:
+        return None
+    if hasattr(tr_obj, "keys"):
+        key_list = list(tr_obj.keys())
+        for key in keys:
+            if key in tr_obj:
+                return np.asarray(tr_obj[key])
+        if suffixes:
+            for key in key_list:
+                key_str = str(key)
+                for suffix in suffixes:
+                    if key_str.endswith(suffix):
+                        return np.asarray(tr_obj[key])
+    for key in keys:
+        if hasattr(tr_obj, key):
+            return np.asarray(getattr(tr_obj, key))
+    if suffixes:
+        for suffix in suffixes:
+            if hasattr(tr_obj, suffix):
+                return np.asarray(getattr(tr_obj, suffix))
+    return None
+
+
+def extract_passive_times_and_contrast(tr_obj):
+    if tr_obj is None:
+        return None, None
+
+    base_obj = tr_obj
+    if isinstance(tr_obj, dict) and "table" in tr_obj:
+        base_obj = tr_obj["table"]
+    elif isinstance(tr_obj, (list, tuple)):
+        if len(tr_obj) == 1:
+            base_obj = tr_obj[0]
+        else:
+            base_obj = None
+            for item in tr_obj:
+                if isinstance(item, pd.DataFrame) and {"start", "contrast"}.issubset(
+                    item.columns
+                ):
+                    base_obj = item
+                    break
+                if hasattr(item, "dtype") and getattr(item.dtype, "names", None):
+                    if {"start", "contrast"}.issubset(set(item.dtype.names)):
+                        base_obj = item
+                        break
+            if base_obj is None and len(tr_obj) > 0:
+                base_obj = tr_obj[0]
+
+    if isinstance(base_obj, pd.DataFrame):
+        if "start" in base_obj.columns:
+            times = base_obj["start"].to_numpy(dtype=float)
+            contrasts = (
+                base_obj["contrast"].to_numpy(dtype=float)
+                if "contrast" in base_obj.columns
+                else np.ones_like(times, dtype=float)
+            )
+            return times, contrasts
+    if hasattr(base_obj, "dtype") and getattr(base_obj.dtype, "names", None):
+        names = set(base_obj.dtype.names)
+        if "start" in names:
+            times = np.asarray(base_obj["start"], dtype=float)
+            if "contrast" in names:
+                contrasts = np.asarray(base_obj["contrast"], dtype=float)
+            else:
+                contrasts = np.ones_like(times, dtype=float)
+            return times, contrasts
+
+    arr_candidate = np.asarray(base_obj)
+    if arr_candidate.ndim == 2 and arr_candidate.shape[1] >= 5:
+        times = np.asarray(arr_candidate[:, 0], dtype=float)
+        contrasts = np.asarray(arr_candidate[:, 3], dtype=float)
+        return times, contrasts
+
+    times = _extract_tr_field(
+        base_obj,
+        keys=("stimOn_times", "times", "stimOn", "onset_times", "event_times", "start"),
+        suffixes=(".times", "times", ".start", "start"),
+    )
+    if times is None and isinstance(base_obj, (list, tuple, np.ndarray)):
+        arr = np.asarray(base_obj)
+        if arr.ndim == 1 and np.issubdtype(arr.dtype, np.number):
+            times = arr
+
+    contrasts = _extract_tr_field(
+        base_obj,
+        keys=("contrast", "contrasts", "stimContrast"),
+        suffixes=(".contrast", "contrast"),
+    )
+    if contrasts is None:
+        contrast_left = _extract_tr_field(
+            base_obj,
+            keys=("contrastLeft",),
+            suffixes=(".contrastLeft", "contrastLeft"),
+        )
+        contrast_right = _extract_tr_field(
+            base_obj,
+            keys=("contrastRight",),
+            suffixes=(".contrastRight", "contrastRight"),
+        )
+        if contrast_left is not None or contrast_right is not None:
+            if contrast_left is None:
+                contrast_left = np.full_like(contrast_right, np.nan, dtype=float)
+            if contrast_right is None:
+                contrast_right = np.full_like(contrast_left, np.nan, dtype=float)
+            contrasts = np.nanmax(
+                np.vstack([np.abs(contrast_left), np.abs(contrast_right)]), axis=0
+            )
+
+    if times is None:
+        return None, None
+
+    times = np.asarray(times, dtype=float)
+    if contrasts is None:
+        contrasts = np.ones_like(times, dtype=float)
+    else:
+        contrasts = np.asarray(contrasts, dtype=float)
+        if contrasts.shape[0] != times.shape[0]:
+            if contrasts.size == 1:
+                contrasts = np.full_like(times, float(contrasts.ravel()[0]))
+            else:
+                contrasts = np.ones_like(times, dtype=float)
+
+    finite_mask = np.isfinite(times)
+    if not np.all(finite_mask):
+        times = times[finite_mask]
+        contrasts = contrasts[finite_mask]
+
+    return times, contrasts
+
+
+def coerce_passive_stims_table(tr_obj):
+    if tr_obj is None:
+        return None
+    base_obj = tr_obj
+    if isinstance(tr_obj, dict) and "table" in tr_obj:
+        base_obj = tr_obj["table"]
+    elif isinstance(tr_obj, (list, tuple)):
+        if len(tr_obj) == 1:
+            base_obj = tr_obj[0]
+        else:
+            base_obj = None
+            for item in tr_obj:
+                if isinstance(item, pd.DataFrame) and {"toneOn", "noiseOn"}.issubset(
+                    item.columns
+                ):
+                    base_obj = item
+                    break
+                if hasattr(item, "dtype") and getattr(item.dtype, "names", None):
+                    if {"toneOn", "noiseOn"}.issubset(set(item.dtype.names)):
+                        base_obj = item
+                        break
+            if base_obj is None and len(tr_obj) > 0:
+                base_obj = tr_obj[0]
+
+    if isinstance(base_obj, pd.DataFrame):
+        return base_obj.copy()
+
+    if isinstance(base_obj, dict):
+        try:
+            return pd.DataFrame(base_obj)
+        except Exception:
+            return None
+
+    if hasattr(base_obj, "dtype") and getattr(base_obj.dtype, "names", None):
+        try:
+            return pd.DataFrame(
+                {name: np.asarray(base_obj[name]) for name in base_obj.dtype.names}
+            )
+        except Exception:
+            return None
+
+    arr = np.asarray(base_obj)
+    if arr.ndim == 2 and arr.shape[1] >= 6:
+        columns = ["valveOn", "valveOff", "toneOn", "toneOff", "noiseOn", "noiseOff"]
+        return pd.DataFrame(arr[:, :6], columns=columns)
+    return None
+
+
+def extract_passive_stim_times(table, column_name):
+    if table is None or not hasattr(table, "columns"):
+        return None, None, None
+    if column_name not in table.columns:
+        match = None
+        for col in table.columns:
+            if str(col).endswith(column_name):
+                match = col
+                break
+        if match is None:
+            return None, None, None
+        column_name = match
+    times_all = np.asarray(table[column_name], dtype=float)
+    valid_mask = np.isfinite(times_all)
+    return times_all[valid_mask], np.nonzero(valid_mask)[0], column_name
+
+
+def load_task_replay_datasets(eid_val, one_local, one_remote=None, allow_remote=True):
+    if eid_val is None or one_local is None:
+        return None, None
+
+    def _load(pattern):
+        try:
+            return one_local.load_dataset(eid_val, pattern, collection="alf")
+        except Exception:
+            if not allow_remote or one_remote is None:
+                return None
+            try:
+                return one_remote.load_dataset(eid_val, pattern, collection="alf")
+            except Exception:
+                return None
+
+    visual_tr = _load("*passiveGabor*")
+    auditory_tr = _load("*passiveStims*")
+    return visual_tr, auditory_tr
+
+
+def build_passive_event_times(visual_tr=None, auditory_tr=None):
+    events = {}
+
+    visual_times, visual_contrasts = extract_passive_times_and_contrast(visual_tr)
+    if visual_times is not None and len(visual_times) > 0:
+        times_arr = np.asarray(visual_times, dtype=float)
+        if visual_contrasts is not None:
+            contrasts_arr = np.asarray(visual_contrasts, dtype=float)
+            valid_mask = (
+                np.isfinite(times_arr)
+                & np.isfinite(contrasts_arr)
+                & (contrasts_arr > 0)
+            )
+            times_arr = times_arr[valid_mask]
+        else:
+            times_arr = times_arr[np.isfinite(times_arr)]
+        if len(times_arr) > 0:
+            events["passive_visual"] = times_arr
+
+    passive_table = coerce_passive_stims_table(auditory_tr)
+    for stim_key, stim_col in (("tone", "toneOn"), ("noise", "noiseOn")):
+        stim_times, _stim_idx, _stim_col = extract_passive_stim_times(
+            passive_table, stim_col
+        )
+        if stim_times is not None and len(stim_times) > 0:
+            events[f"passive_{stim_key}"] = np.asarray(stim_times, dtype=float)
+
+    return events
