@@ -346,6 +346,45 @@ def _prepare_units_df(cluster_ids, cluster_acronyms, clusters, only_good, label_
     return df_units, quality_mask
 
 
+def _format_delay_sort_label(event_or_col):
+    text = str(event_or_col)
+    if text.startswith("delay_"):
+        text = text[len("delay_") :]
+    if text.endswith("_times"):
+        text = text[: -len("_times")]
+    text = text.replace("_", " ").strip()
+    if not text:
+        text = str(event_or_col)
+    return f"Delay ({text.title()})"
+
+
+def _resolve_custom_delay_sort(metric_key):
+    key = (metric_key or "").strip()
+    if not key:
+        return None, None
+    key_lower = key.lower()
+
+    if key_lower.startswith("delay_col:"):
+        col_name = key[len("delay_col:") :].strip()
+        if not col_name:
+            return None, None
+        return col_name, _format_delay_sort_label(col_name)
+
+    if key_lower.startswith("delay:"):
+        event_name = key[len("delay:") :].strip()
+        if not event_name:
+            return None, None
+        if event_name.startswith("delay_"):
+            col_name = event_name
+            label = _format_delay_sort_label(event_name)
+        else:
+            col_name = delay_column_name(event_name)
+            label = _format_delay_sort_label(event_name)
+        return col_name, label
+
+    return None, None
+
+
 def _merge_metric(
     df_units,
     metric_key,
@@ -355,7 +394,8 @@ def _merge_metric(
     df_coupling_iti=None,
     df_firing_rate=None,
 ):
-    metric_key = (metric_key or "depth").strip().lower()
+    metric_key_raw = (metric_key or "depth").strip()
+    metric_key = metric_key_raw.lower()
     df_units = df_units.copy()
     sort_label = "Depth"
 
@@ -375,6 +415,20 @@ def _merge_metric(
     if metric_key in ("depth", "default"):
         df_units["sort_metric"] = df_units["depth"]
         return df_units, sort_label
+
+    custom_delay_col, custom_delay_label = _resolve_custom_delay_sort(metric_key_raw)
+    if custom_delay_col is not None:
+        if df_res is not None and custom_delay_col in df_res.columns:
+            df_units = df_units.merge(
+                df_res[["cluster_id", custom_delay_col]].rename(
+                    columns={custom_delay_col: "sort_metric"}
+                ),
+                on="cluster_id",
+                how="left",
+            )
+            return df_units, custom_delay_label
+        df_units["sort_metric"] = df_units["depth"]
+        return df_units, "Depth"
 
     if "stim" in metric_key:
         delay_col = delay_column_name("stimOn_times")
@@ -2549,6 +2603,7 @@ def plot_population_sorted_plotly(
         subplot_titles=[f"{region} units" for region in region_acronyms],
     )
     use_prefix = bool(config_plot.get("PLOT_REGION_PREFIX_MATCH", False)) and region_from_config
+    custom_delay_col, custom_delay_label = _resolve_custom_delay_sort(sort_mode)
 
     def _select_delay_sort_key(df_local):
         if "delay_odd" in df_local.columns and np.isfinite(df_local["delay_odd"]).any():
@@ -2604,7 +2659,25 @@ def plot_population_sorted_plotly(
 
         delay_sort_key, delay_sort_label = _select_delay_sort_key(df_region)
 
-        if sort_mode == "spont" and df_coupling is not None:
+        if custom_delay_col is not None:
+            if df_res is not None and custom_delay_col in df_res.columns:
+                df_region = df_region.merge(
+                    df_res[["cluster_id", custom_delay_col]].rename(
+                        columns={custom_delay_col: "sort_metric"}
+                    ),
+                    on="cluster_id",
+                    how="left",
+                )
+                df_sorted = df_region.sort_values(
+                    by="sort_metric", ascending=sort_ascending, na_position="last"
+                )
+                sort_label = custom_delay_label
+            else:
+                df_sorted = df_region.sort_values(
+                    by=delay_sort_key, ascending=sort_ascending, na_position="last"
+                )
+                sort_label = delay_sort_label
+        elif sort_mode == "spont" and df_coupling is not None:
             if "sorting_number" in df_coupling.columns:
                 df_region = df_region.merge(
                     df_coupling[["cluster_id", "sorting_number"]],

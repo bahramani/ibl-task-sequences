@@ -72,6 +72,12 @@ def event_label(event_name):
         "firstMovement_times": "First Move",
         "response_times": "Response",
         "feedback_times": "Feedback",
+        "feedback_correct_times": "Feedback (Correct)",
+        "feedback_incorrect_times": "Feedback (Incorrect)",
+        "passive_tone_times": "Passive Tone",
+        "passive_noise_times": "Passive Noise",
+        "passive_valve_times": "Passive Valve",
+        "passive_all_times": "Passive (All)",
     }
     return label_map.get(event_name, event_name)
 
@@ -616,6 +622,278 @@ def calculate_delays(
     return df_res
 
 
+def calculate_event_delays(
+    spikes,
+    clusters,
+    cluster_acronyms,
+    events_by_name,
+    config,
+    cid_to_idx,
+    contrasts_by_name=None,
+    trial_idx_by_name=None,
+    include_splits=False,
+    output_path=None,
+):
+    """
+    Compute per-event delays without enforcing split-half responsiveness.
+
+    This helper is intended for custom event dictionaries (for example feedback
+    correct/incorrect or passive replay events) where odd/even reliability
+    gating should not zero-out the overall delay estimate.
+    """
+    event_names = config.get("EVENT_NAMES", list(events_by_name.keys()))
+    if len(event_names) == 0:
+        print("No events provided for delay calculation.")
+        return pd.DataFrame()
+
+    min_trials = int(config.get("MIN_TRIALS", 0))
+    min_trials_split = int(
+        config.get("MIN_TRIALS_SPLIT", max(5, int(np.ceil(max(min_trials, 1) / 2))))
+    )
+    contrasts_by_name = contrasts_by_name or {}
+
+    cluster_ids = np.unique(spikes.clusters)
+    cluster_ids = [cid for cid in cluster_ids if cid in cid_to_idx]
+    print(f"Found {len(cluster_ids)} clusters.")
+
+    label_min = config.get("CALC_LABEL_MIN", None)
+    if label_min is None and config.get("CALC_ONLY_GOOD_UNITS", False):
+        label_min = 1.0
+
+    def _label_ok(label_val):
+        if label_min is None:
+            return True
+        if label_val is None:
+            return False
+        try:
+            return float(label_val) >= float(label_min)
+        except (TypeError, ValueError):
+            return False
+
+    results = []
+    selected_cluster_ids = []
+    for cid in cluster_ids:
+        idx = cid_to_idx.get(cid)
+        if idx is None:
+            continue
+        label = io_utils.get_cluster_label(clusters, idx)
+        if not _label_ok(label):
+            continue
+        results.append(
+            {
+                "cluster_id": cid,
+                "acronym": cluster_acronyms[idx],
+                "label": label,
+            }
+        )
+        selected_cluster_ids.append(cid)
+
+    df_res = pd.DataFrame(results)
+    if df_res.empty:
+        print("No clusters met the selection criteria.")
+        return df_res
+
+    spike_times_by_cluster = {
+        cid: spikes.times[spikes.clusters == cid] for cid in selected_cluster_ids
+    }
+
+    def _prepare_event_arrays(event_name):
+        events = events_by_name.get(event_name, np.array([]))
+        if events is None:
+            events = np.array([])
+        events = np.asarray(events, dtype=float).reshape(-1)
+
+        contrasts = contrasts_by_name.get(event_name, None)
+        if contrasts is None:
+            contrasts = np.ones(len(events), dtype=float)
+        else:
+            contrasts = np.asarray(contrasts, dtype=float).reshape(-1)
+            if contrasts.shape[0] != events.shape[0]:
+                if contrasts.size == 1:
+                    contrasts = np.full(len(events), float(contrasts.ravel()[0]), dtype=float)
+                else:
+                    contrasts = np.ones(len(events), dtype=float)
+
+        if trial_idx_by_name is not None:
+            trial_idx = trial_idx_by_name.get(event_name, None)
+        else:
+            trial_idx = None
+        if trial_idx is None:
+            trial_idx = np.arange(len(events), dtype=int)
+        else:
+            trial_idx = np.asarray(trial_idx).reshape(-1)
+            if trial_idx.shape[0] != events.shape[0]:
+                trial_idx = np.arange(len(events), dtype=int)
+
+        finite_mask = np.isfinite(events)
+        if not np.all(finite_mask):
+            events = events[finite_mask]
+            contrasts = contrasts[finite_mask]
+            trial_idx = trial_idx[finite_mask]
+
+        return events, contrasts, trial_idx.astype(int)
+
+    delay_columns = []
+    for event_name in event_names:
+        events, contrasts, trial_idx = _prepare_event_arrays(event_name)
+
+        delay_col = delay_column_name(event_name)
+        resp_col = responsive_column_name(event_name)
+        delay_columns.append(delay_col)
+        if include_splits:
+            delay_odd_col = delay_split_column_name(event_name, "odd")
+            delay_even_col = delay_split_column_name(event_name, "even")
+            delay_columns.extend([delay_odd_col, delay_even_col])
+
+        if events.size < min_trials:
+            df_res[delay_col] = np.nan
+            df_res[resp_col] = False
+            if include_splits:
+                df_res[delay_odd_col] = np.nan
+                df_res[delay_even_col] = np.nan
+            continue
+
+        win_start, win_end = get_event_delay_window(config, event_name)
+        event_config = {
+            **config,
+            "RESPONSIVE_WINDOW_START": win_start,
+            "RESPONSIVE_WINDOW_END": win_end,
+        }
+
+        psth_by_cluster, bin_centers = compute_psth_for_clusters(
+            spikes,
+            selected_cluster_ids,
+            events,
+            config["PSTH_WINDOW_START"],
+            config["PSTH_WINDOW_END"],
+            config["BIN_SIZE"],
+            config["SMOOTH_SIGMA"],
+            show_progress=True,
+            desc=f"PSTH ({event_name})",
+        )
+
+        split_ready = False
+        psth_by_cluster_odd = {}
+        psth_by_cluster_even = {}
+        bin_centers_odd = None
+        bin_centers_even = None
+        events_odd = np.array([])
+        events_even = np.array([])
+        contrasts_odd = np.array([])
+        contrasts_even = np.array([])
+        if include_splits:
+            odd_mask = (trial_idx % 2) == 1
+            even_mask = ~odd_mask
+            events_odd = events[odd_mask]
+            events_even = events[even_mask]
+            contrasts_odd = contrasts[odd_mask]
+            contrasts_even = contrasts[even_mask]
+            if len(events_odd) >= min_trials_split and len(events_even) >= min_trials_split:
+                split_ready = True
+                psth_by_cluster_odd, bin_centers_odd = compute_psth_for_clusters(
+                    spikes,
+                    selected_cluster_ids,
+                    events_odd,
+                    config["PSTH_WINDOW_START"],
+                    config["PSTH_WINDOW_END"],
+                    config["BIN_SIZE"],
+                    config["SMOOTH_SIGMA"],
+                    show_progress=True,
+                    desc=f"PSTH Odd ({event_name})",
+                )
+                psth_by_cluster_even, bin_centers_even = compute_psth_for_clusters(
+                    spikes,
+                    selected_cluster_ids,
+                    events_even,
+                    config["PSTH_WINDOW_START"],
+                    config["PSTH_WINDOW_END"],
+                    config["BIN_SIZE"],
+                    config["SMOOTH_SIGMA"],
+                    show_progress=True,
+                    desc=f"PSTH Even ({event_name})",
+                )
+
+        delays = []
+        responsive_flags = []
+        delays_odd = []
+        delays_even = []
+        for cid in tqdm(selected_cluster_ids, desc=f"Delays ({event_name})", unit="cluster"):
+            neuron_spikes = spike_times_by_cluster.get(cid, np.array([]))
+            psth_entry = psth_by_cluster.get(cid)
+            fr_raw = psth_entry["fr_raw"] if psth_entry else None
+            fr_smooth = psth_entry["fr_smooth"] if psth_entry else None
+            delay, is_responsive = calculate_delay(
+                fr_raw,
+                fr_smooth,
+                bin_centers,
+                event_config,
+                method=config.get("DELAY_METHOD"),
+                neuron_spikes=neuron_spikes,
+                event_times=events,
+                trial_contrasts=contrasts,
+            )
+            if not is_responsive:
+                delay = np.nan
+            delays.append(delay)
+            responsive_flags.append(bool(is_responsive))
+
+            if include_splits:
+                delay_odd = np.nan
+                delay_even = np.nan
+                if split_ready:
+                    odd_entry = psth_by_cluster_odd.get(cid)
+                    fr_raw_odd = odd_entry["fr_raw"] if odd_entry else None
+                    fr_smooth_odd = odd_entry["fr_smooth"] if odd_entry else None
+                    delay_odd, resp_odd = calculate_delay(
+                        fr_raw_odd,
+                        fr_smooth_odd,
+                        bin_centers_odd,
+                        event_config,
+                        method=config.get("DELAY_METHOD"),
+                        neuron_spikes=neuron_spikes,
+                        event_times=events_odd,
+                        trial_contrasts=contrasts_odd,
+                    )
+                    if not resp_odd:
+                        delay_odd = np.nan
+
+                    even_entry = psth_by_cluster_even.get(cid)
+                    fr_raw_even = even_entry["fr_raw"] if even_entry else None
+                    fr_smooth_even = even_entry["fr_smooth"] if even_entry else None
+                    delay_even, resp_even = calculate_delay(
+                        fr_raw_even,
+                        fr_smooth_even,
+                        bin_centers_even,
+                        event_config,
+                        method=config.get("DELAY_METHOD"),
+                        neuron_spikes=neuron_spikes,
+                        event_times=events_even,
+                        trial_contrasts=contrasts_even,
+                    )
+                    if not resp_even:
+                        delay_even = np.nan
+                delays_odd.append(delay_odd)
+                delays_even.append(delay_even)
+
+        df_res[delay_col] = delays
+        df_res[resp_col] = responsive_flags
+        if include_splits:
+            df_res[delay_odd_col] = delays_odd
+            df_res[delay_even_col] = delays_even
+
+    if str(config.get("DELAY_UNITS", "s")).lower().startswith("ms"):
+        for col in delay_columns:
+            if col in df_res.columns:
+                df_res[col] = df_res[col].astype(float) * 1000.0
+
+    if output_path is not None:
+        df_res.to_csv(output_path, index=False)
+        print(f"Computed delays for {len(df_res)} neurons. Saved to {output_path}.")
+    else:
+        print(f"Computed delays for {len(df_res)} neurons.")
+    return df_res
+
+
 def calculate_delay_reliability(
     spikes,
     clusters,
@@ -787,6 +1065,13 @@ def compute_population_coupling(
 
     The stPR curve uses leave-one-out population activity as a mean-normalized
     population rate.
+
+    Delay sign convention in this function:
+    - negative coupling_delay_ms => neuron tends to lead the population
+      (neuron spikes before the population modulation);
+    - positive coupling_delay_ms => neuron tends to follow the population.
+    This convention is enforced by mirroring each spike-triggered segment
+    before averaging.
 
     If intervals is provided, coupling is computed only within those windows, and
     spike-triggered segments that cross interval boundaries are excluded.
@@ -1071,7 +1356,9 @@ def compute_population_coupling(
                         continue
                     if invalid_prefix[end_idx] != invalid_prefix[start_idx]:
                         continue
-                    segments.append(pop_trace[start_idx:end_idx])
+                    # Mirror the lag axis so negative delays represent leaders
+                    # (neuron activity precedes population activity).
+                    segments.append(pop_trace[start_idx:end_idx][::-1])
 
                 if len(segments) == 0:
                     results.append(
