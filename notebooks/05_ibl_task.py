@@ -881,10 +881,10 @@ if not pid_list:
 # Option A: Set PID directly
 
 # PID = "c9664185-d3fd-4e0e-89cf-77c402038938" # The first VISp and ENTm
-# PID = "27bac116-ea57-4512-ad35-714a62d259cd" # VISp with passive
+PID = "27bac116-ea57-4512-ad35-714a62d259cd" # VISp with passive
 
 ## AUD PIDs for Passive Delay
-PID = "3282a590-8688-44fc-9811-cdf8b80d9a80" # AUDp responsive to both stim and feedback
+# PID = "3282a590-8688-44fc-9811-cdf8b80d9a80" # AUDp responsive to both stim and feedback
 # PID = "100433fa-2c59-4432-8295-aa27657fe3fb" # AUDp responsive to both stim and feedback, not as great
 # PID = "1df6ebb3-9d16-4c0f-96cc-e1b1596d2006" # AUDp strongly responsive to first move! Check the sequence here
 # PID = "b2ea68e2-c732-4d17-8166-1a8595fff225" # AUDp responsive to both stim and feedback with sustained responses
