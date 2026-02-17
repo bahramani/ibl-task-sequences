@@ -797,7 +797,7 @@ def plot_trial_raster_plotly(
             vertical_spacing=0.02,
             row_heights=[0.52, 0.12, 0.10, 0.10, 0.08, 0.08],
             subplot_titles=(
-                "Raster",
+                "",
                 "Avg PSTH",
                 metric_title,
                 "Wheel",
@@ -829,7 +829,9 @@ def plot_trial_raster_plotly(
     if region_colors is None:
         region_colors = _region_color_map(region_order)
 
-    for acronym in region_order:
+    raster_x_start = t_start - t_offset
+    raster_x_end = t_end - t_offset
+    for region_idx, acronym in enumerate(region_order):
         group = df_units[df_units["acronym"] == acronym]
         if group.empty:
             continue
@@ -848,8 +850,20 @@ def plot_trial_raster_plotly(
             row=1,
             col=1,
         )
+        if region_idx > 0:
+            fig.add_shape(
+                type="line",
+                x0=raster_x_start,
+                x1=raster_x_end,
+                y0=y0,
+                y1=y0,
+                line=dict(color="black", width=1),
+                layer="above",
+                row=1,
+                col=1,
+            )
         fig.add_annotation(
-            x=t_end - t_offset,
+            x=raster_x_end,
             y=(y0 + y1) / 2,
             xanchor="left",
             yanchor="middle",
@@ -1073,6 +1087,8 @@ def plot_trial_raster_plotly(
     fig.update_yaxes(title_text="Wheel (rad)", row=4, col=1)
     fig.update_yaxes(title_text="Paw (px/s)", row=5, col=1)
     fig.update_yaxes(title_text="Motion energy", row=6, col=1)
+    fig.update_xaxes(showgrid=False, row=1, col=1)
+    fig.update_yaxes(showgrid=False, row=1, col=1)
     fig.update_xaxes(title_text=xlabel_text, row=6, col=1)
     fig.update_xaxes(range=[t_start - t_offset, t_end - t_offset])
 
@@ -2225,7 +2241,7 @@ def plot_time_window_raster_plotly(
             vertical_spacing=0.02,
             row_heights=[0.52, 0.12, 0.10, 0.10, 0.08, 0.08],
             subplot_titles=(
-                "Raster",
+                "",
                 "Avg PSTH",
                 metric_title,
                 "Wheel",
@@ -2255,7 +2271,7 @@ def plot_time_window_raster_plotly(
 
     if region_colors is None:
         region_colors = _region_color_map(region_order)
-    for acronym in region_order:
+    for region_idx, acronym in enumerate(region_order):
         group = df_units[df_units["acronym"] == acronym]
         if group.empty:
             continue
@@ -2271,6 +2287,30 @@ def plot_time_window_raster_plotly(
             line=dict(width=0),
             fillcolor=fill_color,
             layer="below",
+            row=1,
+            col=1,
+        )
+        if region_idx > 0:
+            fig.add_shape(
+                type="line",
+                x0=t_start,
+                x1=t_end,
+                y0=y0,
+                y1=y0,
+                line=dict(color="black", width=1),
+                layer="above",
+                row=1,
+                col=1,
+            )
+        fig.add_annotation(
+            x=t_end,
+            y=(y0 + y1) / 2,
+            xanchor="left",
+            yanchor="middle",
+            text=acronym,
+            showarrow=False,
+            font=dict(size=10, color="gray"),
+            xshift=10,
             row=1,
             col=1,
         )
@@ -2516,6 +2556,8 @@ def plot_time_window_raster_plotly(
     fig.update_yaxes(title_text="Wheel (rad)", row=4, col=1)
     fig.update_yaxes(title_text="Paw (px/s)", row=5, col=1)
     fig.update_yaxes(title_text="Motion energy", row=6, col=1)
+    fig.update_xaxes(showgrid=False, row=1, col=1)
+    fig.update_yaxes(showgrid=False, row=1, col=1)
     fig.update_xaxes(title_text="Time in session (s)", row=6, col=1)
 
     fig.update_layout(

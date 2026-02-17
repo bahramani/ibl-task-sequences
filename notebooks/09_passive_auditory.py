@@ -259,6 +259,20 @@ def _build_delay_event_inputs(sl, passive_auditory_events):
     return events_by_name, contrasts_by_name, trial_idx_by_name
 
 
+def _passive_auditory_event_counts(passive_auditory_events):
+    passive_auditory_events = passive_auditory_events or {}
+    counts = {}
+    for key in ("tone", "noise", "valve"):
+        times = np.asarray(passive_auditory_events.get(key, np.array([])), dtype=float)
+        counts[key] = int(np.isfinite(times).sum())
+    return counts
+
+
+def _has_passive_auditory_part(passive_auditory_events):
+    counts = _passive_auditory_event_counts(passive_auditory_events)
+    return int(sum(counts.values())) > 0, counts
+
+
 def _build_event_session(event_times, event_name):
     return {"trials": {event_name: np.asarray(event_times, dtype=float)}}
 
@@ -367,8 +381,10 @@ def _build_multi_event_population_panel(
 
         cfg = dict(plot_config)
         cfg["PLOT_EVENT"] = event_name
-        cfg["POP_WINDOW_PRE"] = 0.5
-        cfg["POP_WINDOW_POST"] = 0.5
+        pop_window_pre = float(cfg.get("POP_WINDOW_PRE", 0.05))
+        pop_window_post = float(cfg.get("POP_WINDOW_POST", 0.15))
+        cfg["POP_WINDOW_PRE"] = pop_window_pre
+        cfg["POP_WINDOW_POST"] = pop_window_post
         fig_event = plot_population_sorted_plotly(
             event_session,
             spikes,
@@ -403,7 +419,7 @@ def _build_multi_event_population_panel(
             col=col,
             line=dict(color="black", dash="dash"),
         )
-        fig_panel.update_xaxes(range=[-0.5, 0.5], row=row, col=col)
+        fig_panel.update_xaxes(range=[-pop_window_pre, pop_window_post], row=row, col=col)
         fig_panel.update_yaxes(autorange="reversed", row=row, col=col)
 
     fig_panel.update_layout(
@@ -425,9 +441,9 @@ PID = "3282a590-8688-44fc-9811-cdf8b80d9a80" # None for selection  # Example: "3
 ONE_PREFERRED_MODE = "remote"  # "local" or "remote"
 ALLOW_REMOTE_FALLBACK = True
 
-LOAD_WHEEL = True
-LOAD_POSE = True
-LOAD_MOTION_ENERGY = True
+LOAD_WHEEL = False
+LOAD_POSE = False
+LOAD_MOTION_ENERGY = False
 LOAD_PUPIL = False
 
 path_data, _path_fig, path_data_processed, ibl_cache = setup_paths(BASE_PATH)
@@ -486,10 +502,18 @@ visual_TR, auditory_TR = load_task_replay_datasets(
 )
 passive_event_times = build_passive_event_times(visual_TR, auditory_TR)
 passive_auditory_events = build_passive_auditory_event_times(auditory_TR)
+has_passive_auditory, passive_auditory_counts = _has_passive_auditory_part(
+    passive_auditory_events
+)
 print(
     "Passive auditory events:",
-    {k: len(v) for k, v in (passive_auditory_events or {}).items()},
+    passive_auditory_counts,
 )
+if not has_passive_auditory:
+    raise RuntimeError(
+        f"Selected PID {pid} (EID {eid}) has no passive auditory events. "
+        "Choose a PID that includes passiveStims data."
+    )
 
 
 # %% CONFIG (analysis + plotting)
@@ -556,8 +580,8 @@ CONFIG_PLOT = {
     "SEQUENCE_WINDOW_POST": 1.0,
     "SEQUENCE_ALIGN_TO_EVENT": True,
     "SEQUENCE_ALIGN_TO_STIM": True,
-    "POP_WINDOW_PRE": 0.5,
-    "POP_WINDOW_POST": 0.5,
+    "POP_WINDOW_PRE": 0.05,
+    "POP_WINDOW_POST": 0.15,
     "POP_BIN_SIZE": 0.005,
     "POP_SMOOTH_SIGMA": 2,
     "POP_CMAP_NAME": "bwr",
@@ -570,13 +594,13 @@ PLOT_LABEL_MIN = float(CONFIG_CALC.get("CALC_LABEL_MIN", 0.5))
 CORR_MIN_N = 2
 
 TRIAL_INDEX = 293 
-TRIAL_RASTER_SORT = "Default (Depth)"
+TRIAL_RASTER_SORT = "Spont stPR Delay"
 
 GENERAL_RASTER_START = 4543  # defaults to first spike time
 GENERAL_RASTER_END = 4549  # defaults to +10s from start
-GENERAL_RASTER_SORT = "Default (Depth)"
+GENERAL_RASTER_SORT = "Spont stPR Delay"
 
-HEATMAP_SORT = "Task stPR Delay" # "Own Event Delay"
+HEATMAP_SORT = "Own Event Delay" # "Own Event Delay"
 
 RASTER_SORT_MAP = {
     "Default (Depth)": "depth",
@@ -938,8 +962,8 @@ heatmap_event_specs = [
     ("Feedback Correct", "feedback_correct_times"),
     ("Feedback Incorrect", "feedback_incorrect_times"),
     ("Passive Tone", "passive_tone_times"),
-    ("Passive Noise", "passive_noise_times"),
     ("Passive Valve", "passive_valve_times"),
+    ("Passive Noise", "passive_noise_times"),
 ]
 
 event_sessions = {}
@@ -1528,6 +1552,39 @@ def _get_pids_for_regions_like_03(one_client, regions, tag):
     return list(dict.fromkeys(all_pids))
 
 
+def _pid_has_passive_auditory_part(pid_value):
+    eid_pid = None
+    last_pid2eid_error = None
+    for one_client in (one, one_remote, one_local):
+        if one_client is None:
+            continue
+        try:
+            eid_pid, _ = one_client.pid2eid(pid_value)
+            if eid_pid is not None:
+                break
+        except Exception as exc:
+            last_pid2eid_error = exc
+    if eid_pid is None:
+        return (
+            False,
+            {"tone": 0, "noise": 0, "valve": 0},
+            f"pid2eid failed: {last_pid2eid_error}",
+        )
+
+    try:
+        _visual_tr_pid, auditory_tr_pid = load_task_replay_datasets(
+            eid_pid,
+            one_local,
+            one_remote,
+            allow_remote=ALLOW_REMOTE_FALLBACK,
+        )
+        passive_auditory_events_pid = build_passive_auditory_event_times(auditory_tr_pid)
+        has_passive, counts = _has_passive_auditory_part(passive_auditory_events_pid)
+        return has_passive, counts, None
+    except Exception as exc:
+        return False, {"tone": 0, "noise": 0, "valve": 0}, str(exc)
+
+
 pid_query_one = one_remote if "one_remote" in globals() and one_remote is not None else one
 if ALL_PID_OVERRIDE_PIDS:
     all_region_pids = list(dict.fromkeys(ALL_PID_OVERRIDE_PIDS))
@@ -1543,6 +1600,36 @@ print(
 )
 if len(all_region_pids) > 0:
     print("First 10 PIDs:", all_region_pids[:10])
+
+candidate_region_pids = list(all_region_pids)
+all_region_pids = []
+pids_without_passive = []
+passive_check_failures = []
+for pid_value in candidate_region_pids:
+    has_passive, passive_counts, err_msg = _pid_has_passive_auditory_part(pid_value)
+    if err_msg is not None:
+        passive_check_failures.append({"pid": pid_value, "error": err_msg})
+        continue
+    if has_passive:
+        all_region_pids.append(pid_value)
+    else:
+        pids_without_passive.append(
+            {
+                "pid": pid_value,
+                "tone_events": passive_counts.get("tone", 0),
+                "noise_events": passive_counts.get("noise", 0),
+                "valve_events": passive_counts.get("valve", 0),
+            }
+        )
+print(
+    f"PIDs with passive auditory data: {len(all_region_pids)}/{len(candidate_region_pids)}."
+)
+if pids_without_passive:
+    print(f"Skipped PIDs without passive auditory events: {len(pids_without_passive)}")
+    display(pd.DataFrame(pids_without_passive).head(20))
+if passive_check_failures:
+    print(f"PIDs skipped due to passive-data check errors: {len(passive_check_failures)}")
+    display(pd.DataFrame(passive_check_failures).head(20))
 
 
 # %% All PIDs with AUDp: per-PID calculations, region filter, and merge neurons
@@ -1567,6 +1654,9 @@ def _compute_region_units_for_pid(pid_value, region_prefix, label_min):
         allow_remote=ALLOW_REMOTE_FALLBACK,
     )
     passive_auditory_events_pid = build_passive_auditory_event_times(auditory_tr_pid)
+    has_passive_pid, _passive_counts_pid = _has_passive_auditory_part(passive_auditory_events_pid)
+    if not has_passive_pid:
+        return pd.DataFrame()
     events_by_name_pid, contrasts_by_name_pid, trial_idx_by_name_pid = _build_delay_event_inputs(
         sl_pid,
         passive_auditory_events_pid,
@@ -2175,6 +2265,646 @@ else:
             fig_corr_all.update_xaxes(title_text=var_x_name_all)
             fig_corr_all.update_yaxes(title_text=var_y_name_all)
             show_fig(fig_corr_all)
+
+
+# %% All PIDs with AUDp: most variable auditory-delay neurons vs stPR delay sign
+if all_region_units.empty:
+    print("No combined neurons available for auditory variability analysis.")
+else:
+    delay_cols_active = [
+        "Delay (Stim On)",
+        "Delay (Feedback Correct)",
+        "Delay (Feedback Incorrect)",
+    ]
+    delay_cols_passive = [
+        "Delay (Passive Tone)",
+        "Delay (Passive Noise)",
+        "Delay (Passive Valve)",
+    ]
+    delay_cols_all = delay_cols_active + delay_cols_passive
+    stpr_delay_cols = [
+        "stPR Delay (Task)",
+        "stPR Delay (ITI)",
+        "stPR Delay (Spont)",
+    ]
+
+    available_delay_cols = [col for col in delay_cols_all if col in all_region_units.columns]
+    available_active_cols = [col for col in delay_cols_active if col in all_region_units.columns]
+    available_passive_cols = [col for col in delay_cols_passive if col in all_region_units.columns]
+    available_stpr_cols = [col for col in stpr_delay_cols if col in all_region_units.columns]
+
+    if len(available_delay_cols) < 2:
+        print("Need at least 2 delay columns to compute per-neuron variability.")
+    elif not available_stpr_cols:
+        print("No stPR delay columns available for comparison.")
+    else:
+        variability_cols = [
+            "unit_id",
+            "pid",
+            "cluster_id",
+            "region",
+            *available_delay_cols,
+            *available_stpr_cols,
+        ]
+        var_df = all_region_units[variability_cols].copy()
+
+        def _rowwise_variability_stats(df_values, min_valid=2):
+            arr = df_values.to_numpy(dtype=float)
+            n_rows = arr.shape[0]
+            std_vals = np.full(n_rows, np.nan, dtype=float)
+            range_vals = np.full(n_rows, np.nan, dtype=float)
+            n_valid = np.zeros(n_rows, dtype=int)
+            for i in range(n_rows):
+                finite_vals = arr[i, np.isfinite(arr[i])]
+                n_valid[i] = finite_vals.size
+                if finite_vals.size >= min_valid:
+                    std_vals[i] = float(np.std(finite_vals))
+                    range_vals[i] = float(np.max(finite_vals) - np.min(finite_vals))
+            return std_vals, range_vals, n_valid
+
+        all_std, all_range, all_n = _rowwise_variability_stats(
+            var_df[available_delay_cols],
+            min_valid=2,
+        )
+        var_df["delay_variability_std"] = all_std
+        var_df["delay_variability_range"] = all_range
+        var_df["delay_variability_ncols"] = all_n
+
+        if len(available_active_cols) >= 2:
+            active_std, _, _ = _rowwise_variability_stats(
+                var_df[available_active_cols],
+                min_valid=2,
+            )
+            var_df["delay_variability_std_active"] = active_std
+        else:
+            var_df["delay_variability_std_active"] = np.nan
+
+        if len(available_passive_cols) >= 2:
+            passive_std, _, _ = _rowwise_variability_stats(
+                var_df[available_passive_cols],
+                min_valid=2,
+            )
+            var_df["delay_variability_std_passive"] = passive_std
+        else:
+            var_df["delay_variability_std_passive"] = np.nan
+
+        valid_var_mask = np.isfinite(var_df["delay_variability_std"].to_numpy(dtype=float))
+        n_valid_var = int(valid_var_mask.sum())
+        if n_valid_var < CORR_MIN_N:
+            print(
+                "Not enough neurons with finite delay-variability values "
+                f"(n={n_valid_var}, min_n={CORR_MIN_N})."
+            )
+        else:
+            TOP_QUANTILE = 0.75
+            threshold = float(
+                np.nanquantile(var_df.loc[valid_var_mask, "delay_variability_std"], TOP_QUANTILE)
+            )
+            var_df["is_top_variable"] = (
+                valid_var_mask
+                & (var_df["delay_variability_std"].to_numpy(dtype=float) >= threshold)
+            )
+            top_mask = var_df["is_top_variable"].to_numpy(dtype=bool)
+            non_top_mask = valid_var_mask & ~top_mask
+            top_pct = int(round((1.0 - TOP_QUANTILE) * 100))
+
+            print(
+                "Delay columns used for auditory variability: "
+                + ", ".join(available_delay_cols)
+            )
+            print(
+                f"Top-variable neurons: top {top_pct}% by delay_variability_std "
+                f"(threshold={threshold:.3f}) | "
+                f"n={int(top_mask.sum())}/{n_valid_var} neurons."
+            )
+
+            top_cols = [
+                "unit_id",
+                "pid",
+                "cluster_id",
+                "region",
+                "delay_variability_std",
+                "delay_variability_std_active",
+                "delay_variability_std_passive",
+                "delay_variability_range",
+                *available_stpr_cols,
+            ]
+            top_preview = (
+                var_df.loc[top_mask, top_cols]
+                .sort_values("delay_variability_std", ascending=False)
+                .head(30)
+                .reset_index(drop=True)
+            )
+            display(top_preview)
+
+            summary_rows = []
+            for col in available_stpr_cols:
+                x_vals = var_df["delay_variability_std"].to_numpy(dtype=float)
+                y_vals = var_df[col].to_numpy(dtype=float)
+                r_p, n_p = _pearsonr_with_n(x_vals, y_vals, min_n=CORR_MIN_N)
+                r_s, n_s = _spearmanr_with_n(x_vals, y_vals, min_n=CORR_MIN_N)
+
+                top_vals = var_df.loc[top_mask, col].to_numpy(dtype=float)
+                top_vals = top_vals[np.isfinite(top_vals)]
+                non_top_vals = var_df.loc[non_top_mask, col].to_numpy(dtype=float)
+                non_top_vals = non_top_vals[np.isfinite(non_top_vals)]
+
+                summary_rows.append(
+                    {
+                        "stPR_delay_metric": col,
+                        "pearson_r_vs_variability": r_p,
+                        "pearson_n": int(n_p),
+                        "spearman_rho_vs_variability": r_s,
+                        "spearman_n": int(n_s),
+                        "median_top_variable": (
+                            float(np.median(top_vals)) if top_vals.size > 0 else np.nan
+                        ),
+                        "median_remaining": (
+                            float(np.median(non_top_vals))
+                            if non_top_vals.size > 0
+                            else np.nan
+                        ),
+                        "positive_frac_top_variable": (
+                            float(np.mean(top_vals > 0)) if top_vals.size > 0 else np.nan
+                        ),
+                        "positive_frac_remaining": (
+                            float(np.mean(non_top_vals > 0))
+                            if non_top_vals.size > 0
+                            else np.nan
+                        ),
+                        "n_top_valid": int(top_vals.size),
+                        "n_remaining_valid": int(non_top_vals.size),
+                    }
+                )
+
+            summary_df = pd.DataFrame(summary_rows)
+            display(summary_df)
+
+            if not summary_df.empty:
+                fig_pos_frac = go.Figure()
+                fig_pos_frac.add_trace(
+                    go.Bar(
+                        x=summary_df["stPR_delay_metric"].tolist(),
+                        y=summary_df["positive_frac_top_variable"].to_numpy(dtype=float),
+                        name=f"Top {top_pct}% variable",
+                        marker_color="#d62728",
+                    )
+                )
+                fig_pos_frac.add_trace(
+                    go.Bar(
+                        x=summary_df["stPR_delay_metric"].tolist(),
+                        y=summary_df["positive_frac_remaining"].to_numpy(dtype=float),
+                        name="Remaining neurons",
+                        marker_color="#7f7f7f",
+                    )
+                )
+                fig_pos_frac.update_layout(
+                    title=(
+                        f"Positive stPR Delay Fraction | Most Variable Auditory-Delay Neurons "
+                        f"(Region {ALL_PID_TARGET_REGION})"
+                    ),
+                    barmode="group",
+                    template=plot_config.get("PLOTLY_TEMPLATE", "plotly_white"),
+                    width=980,
+                    height=520,
+                    margin=dict(l=70, r=30, t=90, b=70),
+                    yaxis=dict(
+                        title="Fraction with positive stPR delay",
+                        range=[0, 1],
+                        tickformat=".0%",
+                    ),
+                )
+                fig_pos_frac.update_xaxes(title_text="stPR delay metric")
+                show_fig(fig_pos_frac)
+
+                fig_scatter = make_subplots(
+                    rows=1,
+                    cols=len(available_stpr_cols),
+                    subplot_titles=available_stpr_cols,
+                    horizontal_spacing=0.06 if len(available_stpr_cols) > 1 else 0.1,
+                )
+                for idx, col in enumerate(available_stpr_cols, start=1):
+                    scatter_mask = np.isfinite(
+                        var_df["delay_variability_std"].to_numpy(dtype=float)
+                    ) & np.isfinite(var_df[col].to_numpy(dtype=float))
+                    scatter_df = var_df.loc[
+                        scatter_mask,
+                        [
+                            "unit_id",
+                            "pid",
+                            "cluster_id",
+                            "region",
+                            "delay_variability_std",
+                            col,
+                            "is_top_variable",
+                        ],
+                    ].copy()
+                    if scatter_df.empty:
+                        continue
+
+                    group_specs = [
+                        ("Remaining neurons", ~scatter_df["is_top_variable"], "#7f7f7f"),
+                        (f"Top {top_pct}% variable", scatter_df["is_top_variable"], "#d62728"),
+                    ]
+                    for group_name, group_mask, color in group_specs:
+                        group_df = scatter_df.loc[group_mask].copy()
+                        if group_df.empty:
+                            continue
+                        customdata = np.column_stack(
+                            [
+                                group_df["unit_id"].astype(str).to_numpy(),
+                                group_df["pid"].astype(str).to_numpy(),
+                                group_df["region"].astype(str).to_numpy(),
+                                group_df["cluster_id"].astype(str).to_numpy(),
+                            ]
+                        )
+                        fig_scatter.add_trace(
+                            go.Scatter(
+                                x=group_df["delay_variability_std"].to_numpy(dtype=float),
+                                y=group_df[col].to_numpy(dtype=float),
+                                mode="markers",
+                                name=group_name,
+                                showlegend=(idx == 1),
+                                customdata=customdata,
+                                marker=dict(size=6, opacity=0.75, color=color),
+                                hovertemplate=(
+                                    "Group: %{fullData.name}<br>"
+                                    "Unit: %{customdata[0]}<br>"
+                                    "PID: %{customdata[1]}<br>"
+                                    "Region: %{customdata[2]}<br>"
+                                    "Cluster ID: %{customdata[3]}<br>"
+                                    "Delay variability (std): %{x:.3f}<br>"
+                                    f"{col}: %{{y:.3f}}<extra></extra>"
+                                ),
+                            ),
+                            row=1,
+                            col=idx,
+                        )
+
+                    fig_scatter.update_xaxes(
+                        title_text="Auditory-delay variability (std)",
+                        row=1,
+                        col=idx,
+                    )
+                    fig_scatter.update_yaxes(
+                        title_text="stPR delay",
+                        zeroline=True,
+                        zerolinecolor="black",
+                        row=1,
+                        col=idx,
+                    )
+
+                fig_scatter.update_layout(
+                    title=(
+                        "Auditory-Delay Variability vs stPR Delay "
+                        f"| Region {ALL_PID_TARGET_REGION}"
+                    ),
+                    template=plot_config.get("PLOTLY_TEMPLATE", "plotly_white"),
+                    width=max(980, 380 * len(available_stpr_cols)),
+                    height=520,
+                    margin=dict(l=70, r=30, t=90, b=70),
+                    legend=dict(orientation="h", yanchor="top", y=-0.17, xanchor="left", x=0),
+                )
+                show_fig(fig_scatter)
+
+
+# %% All PIDs with AUDp: most variable auditory-delay neurons vs stPR strength sign
+if all_region_units.empty:
+    print("No combined neurons available for auditory variability vs stPR strength analysis.")
+else:
+    delay_cols_active_strength = [
+        "Delay (Stim On)",
+        "Delay (Feedback Correct)",
+        "Delay (Feedback Incorrect)",
+    ]
+    delay_cols_passive_strength = [
+        "Delay (Passive Tone)",
+        "Delay (Passive Noise)",
+        "Delay (Passive Valve)",
+    ]
+    delay_cols_all_strength = delay_cols_active_strength + delay_cols_passive_strength
+    stpr_strength_cols = [
+        "stPR Strength (Task)",
+        "stPR Strength (ITI)",
+        "stPR Strength (Spont)",
+    ]
+
+    available_delay_cols_strength = [
+        col for col in delay_cols_all_strength if col in all_region_units.columns
+    ]
+    available_active_cols_strength = [
+        col for col in delay_cols_active_strength if col in all_region_units.columns
+    ]
+    available_passive_cols_strength = [
+        col for col in delay_cols_passive_strength if col in all_region_units.columns
+    ]
+    available_strength_cols = [col for col in stpr_strength_cols if col in all_region_units.columns]
+
+    if len(available_delay_cols_strength) < 2:
+        print("Need at least 2 delay columns to compute per-neuron variability.")
+    elif not available_strength_cols:
+        print("No stPR strength columns available for comparison.")
+    else:
+        variability_cols_strength = [
+            "unit_id",
+            "pid",
+            "cluster_id",
+            "region",
+            *available_delay_cols_strength,
+            *available_strength_cols,
+        ]
+        var_df_strength = all_region_units[variability_cols_strength].copy()
+
+        def _rowwise_variability_stats_strength(df_values, min_valid=2):
+            arr = df_values.to_numpy(dtype=float)
+            n_rows = arr.shape[0]
+            std_vals = np.full(n_rows, np.nan, dtype=float)
+            range_vals = np.full(n_rows, np.nan, dtype=float)
+            n_valid = np.zeros(n_rows, dtype=int)
+            for i in range(n_rows):
+                finite_vals = arr[i, np.isfinite(arr[i])]
+                n_valid[i] = finite_vals.size
+                if finite_vals.size >= min_valid:
+                    std_vals[i] = float(np.std(finite_vals))
+                    range_vals[i] = float(np.max(finite_vals) - np.min(finite_vals))
+            return std_vals, range_vals, n_valid
+
+        all_std_strength, all_range_strength, all_n_strength = _rowwise_variability_stats_strength(
+            var_df_strength[available_delay_cols_strength],
+            min_valid=2,
+        )
+        var_df_strength["delay_variability_std"] = all_std_strength
+        var_df_strength["delay_variability_range"] = all_range_strength
+        var_df_strength["delay_variability_ncols"] = all_n_strength
+
+        if len(available_active_cols_strength) >= 2:
+            active_std_strength, _, _ = _rowwise_variability_stats_strength(
+                var_df_strength[available_active_cols_strength],
+                min_valid=2,
+            )
+            var_df_strength["delay_variability_std_active"] = active_std_strength
+        else:
+            var_df_strength["delay_variability_std_active"] = np.nan
+
+        if len(available_passive_cols_strength) >= 2:
+            passive_std_strength, _, _ = _rowwise_variability_stats_strength(
+                var_df_strength[available_passive_cols_strength],
+                min_valid=2,
+            )
+            var_df_strength["delay_variability_std_passive"] = passive_std_strength
+        else:
+            var_df_strength["delay_variability_std_passive"] = np.nan
+
+        valid_var_mask_strength = np.isfinite(
+            var_df_strength["delay_variability_std"].to_numpy(dtype=float)
+        )
+        n_valid_var_strength = int(valid_var_mask_strength.sum())
+        if n_valid_var_strength < CORR_MIN_N:
+            print(
+                "Not enough neurons with finite delay-variability values "
+                f"(n={n_valid_var_strength}, min_n={CORR_MIN_N})."
+            )
+        else:
+            TOP_QUANTILE_STRENGTH = 0.75
+            threshold_strength = float(
+                np.nanquantile(
+                    var_df_strength.loc[valid_var_mask_strength, "delay_variability_std"],
+                    TOP_QUANTILE_STRENGTH,
+                )
+            )
+            var_df_strength["is_top_variable"] = (
+                valid_var_mask_strength
+                & (
+                    var_df_strength["delay_variability_std"].to_numpy(dtype=float)
+                    >= threshold_strength
+                )
+            )
+            top_mask_strength = var_df_strength["is_top_variable"].to_numpy(dtype=bool)
+            non_top_mask_strength = valid_var_mask_strength & ~top_mask_strength
+            top_pct_strength = int(round((1.0 - TOP_QUANTILE_STRENGTH) * 100))
+
+            print(
+                "Delay columns used for auditory variability: "
+                + ", ".join(available_delay_cols_strength)
+            )
+            print(
+                f"Top-variable neurons: top {top_pct_strength}% by delay_variability_std "
+                f"(threshold={threshold_strength:.3f}) | "
+                f"n={int(top_mask_strength.sum())}/{n_valid_var_strength} neurons."
+            )
+
+            top_cols_strength = [
+                "unit_id",
+                "pid",
+                "cluster_id",
+                "region",
+                "delay_variability_std",
+                "delay_variability_std_active",
+                "delay_variability_std_passive",
+                "delay_variability_range",
+                *available_strength_cols,
+            ]
+            top_preview_strength = (
+                var_df_strength.loc[top_mask_strength, top_cols_strength]
+                .sort_values("delay_variability_std", ascending=False)
+                .head(30)
+                .reset_index(drop=True)
+            )
+            display(top_preview_strength)
+
+            summary_rows_strength = []
+            for col in available_strength_cols:
+                x_vals_strength = var_df_strength["delay_variability_std"].to_numpy(dtype=float)
+                y_vals_strength = var_df_strength[col].to_numpy(dtype=float)
+                r_p_strength, n_p_strength = _pearsonr_with_n(
+                    x_vals_strength, y_vals_strength, min_n=CORR_MIN_N
+                )
+                r_s_strength, n_s_strength = _spearmanr_with_n(
+                    x_vals_strength, y_vals_strength, min_n=CORR_MIN_N
+                )
+
+                top_vals_strength = var_df_strength.loc[top_mask_strength, col].to_numpy(dtype=float)
+                top_vals_strength = top_vals_strength[np.isfinite(top_vals_strength)]
+                non_top_vals_strength = var_df_strength.loc[
+                    non_top_mask_strength, col
+                ].to_numpy(dtype=float)
+                non_top_vals_strength = non_top_vals_strength[np.isfinite(non_top_vals_strength)]
+
+                summary_rows_strength.append(
+                    {
+                        "stPR_strength_metric": col,
+                        "pearson_r_vs_variability": r_p_strength,
+                        "pearson_n": int(n_p_strength),
+                        "spearman_rho_vs_variability": r_s_strength,
+                        "spearman_n": int(n_s_strength),
+                        "median_top_variable": (
+                            float(np.median(top_vals_strength))
+                            if top_vals_strength.size > 0
+                            else np.nan
+                        ),
+                        "median_remaining": (
+                            float(np.median(non_top_vals_strength))
+                            if non_top_vals_strength.size > 0
+                            else np.nan
+                        ),
+                        "positive_frac_top_variable": (
+                            float(np.mean(top_vals_strength > 0))
+                            if top_vals_strength.size > 0
+                            else np.nan
+                        ),
+                        "positive_frac_remaining": (
+                            float(np.mean(non_top_vals_strength > 0))
+                            if non_top_vals_strength.size > 0
+                            else np.nan
+                        ),
+                        "n_top_valid": int(top_vals_strength.size),
+                        "n_remaining_valid": int(non_top_vals_strength.size),
+                    }
+                )
+
+            summary_df_strength = pd.DataFrame(summary_rows_strength)
+            display(summary_df_strength)
+
+            if not summary_df_strength.empty:
+                fig_pos_frac_strength = go.Figure()
+                fig_pos_frac_strength.add_trace(
+                    go.Bar(
+                        x=summary_df_strength["stPR_strength_metric"].tolist(),
+                        y=summary_df_strength["positive_frac_top_variable"].to_numpy(dtype=float),
+                        name=f"Top {top_pct_strength}% variable",
+                        marker_color="#d62728",
+                    )
+                )
+                fig_pos_frac_strength.add_trace(
+                    go.Bar(
+                        x=summary_df_strength["stPR_strength_metric"].tolist(),
+                        y=summary_df_strength["positive_frac_remaining"].to_numpy(dtype=float),
+                        name="Remaining neurons",
+                        marker_color="#7f7f7f",
+                    )
+                )
+                fig_pos_frac_strength.update_layout(
+                    title=(
+                        "Positive stPR Strength Fraction | Most Variable Auditory-Delay Neurons "
+                        f"(Region {ALL_PID_TARGET_REGION})"
+                    ),
+                    barmode="group",
+                    template=plot_config.get("PLOTLY_TEMPLATE", "plotly_white"),
+                    width=980,
+                    height=520,
+                    margin=dict(l=70, r=30, t=90, b=70),
+                    yaxis=dict(
+                        title="Fraction with positive stPR strength",
+                        range=[0, 1],
+                        tickformat=".0%",
+                    ),
+                )
+                fig_pos_frac_strength.update_xaxes(title_text="stPR strength metric")
+                show_fig(fig_pos_frac_strength)
+
+                fig_scatter_strength = make_subplots(
+                    rows=1,
+                    cols=len(available_strength_cols),
+                    subplot_titles=available_strength_cols,
+                    horizontal_spacing=0.06 if len(available_strength_cols) > 1 else 0.1,
+                )
+                for idx, col in enumerate(available_strength_cols, start=1):
+                    scatter_mask_strength = np.isfinite(
+                        var_df_strength["delay_variability_std"].to_numpy(dtype=float)
+                    ) & np.isfinite(var_df_strength[col].to_numpy(dtype=float))
+                    scatter_df_strength = var_df_strength.loc[
+                        scatter_mask_strength,
+                        [
+                            "unit_id",
+                            "pid",
+                            "cluster_id",
+                            "region",
+                            "delay_variability_std",
+                            col,
+                            "is_top_variable",
+                        ],
+                    ].copy()
+                    if scatter_df_strength.empty:
+                        continue
+
+                    group_specs_strength = [
+                        (
+                            "Remaining neurons",
+                            ~scatter_df_strength["is_top_variable"],
+                            "#7f7f7f",
+                        ),
+                        (
+                            f"Top {top_pct_strength}% variable",
+                            scatter_df_strength["is_top_variable"],
+                            "#d62728",
+                        ),
+                    ]
+                    for group_name, group_mask, color in group_specs_strength:
+                        group_df_strength = scatter_df_strength.loc[group_mask].copy()
+                        if group_df_strength.empty:
+                            continue
+                        customdata_strength = np.column_stack(
+                            [
+                                group_df_strength["unit_id"].astype(str).to_numpy(),
+                                group_df_strength["pid"].astype(str).to_numpy(),
+                                group_df_strength["region"].astype(str).to_numpy(),
+                                group_df_strength["cluster_id"].astype(str).to_numpy(),
+                            ]
+                        )
+                        fig_scatter_strength.add_trace(
+                            go.Scatter(
+                                x=group_df_strength["delay_variability_std"].to_numpy(dtype=float),
+                                y=group_df_strength[col].to_numpy(dtype=float),
+                                mode="markers",
+                                name=group_name,
+                                showlegend=(idx == 1),
+                                customdata=customdata_strength,
+                                marker=dict(size=6, opacity=0.75, color=color),
+                                hovertemplate=(
+                                    "Group: %{fullData.name}<br>"
+                                    "Unit: %{customdata[0]}<br>"
+                                    "PID: %{customdata[1]}<br>"
+                                    "Region: %{customdata[2]}<br>"
+                                    "Cluster ID: %{customdata[3]}<br>"
+                                    "Delay variability (std): %{x:.3f}<br>"
+                                    f"{col}: %{{y:.3f}}<extra></extra>"
+                                ),
+                            ),
+                            row=1,
+                            col=idx,
+                        )
+
+                    fig_scatter_strength.update_xaxes(
+                        title_text="Auditory-delay variability (std)",
+                        row=1,
+                        col=idx,
+                    )
+                    fig_scatter_strength.update_yaxes(
+                        title_text="stPR strength",
+                        zeroline=True,
+                        zerolinecolor="black",
+                        row=1,
+                        col=idx,
+                    )
+
+                fig_scatter_strength.update_layout(
+                    title=(
+                        "Auditory-Delay Variability vs stPR Strength "
+                        f"| Region {ALL_PID_TARGET_REGION}"
+                    ),
+                    template=plot_config.get("PLOTLY_TEMPLATE", "plotly_white"),
+                    width=max(980, 380 * len(available_strength_cols)),
+                    height=520,
+                    margin=dict(l=70, r=30, t=90, b=70),
+                    legend=dict(
+                        orientation="h",
+                        yanchor="top",
+                        y=-0.17,
+                        xanchor="left",
+                        x=0,
+                    ),
+                )
+                show_fig(fig_scatter_strength)
 
 
 # %% End of notebook
