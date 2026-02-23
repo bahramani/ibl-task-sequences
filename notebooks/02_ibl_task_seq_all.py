@@ -41,8 +41,8 @@ CONFIG_CALC = {
     "CALC_SPONT": True,
     # Events to compute delays for
     "EVENT_NAMES": ["stimOn_times", "firstMovement_times", "response_times", "feedback_times"],
-    # Delay calculation method: "center_of_mass", "psth_peak", or "tfs"
-    "DELAY_METHOD": "center_of_mass",
+    # Delay calculation method: "com", "psth_peak", or "tfs"
+    "DELAY_METHOD": "com",
     # Values treated as 100% contrast for the TFS method
     "FULL_CONTRAST_VALUES": (1.0, 100.0),
     # PSTH bin width (seconds)

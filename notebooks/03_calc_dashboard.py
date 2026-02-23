@@ -34,7 +34,7 @@ CONFIG_CALC = {
     "CALC_LABEL_MIN": 0.5,
     "CALC_SPONT": True,
     "EVENT_NAMES": ["stimOn_times", "firstMovement_times", "response_times", "feedback_times"],
-    "DELAY_METHOD": "center_of_mass",
+    "DELAY_METHOD": "com",
     "DELAY_UNITS": "ms",
     "FULL_CONTRAST_VALUES": (1.0, 100.0),
     "DELAY_WINDOWS": {
@@ -88,10 +88,11 @@ CONFIG_PLOT = {
 }
 
 # Update this list with the PIDs you want to process, or leave as None to query by subject.
-PIDS = None # ['c9664185-d3fd-4e0e-89cf-77c402038938']
+PIDS = ['afe87fbb-3a17-461f-b333-e22903f1d70d', '3eb6e6e0-8a57-49d6-b7c9-f39d5834e682',
+        'eebcaf65-7fa4-4118-869d-a084e84530e2']
 SUBJECT = None # "CSH_ZAD_029"
 # If SUBJECT is None, use REGIONS to find all PIDs from sessions with those atlas acronyms.
-REGIONS = ["VISp", "AUDpo", "MOs", "GRN", "ZI", "SCm"] 
+REGIONS = None # ["VISp", "AUDpo", "MOs", "GRN", "ZI", "SCm"] 
 TAG = "2025_Q3_IBL_et_al_BWM"
 
 

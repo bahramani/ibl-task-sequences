@@ -15,6 +15,90 @@ except ImportError:  # Graceful fallback if tqdm is unavailable.
 
 from rastermap import Rastermap, utils
 
+_LATENZY_FN = None
+_LATENZY_IMPORT_ATTEMPTED = False
+_LATENZY_IMPORT_ERROR = None
+_LATENZY_WARNED_UNAVAILABLE = False
+_LATENZY_WARNED_RUNTIME = False
+
+
+def _get_latenzy_callable():
+    """Lazy-load optional latenzy dependency."""
+    global _LATENZY_FN
+    global _LATENZY_IMPORT_ATTEMPTED
+    global _LATENZY_IMPORT_ERROR
+    if _LATENZY_IMPORT_ATTEMPTED:
+        return _LATENZY_FN
+    _LATENZY_IMPORT_ATTEMPTED = True
+    try:
+        from latenzy import latenzy as _latenzy_fn
+        _LATENZY_FN = _latenzy_fn
+        return _LATENZY_FN
+    except Exception as exc:
+        _LATENZY_IMPORT_ERROR = exc
+        try:
+            import latenzy as _latenzy_mod
+            candidate = getattr(_latenzy_mod, "latenzy", None)
+            if callable(candidate):
+                _LATENZY_FN = candidate
+                return _LATENZY_FN
+            _LATENZY_IMPORT_ERROR = RuntimeError(
+                "imported module 'latenzy' has no callable 'latenzy' attribute"
+            )
+        except Exception:
+            pass
+    return None
+
+
+def _warn_latenzy_unavailable_once():
+    global _LATENZY_WARNED_UNAVAILABLE
+    if _LATENZY_WARNED_UNAVAILABLE:
+        return
+    _LATENZY_WARNED_UNAVAILABLE = True
+    msg = (
+        "Warning: DELAY_METHOD='latenzy' requested but package 'latenzy' could not be "
+        "imported."
+    )
+    if _LATENZY_IMPORT_ERROR is not None:
+        msg = f"{msg} ({_LATENZY_IMPORT_ERROR})"
+    print(msg)
+
+
+def _warn_latenzy_runtime_once(exc):
+    global _LATENZY_WARNED_RUNTIME
+    if _LATENZY_WARNED_RUNTIME:
+        return
+    _LATENZY_WARNED_RUNTIME = True
+    print(f"Warning: latenzy failed at runtime; returning NaN delays. ({exc})")
+
+
+def _first_finite_scalar(value):
+    if value is None:
+        return np.nan
+    try:
+        arr = np.asarray(value, dtype=float).reshape(-1)
+    except Exception:
+        return np.nan
+    if arr.size == 0:
+        return np.nan
+    finite = arr[np.isfinite(arr)]
+    if finite.size > 0:
+        return float(finite[0])
+    return np.nan
+
+
+def _parse_latenzy_output(output):
+    latency = np.nan
+    score = np.nan
+    if isinstance(output, (tuple, list)):
+        if len(output) >= 1:
+            latency = _first_finite_scalar(output[0])
+        if len(output) >= 2:
+            score = _first_finite_scalar(output[1])
+    else:
+        latency = _first_finite_scalar(output)
+    return latency, score
+
 
 def get_trial_contrasts(sl):
     """Return per-trial contrasts (abs max of left/right), NaNs -> 0."""
@@ -78,6 +162,18 @@ def event_label(event_name):
         "passive_noise_times": "Passive Noise",
         "passive_valve_times": "Passive Valve",
         "passive_all_times": "Passive (All)",
+        "wh_brief_times": "Whisking Brief",
+        "wh_long_times": "Whisking Long",
+        "wh_all_times": "Whisking All",
+        "wh_brief_times_spont": "Whisking Brief (Spont)",
+        "wh_brief_times_task": "Whisking Brief (Task)",
+        "wh_brief_times_iti": "Whisking Brief (ITI)",
+        "wh_long_times_spont": "Whisking Long (Spont)",
+        "wh_long_times_task": "Whisking Long (Task)",
+        "wh_long_times_iti": "Whisking Long (ITI)",
+        "wh_all_times_spont": "Whisking All (Spont)",
+        "wh_all_times_task": "Whisking All (Task)",
+        "wh_all_times_iti": "Whisking All (ITI)",
     }
     return label_map.get(event_name, event_name)
 
@@ -111,6 +207,16 @@ def get_event_delay_window(config, event_name):
     return float(config.get("RESPONSIVE_WINDOW_START", 0.0)), float(
         config.get("RESPONSIVE_WINDOW_END", 0.0)
     )
+
+
+def get_event_delay_method(config, event_name):
+    """Return delay method for an event (falls back to global DELAY_METHOD)."""
+    methods = config.get("DELAY_METHODS_BY_EVENT", {})
+    if isinstance(methods, dict):
+        method = methods.get(event_name, None)
+        if method is not None:
+            return str(method)
+    return str(config.get("DELAY_METHOD", "com"))
 
 
 def compute_psth_for_clusters(
@@ -183,12 +289,88 @@ def calculate_delay(
     Compute delay within a responsive window and responsiveness.
 
     Supported methods:
-    - "center_of_mass": PSTH center of mass within the responsive window.
+    - "com": PSTH center of mass within the responsive window.
     - "psth_peak": peak time of the PSTH within the responsive window.
     - "tfs": time to first spike after event onset (100% contrast trials only).
+    - "latenzy": non-parametric latency estimate from spike/event times.
     """
     # Default to the configured delay method if none is provided explicitly.
-    method = method or config.get("DELAY_METHOD", "center_of_mass")
+    method = str(method or config.get("DELAY_METHOD", "com")).strip().lower()
+
+    if method == "latenzy":
+        # latenzy operates directly on spike/event times.
+        if neuron_spikes is None or event_times is None:
+            return np.nan, False
+
+        spikes_arr = np.asarray(neuron_spikes, dtype=float).reshape(-1)
+        events_arr = np.asarray(event_times, dtype=float).reshape(-1)
+        spikes_arr = spikes_arr[np.isfinite(spikes_arr)]
+        events_arr = events_arr[np.isfinite(events_arr)]
+        if spikes_arr.size == 0 or events_arr.size == 0:
+            return np.nan, False
+        spikes_arr = np.sort(spikes_arr)
+        events_arr = np.sort(events_arr)
+
+        latenzy_fn = _get_latenzy_callable()
+        if latenzy_fn is None:
+            _warn_latenzy_unavailable_once()
+            return np.nan, False
+
+        # LATENZY_USE_DUR is optional.
+        # If None, call latenzy with (spikes, events) only.
+        use_dur = config.get("LATENZY_USE_DUR", None)
+        if use_dur is not None:
+            try:
+                use_dur_arr = np.asarray(use_dur, dtype=float).reshape(-1)
+                if use_dur_arr.size == 1:
+                    use_dur = float(use_dur_arr[0])
+                elif use_dur_arr.size >= 2:
+                    use_dur = use_dur_arr[:2]
+                    # latenzy expects start <= 0 when end > 0.
+                    if (
+                        np.isfinite(use_dur[0])
+                        and np.isfinite(use_dur[1])
+                        and (use_dur[1] > 0)
+                        and (use_dur[0] > 0)
+                    ):
+                        use_dur = np.asarray([0.0, float(use_dur[1])], dtype=float)
+                else:
+                    use_dur = None
+            except Exception:
+                use_dur = None
+
+        try:
+            if use_dur is None:
+                latenzy_out = latenzy_fn(spikes_arr, events_arr)
+            else:
+                latenzy_out = latenzy_fn(spikes_arr, events_arr, use_dur)
+        except TypeError:
+            # Some versions only accept (spikes, events).
+            try:
+                latenzy_out = latenzy_fn(spikes_arr, events_arr)
+            except Exception as exc:
+                _warn_latenzy_runtime_once(exc)
+                return np.nan, False
+        except Exception as exc:
+            _warn_latenzy_runtime_once(exc)
+            return np.nan, False
+
+        delay, score = _parse_latenzy_output(latenzy_out)
+        if not np.isfinite(delay):
+            return np.nan, False
+
+        min_score = config.get("LATENZY_MIN_SCORE", None)
+        if min_score is not None:
+            try:
+                min_score = float(min_score)
+            except (TypeError, ValueError):
+                min_score = None
+        if min_score is not None:
+            if not np.isfinite(score):
+                return np.nan, False
+            if score < min_score:
+                return np.nan, False
+        return float(delay), True
 
     if method == "tfs":
         # TFS relies on single-trial spike times, not the PSTH.
@@ -404,6 +586,820 @@ def _lowpass_filter(signal, fs_hz, cutoff_hz, order=3):
         return filtfilt(b, a, signal)
     except Exception:
         return signal
+
+
+def _interpolate_short_nan_runs(values, max_gap):
+    """Linearly interpolate NaN runs up to ``max_gap`` samples."""
+    arr = np.asarray(values, dtype=float).copy()
+    if arr.size == 0:
+        return arr
+    if max_gap is None or int(max_gap) <= 0:
+        return arr
+    max_gap = int(max_gap)
+    nan_mask = ~np.isfinite(arr)
+    if not np.any(nan_mask):
+        return arr
+    n = arr.size
+    idx = 0
+    while idx < n:
+        if not nan_mask[idx]:
+            idx += 1
+            continue
+        start = idx
+        while idx < n and nan_mask[idx]:
+            idx += 1
+        end = idx
+        gap_len = end - start
+        left = start - 1
+        right = end
+        if (
+            gap_len <= max_gap
+            and left >= 0
+            and right < n
+            and np.isfinite(arr[left])
+            and np.isfinite(arr[right])
+        ):
+            arr[start:end] = np.interp(
+                np.arange(start, end, dtype=float),
+                [float(left), float(right)],
+                [float(arr[left]), float(arr[right])],
+            )
+    return arr
+
+
+def _extract_me_view_df(
+    motion_energy,
+    view,
+    value_keys,
+    max_interp_gap_frames=3,
+    ensure_positive_motion=True,
+):
+    if motion_energy is None or view not in motion_energy:
+        return None
+    df = motion_energy.get(view)
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return None
+    if "times" in df.columns:
+        times = np.asarray(df["times"], dtype=float)
+    else:
+        times = np.asarray(df.index, dtype=float)
+    value_col = None
+    for key in value_keys:
+        if key in df.columns:
+            value_col = key
+            break
+    if value_col is None:
+        numeric_cols = [
+            col for col in df.columns if pd.api.types.is_numeric_dtype(df[col])
+        ]
+        numeric_cols = [col for col in numeric_cols if col != "times"]
+        if numeric_cols:
+            value_col = numeric_cols[0]
+    if value_col is None:
+        return None
+    out = pd.DataFrame({"times": times, "value": np.asarray(df[value_col], dtype=float)})
+    out = out[np.isfinite(out["times"].to_numpy(dtype=float))].copy()
+    if out.empty:
+        return None
+    out = out.sort_values("times").reset_index(drop=True)
+
+    vals = out["value"].to_numpy(dtype=float)
+    vals = _interpolate_short_nan_runs(vals, max_interp_gap_frames)
+    if ensure_positive_motion:
+        vals_fin = vals[np.isfinite(vals)]
+        if vals_fin.size:
+            lo = float(np.nanpercentile(vals_fin, 1.0))
+            hi = float(np.nanpercentile(vals_fin, 99.0))
+            if abs(lo) > abs(hi):
+                vals = -vals
+    out["value"] = vals
+    out = out[np.isfinite(out["value"].to_numpy(dtype=float))].copy()
+    if out.empty:
+        return None
+    out["view"] = str(view)
+    out = out[["times", "view", "value"]].reset_index(drop=True)
+    return out
+
+
+def extract_motion_energy_trace(
+    motion_energy,
+    views=("leftCamera", "rightCamera"),
+    value_keys=("whiskerMotionEnergy", "motionEnergy", "energy"),
+    max_interp_gap_frames=3,
+    ensure_positive_motion=True,
+):
+    """
+    Extract a long-form motion-energy table from one or more camera views.
+
+    Short tracking gaps are interpolated per camera view up to
+    ``max_interp_gap_frames`` samples. Longer gaps are kept missing.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``times`` (s), ``view``, ``value``.
+    """
+    if motion_energy is None:
+        return pd.DataFrame(columns=["times", "view", "value"])
+    rows = []
+    for view in views:
+        df_view = _extract_me_view_df(
+            motion_energy,
+            view,
+            value_keys,
+            max_interp_gap_frames=max_interp_gap_frames,
+            ensure_positive_motion=ensure_positive_motion,
+        )
+        if df_view is not None and not df_view.empty:
+            rows.append(df_view)
+    if not rows:
+        return pd.DataFrame(columns=["times", "view", "value"])
+    out = pd.concat(rows, ignore_index=True)
+    out = out.sort_values(["times", "view"]).reset_index(drop=True)
+    return out
+
+
+def bin_normalize_whisk_trace(
+    df_trace,
+    bin_s=0.3,
+    norm_pctl=1.0,
+    norm_top_pctl=100.0,
+    bin_reduce="mean",
+    normalize_after_bin=False,
+):
+    """
+    Normalize whisking motion energy per camera, then bin into fixed windows.
+
+    Two normalization orders are supported:
+    - ``normalize_after_bin=False`` (default): normalize per camera on raw
+      samples first, then bin normalized samples.
+    - ``normalize_after_bin=True``: bin raw samples per camera first, then
+      normalize binned values per camera.
+
+    In both cases normalization is per camera between percentile
+    ``norm_pctl`` and percentile ``norm_top_pctl`` (or camera max when
+    ``norm_top_pctl=100``), and final whisking is the mean across available
+    cameras in each bin.
+    """
+    columns = [
+        "bin_idx",
+        "bin_start_s",
+        "bin_center_s",
+        "bin_end_s",
+        "wh_norm",
+        "n_views",
+    ]
+    if df_trace is None or len(df_trace) == 0:
+        return pd.DataFrame(columns=columns)
+    if bin_s is None or float(bin_s) <= 0:
+        raise ValueError("bin_s must be > 0.")
+    norm_pctl = float(norm_pctl)
+    norm_top_pctl = float(norm_top_pctl)
+    if norm_pctl < 0 or norm_pctl > 100:
+        raise ValueError("norm_pctl must be in [0, 100].")
+    if norm_top_pctl < 0 or norm_top_pctl > 100:
+        raise ValueError("norm_top_pctl must be in [0, 100].")
+    if norm_top_pctl <= norm_pctl:
+        raise ValueError("norm_top_pctl must be > norm_pctl.")
+    bin_reduce = str(bin_reduce).lower()
+    if bin_reduce not in {"mean", "median", "max"}:
+        raise ValueError("bin_reduce must be one of: mean, median, max.")
+
+    df = df_trace.copy()
+    if not {"times", "view", "value"}.issubset(df.columns):
+        return pd.DataFrame(columns=columns)
+    df = df.dropna(subset=["times", "value"]).copy()
+    if df.empty:
+        return pd.DataFrame(columns=columns)
+    df["times"] = df["times"].astype(float)
+    df["value"] = df["value"].astype(float)
+    df["view"] = df["view"].astype(str)
+
+    def _normalize_values(vals_fin):
+        lo = float(np.nanpercentile(vals_fin, norm_pctl))
+        hi = float(np.nanpercentile(vals_fin, norm_top_pctl))
+        if not np.isfinite(lo):
+            lo = float(np.nanmin(vals_fin))
+        if not np.isfinite(hi):
+            hi = float(np.nanmax(vals_fin))
+        if hi <= lo:
+            hi = float(np.nanmax(vals_fin))
+        if hi <= lo:
+            norm = np.zeros_like(vals_fin, dtype=float)
+        else:
+            norm = (vals_fin - lo) / (hi - lo)
+            norm = np.clip(norm, 0.0, 1.0)
+        return norm
+
+    t0 = float(df["times"].min())
+
+    if normalize_after_bin:
+        by_view_rows = []
+        for view, grp_view in df.groupby("view", sort=False):
+            tmp = grp_view[["times", "value"]].copy()
+            vals = tmp["value"].to_numpy(dtype=float)
+            times = tmp["times"].to_numpy(dtype=float)
+            finite = np.isfinite(times) & np.isfinite(vals)
+            if not np.any(finite):
+                continue
+            tmp = tmp.loc[finite].copy()
+            tmp["bin_idx"] = np.floor((tmp["times"] - t0) / float(bin_s)).astype(int)
+            grp_raw = tmp.groupby("bin_idx", as_index=False)["value"]
+            if bin_reduce == "max":
+                by_bin_raw = grp_raw.max()
+            elif bin_reduce == "median":
+                by_bin_raw = grp_raw.median()
+            else:
+                by_bin_raw = grp_raw.mean()
+            vals_bin = by_bin_raw["value"].to_numpy(dtype=float)
+            if vals_bin.size == 0:
+                continue
+            by_bin_raw["view"] = view
+            by_bin_raw["value_norm"] = _normalize_values(vals_bin)
+            by_view_rows.append(by_bin_raw[["bin_idx", "view", "value_norm"]])
+        if not by_view_rows:
+            return pd.DataFrame(columns=columns)
+        by_view_bin = pd.concat(by_view_rows, ignore_index=True)
+    else:
+        norm_rows = []
+        for view, grp_view in df.groupby("view", sort=False):
+            vals = grp_view["value"].to_numpy(dtype=float)
+            finite = np.isfinite(vals)
+            if not np.any(finite):
+                continue
+            vals_fin = vals[finite]
+            norm = _normalize_values(vals_fin)
+            tmp = grp_view.loc[finite, ["times"]].copy()
+            tmp["view"] = view
+            tmp["value_norm"] = norm
+            norm_rows.append(tmp)
+        if not norm_rows:
+            return pd.DataFrame(columns=columns)
+
+        norm_df = pd.concat(norm_rows, ignore_index=True)
+        norm_df = norm_df.sort_values(["times", "view"]).reset_index(drop=True)
+        norm_df["bin_idx"] = np.floor((norm_df["times"] - t0) / float(bin_s)).astype(int)
+        grp_norm = norm_df.groupby(["bin_idx", "view"], sort=True)["value_norm"]
+        if bin_reduce == "max":
+            by_view_bin = grp_norm.max().reset_index()
+        elif bin_reduce == "median":
+            by_view_bin = grp_norm.median().reset_index()
+        else:
+            by_view_bin = grp_norm.mean().reset_index()
+
+    wide = by_view_bin.pivot(index="bin_idx", columns="view", values="value_norm")
+    wide = wide.sort_index()
+    out = pd.DataFrame(index=wide.index.copy())
+    out["wh_norm"] = wide.mean(axis=1, skipna=True).astype(float)
+    out["n_views"] = wide.notna().sum(axis=1).astype(int)
+    out["bin_idx"] = out.index.astype(int)
+    out["bin_start_s"] = t0 + out["bin_idx"] * float(bin_s)
+    out["bin_center_s"] = out["bin_start_s"] + 0.5 * float(bin_s)
+    out["bin_end_s"] = out["bin_start_s"] + float(bin_s)
+    out = out.reset_index(drop=True)
+    out = out[columns]
+    return out
+
+
+def detect_wh_bouts(
+    times,
+    wh,
+    start_thr=0.15,
+    end_thr=0.05,
+    merge_gap_s=0.0,
+    end_quiet_window_s=4.0,
+    end_quiet_thr=None,
+    brief_range_s=(1.3, 3.5),
+    long_min_s=3.5,
+):
+    """
+    Detect whisking bouts from a continuous whisking trace.
+
+    Bouts start when signal exceeds ``start_thr``. A bout can end when signal
+    drops below ``end_thr`` and the mean whisking in the next
+    ``end_quiet_window_s`` seconds stays below ``end_quiet_thr`` (defaults to
+    ``end_thr``). Optional post-hoc merge is available via ``merge_gap_s``.
+    """
+    times = np.asarray(times, dtype=float).reshape(-1)
+    wh = np.asarray(wh, dtype=float).reshape(-1)
+    mask = np.isfinite(times) & np.isfinite(wh)
+    times = times[mask]
+    wh = wh[mask]
+    if times.size == 0:
+        empty = np.empty((0, 2), dtype=float)
+        return {
+            "all_bouts": empty,
+            "brief_bouts": empty,
+            "long_bouts": empty,
+            "all_onsets": np.array([], dtype=float),
+            "brief_onsets": np.array([], dtype=float),
+            "long_onsets": np.array([], dtype=float),
+            "all_durations": np.array([], dtype=float),
+            "brief_durations": np.array([], dtype=float),
+            "long_durations": np.array([], dtype=float),
+        }
+
+    order = np.argsort(times)
+    times = times[order]
+    wh = wh[order]
+    start_thr = float(start_thr)
+    end_thr = float(end_thr)
+    merge_gap_s = float(merge_gap_s)
+    end_quiet_window_s = float(end_quiet_window_s)
+    if end_quiet_thr is None:
+        end_quiet_thr = end_thr
+    end_quiet_thr = float(end_quiet_thr)
+
+    bouts = []
+    start_idx = None
+    for idx in range(times.size):
+        val = wh[idx]
+        if start_idx is None:
+            if val >= start_thr:
+                start_idx = idx
+        else:
+            if val <= end_thr:
+                if end_quiet_window_s > 0:
+                    t_now = float(times[idx])
+                    future_mask = (times > t_now) & (
+                        times <= (t_now + end_quiet_window_s)
+                    )
+                    if np.any(future_mask):
+                        future_mean = float(np.nanmean(wh[future_mask]))
+                    else:
+                        future_mean = float(val)
+                    quiet_ok = np.isfinite(future_mean) and (future_mean <= end_quiet_thr)
+                else:
+                    quiet_ok = True
+                if quiet_ok:
+                    bouts.append([float(times[start_idx]), float(times[idx])])
+                    start_idx = None
+    if start_idx is not None:
+        bouts.append([float(times[start_idx]), float(times[-1])])
+
+    if not bouts:
+        return {
+            "all_bouts": np.empty((0, 2), dtype=float),
+            "brief_bouts": np.empty((0, 2), dtype=float),
+            "long_bouts": np.empty((0, 2), dtype=float),
+            "all_onsets": np.array([], dtype=float),
+            "brief_onsets": np.array([], dtype=float),
+            "long_onsets": np.array([], dtype=float),
+            "all_durations": np.array([], dtype=float),
+            "brief_durations": np.array([], dtype=float),
+            "long_durations": np.array([], dtype=float),
+        }
+
+    bouts = np.asarray(bouts, dtype=float)
+    bouts = bouts[np.argsort(bouts[:, 0])]
+    if merge_gap_s > 0 and bouts.shape[0] > 1:
+        merged = [bouts[0].tolist()]
+        for start, end in bouts[1:]:
+            prev_start, prev_end = merged[-1]
+            if float(start) - float(prev_end) < merge_gap_s:
+                merged[-1][1] = float(max(prev_end, end))
+            else:
+                merged.append([float(start), float(end)])
+        merged = np.asarray(merged, dtype=float)
+    else:
+        merged = bouts.copy()
+    durations = merged[:, 1] - merged[:, 0]
+
+    brief_lo, brief_hi = brief_range_s
+    brief_mask = (durations >= float(brief_lo)) & (durations <= float(brief_hi))
+    long_mask = durations > float(long_min_s)
+    brief_bouts = merged[brief_mask]
+    long_bouts = merged[long_mask]
+    brief_durations = durations[brief_mask]
+    long_durations = durations[long_mask]
+
+    return {
+        "all_bouts": merged,
+        "brief_bouts": brief_bouts,
+        "long_bouts": long_bouts,
+        "all_onsets": merged[:, 0].copy(),
+        "brief_onsets": brief_bouts[:, 0].copy() if len(brief_bouts) else np.array([], dtype=float),
+        "long_onsets": long_bouts[:, 0].copy() if len(long_bouts) else np.array([], dtype=float),
+        "all_durations": durations,
+        "brief_durations": brief_durations,
+        "long_durations": long_durations,
+    }
+
+
+def _coerce_interval_array(intervals):
+    if intervals is None:
+        return np.empty((0, 2), dtype=float)
+    if isinstance(intervals, pd.DataFrame):
+        if {"start", "end"}.issubset(intervals.columns):
+            arr = intervals[["start", "end"]].to_numpy(dtype=float)
+        else:
+            return np.empty((0, 2), dtype=float)
+    else:
+        arr = np.asarray(intervals, dtype=float)
+    if arr.size == 0:
+        return np.empty((0, 2), dtype=float)
+    if arr.ndim == 1:
+        if arr.size != 2:
+            return np.empty((0, 2), dtype=float)
+        arr = arr.reshape(1, 2)
+    if arr.shape[1] != 2:
+        return np.empty((0, 2), dtype=float)
+    finite_mask = np.isfinite(arr[:, 0]) & np.isfinite(arr[:, 1]) & (arr[:, 1] > arr[:, 0])
+    arr = arr[finite_mask]
+    if arr.size == 0:
+        return np.empty((0, 2), dtype=float)
+    arr = arr[np.argsort(arr[:, 0])]
+    return arr
+
+
+def _mask_times_in_intervals(times, intervals):
+    times = np.asarray(times, dtype=float).reshape(-1)
+    mask = np.zeros(times.shape[0], dtype=bool)
+    if times.size == 0:
+        return mask
+    intervals_arr = _coerce_interval_array(intervals)
+    if intervals_arr.size == 0:
+        return mask
+    for start, end in intervals_arr:
+        mask |= (times >= float(start)) & (times <= float(end))
+    return mask
+
+
+def split_wh_events_by_period(wh_event_times, spont_intervals, task_windows, iti_windows):
+    """
+    Split whisk event times by period using event onset timestamps.
+
+    Returns a dictionary containing both global and period-specific event arrays:
+    ``<name>``, ``<name>_spont``, ``<name>_task``, ``<name>_iti``.
+    """
+    wh_event_times = wh_event_times or {}
+    split_events = {}
+    spont_arr = _coerce_interval_array(spont_intervals)
+    task_arr = _coerce_interval_array(task_windows)
+    iti_arr = _coerce_interval_array(iti_windows)
+
+    for event_name, times in wh_event_times.items():
+        arr = np.asarray(times, dtype=float).reshape(-1)
+        arr = np.sort(arr[np.isfinite(arr)])
+        split_events[event_name] = arr
+        if arr.size == 0:
+            split_events[f"{event_name}_spont"] = np.array([], dtype=float)
+            split_events[f"{event_name}_task"] = np.array([], dtype=float)
+            split_events[f"{event_name}_iti"] = np.array([], dtype=float)
+            continue
+        split_events[f"{event_name}_spont"] = arr[_mask_times_in_intervals(arr, spont_arr)]
+        split_events[f"{event_name}_task"] = arr[_mask_times_in_intervals(arr, task_arr)]
+        split_events[f"{event_name}_iti"] = arr[_mask_times_in_intervals(arr, iti_arr)]
+    return split_events
+
+
+def _cluster_firing_rate_lookup(clusters):
+    if clusters is None:
+        return {}
+    rates = None
+    if hasattr(clusters, "firing_rate"):
+        rates = np.asarray(clusters.firing_rate, dtype=float)
+    elif isinstance(clusters, dict) and "firing_rate" in clusters:
+        rates = np.asarray(clusters.get("firing_rate"), dtype=float)
+    elif hasattr(clusters, "metrics") and hasattr(clusters.metrics, "columns"):
+        if "firing_rate" in clusters.metrics.columns:
+            rates = np.asarray(clusters.metrics["firing_rate"], dtype=float)
+    if rates is None:
+        return {}
+    cluster_id_all = None
+    if hasattr(clusters, "cluster_id"):
+        cluster_id_all = np.asarray(clusters.cluster_id)
+    elif isinstance(clusters, dict) and "cluster_id" in clusters:
+        cluster_id_all = np.asarray(clusters.get("cluster_id"))
+    if cluster_id_all is None or len(cluster_id_all) != len(rates):
+        return {}
+    return dict(zip(cluster_id_all.tolist(), rates.tolist()))
+
+
+def _safe_corrcoef(x, y):
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    mask = np.isfinite(x) & np.isfinite(y)
+    if int(mask.sum()) < 3:
+        return np.nan
+    x = x[mask]
+    y = y[mask]
+    if np.std(x) == 0 or np.std(y) == 0:
+        return np.nan
+    return float(np.corrcoef(x, y)[0, 1])
+
+
+def _fill_nan_linear(arr):
+    arr = np.asarray(arr, dtype=float).reshape(-1)
+    if arr.size == 0 or np.isfinite(arr).all():
+        return arr
+    idx = np.arange(arr.size, dtype=float)
+    finite = np.isfinite(arr)
+    if int(finite.sum()) == 0:
+        return np.full(arr.shape, np.nan, dtype=float)
+    if int(finite.sum()) == 1:
+        out = np.full(arr.shape, np.nan, dtype=float)
+        out[:] = float(arr[finite][0])
+        return out
+    return np.interp(idx, idx[finite], arr[finite])
+
+
+def _zscore_trace(arr):
+    arr = np.asarray(arr, dtype=float).reshape(-1)
+    if arr.size == 0:
+        return arr
+    if not np.isfinite(arr).any():
+        return np.full(arr.shape, np.nan, dtype=float)
+    mu = float(np.nanmean(arr))
+    sd = float(np.nanstd(arr))
+    if not np.isfinite(sd) or sd <= 0:
+        return np.full(arr.shape, np.nan, dtype=float)
+    return (arr - mu) / sd
+
+
+def compute_arousal_groups_from_whisk(
+    spikes,
+    clusters,
+    cluster_acronyms,
+    cid_to_idx,
+    cluster_ids,
+    wh_brief_times,
+    config,
+    whisk_times=None,
+    whisk_values=None,
+    spont_intervals=None,
+):
+    """
+    Assign arousal groups from whisking-neuron correlations in spontaneous periods.
+
+    This mirrors the paper protocol:
+    - bin whisking and firing traces in fixed windows (default: 300 ms),
+    - smooth traces with a Gaussian kernel (default sigma=5 bins),
+    - z-score traces,
+    - compute Pearson correlations in full recording and split halves.
+    Neurons are ``arousal_plus`` if correlation exceeds threshold in full + both
+    halves, ``arousal_minus`` if below negative threshold in full + both halves.
+    """
+    cluster_ids = np.asarray(cluster_ids)
+    cluster_acronyms = np.asarray(cluster_acronyms).astype(str)
+    if cluster_ids.size == 0:
+        return pd.DataFrame(
+            columns=[
+                "cluster_id",
+                "acronym",
+                "arousal_corr",
+                "arousal_corr_h1",
+                "arousal_corr_h2",
+                "arousal_corr_abs",
+                "arousal_mod",
+                "arousal_fr_hz",
+                "arousal_group",
+                "arousal_n_events",
+                "arousal_n_bins",
+            ]
+        )
+
+    spike_times = (
+        np.asarray(spikes.times, dtype=float)
+        if hasattr(spikes, "times")
+        else np.asarray(spikes.get("times", []), dtype=float)
+    )
+    spike_clusters = (
+        np.asarray(spikes.clusters)
+        if hasattr(spikes, "clusters")
+        else np.asarray(spikes.get("clusters", []))
+    )
+
+    wh_brief_times = np.asarray(wh_brief_times, dtype=float).reshape(-1)
+    wh_brief_times = np.sort(wh_brief_times[np.isfinite(wh_brief_times)])
+    legacy_n_events = int(wh_brief_times.size)
+    corr_pos_thr = float(config.get("AROUSAL_POS_THR", 0.05))
+    corr_neg_thr = float(config.get("AROUSAL_NEG_THR", -0.05))
+    corr_pos_thr = float(max(corr_pos_thr, 0.0))
+    corr_neg_thr = float(min(corr_neg_thr, 0.0))
+    bin_s = float(config.get("AROUSAL_BIN_S", 0.3))
+    smooth_sigma = float(config.get("AROUSAL_SMOOTH_SIGMA", 5.0))
+    min_bins = int(config.get("AROUSAL_MIN_CORR_BINS", 10))
+    require_split_half = bool(config.get("AROUSAL_REQUIRE_SPLIT_HALF", True))
+    if bin_s <= 0:
+        bin_s = 0.3
+
+    firing_rate_map = _cluster_firing_rate_lookup(clusters)
+    duration_s = np.nan
+    if spike_times.size > 1:
+        duration_s = float(np.nanmax(spike_times) - np.nanmin(spike_times))
+    cluster_count_map = pd.Series(spike_clusters).value_counts().to_dict()
+
+    output = pd.DataFrame(
+        {
+            "cluster_id": cluster_ids.astype(int),
+            "acronym": cluster_acronyms,
+        }
+    )
+    output["arousal_corr"] = np.nan
+    output["arousal_corr_h1"] = np.nan
+    output["arousal_corr_h2"] = np.nan
+    output["arousal_corr_abs"] = np.nan
+    output["arousal_mod"] = np.nan
+    output["arousal_fr_hz"] = np.nan
+    output["arousal_group"] = "neutral"
+    output["arousal_n_events"] = legacy_n_events
+    output["arousal_n_bins"] = 0
+
+    fr_vals = []
+    for cid in output["cluster_id"].to_numpy(dtype=int):
+        fr_val = firing_rate_map.get(cid, np.nan)
+        if not np.isfinite(fr_val) and np.isfinite(duration_s) and duration_s > 0:
+            fr_val = float(cluster_count_map.get(cid, 0)) / duration_s
+        fr_vals.append(fr_val)
+    output["arousal_fr_hz"] = np.asarray(fr_vals, dtype=float)
+
+    if whisk_times is None or whisk_values is None:
+        return output
+
+    whisk_times = np.asarray(whisk_times, dtype=float).reshape(-1)
+    whisk_values = np.asarray(whisk_values, dtype=float).reshape(-1)
+    n_wh = int(min(whisk_times.size, whisk_values.size))
+    if n_wh <= 0:
+        return output
+    whisk_times = whisk_times[:n_wh]
+    whisk_values = whisk_values[:n_wh]
+    wh_mask = np.isfinite(whisk_times) & np.isfinite(whisk_values)
+    whisk_times = whisk_times[wh_mask]
+    whisk_values = whisk_values[wh_mask]
+    if whisk_times.size == 0:
+        return output
+
+    spont_arr = _coerce_interval_array(spont_intervals)
+    if spont_arr.size == 0:
+        return output
+    spont_arr = spont_arr[np.isfinite(spont_arr).all(axis=1)]
+    spont_arr = spont_arr[spont_arr[:, 1] > spont_arr[:, 0]]
+    if spont_arr.size == 0:
+        return output
+    spont_arr = spont_arr[np.argsort(spont_arr[:, 0])]
+
+    t_min = float(np.nanmin(spont_arr[:, 0]))
+    t_max = float(np.nanmax(spont_arr[:, 1]))
+    if not np.isfinite(t_min) or not np.isfinite(t_max) or (t_max - t_min) < bin_s:
+        return output
+
+    bin_edges = np.arange(t_min, t_max + bin_s, bin_s, dtype=float)
+    if bin_edges.size < 2:
+        return output
+    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2.0
+    spont_bin_mask = _mask_times_in_intervals(bin_centers, spont_arr)
+    if int(np.sum(spont_bin_mask)) < max(3, min_bins):
+        return output
+
+    # Bin whisking signal and keep only spontaneous bins.
+    wh_sum, _ = np.histogram(whisk_times, bins=bin_edges, weights=whisk_values)
+    wh_cnt, _ = np.histogram(whisk_times, bins=bin_edges)
+    whisk_binned = np.full(bin_centers.shape[0], np.nan, dtype=float)
+    valid_wh = wh_cnt > 0
+    whisk_binned[valid_wh] = wh_sum[valid_wh] / wh_cnt[valid_wh]
+    whisk_trace = whisk_binned[spont_bin_mask]
+    if int(np.isfinite(whisk_trace).sum()) < max(3, min_bins):
+        return output
+    whisk_trace = _fill_nan_linear(whisk_trace)
+    if smooth_sigma > 0 and whisk_trace.size > 1:
+        whisk_trace = gaussian_filter1d(whisk_trace, sigma=smooth_sigma)
+
+    centers_spont = bin_centers[spont_bin_mask]
+    t_half = float(np.nanmin(centers_spont) + np.nanmax(centers_spont)) / 2.0
+    h1_mask = centers_spont <= t_half
+    h2_mask = centers_spont > t_half
+    min_half_bins = max(3, min_bins // 2)
+
+    in_span = (spike_times >= bin_edges[0]) & (spike_times <= bin_edges[-1])
+    spike_times_span = spike_times[in_span]
+    spike_clusters_span = spike_clusters[in_span]
+
+    corr_vals = np.full(len(output), np.nan, dtype=float)
+    corr_h1_vals = np.full(len(output), np.nan, dtype=float)
+    corr_h2_vals = np.full(len(output), np.nan, dtype=float)
+    for i, cid in enumerate(output["cluster_id"].to_numpy(dtype=int)):
+        neuron_spikes = spike_times_span[spike_clusters_span == cid]
+        if neuron_spikes.size == 0:
+            continue
+        spike_counts, _ = np.histogram(neuron_spikes, bins=bin_edges)
+        fr_trace = spike_counts.astype(float) / bin_s
+        fr_trace = fr_trace[spont_bin_mask]
+        if smooth_sigma > 0 and fr_trace.size > 1:
+            fr_trace = gaussian_filter1d(fr_trace, sigma=smooth_sigma)
+
+        fr_z = _zscore_trace(fr_trace)
+        wh_z = _zscore_trace(whisk_trace)
+        corr_vals[i] = _safe_corrcoef(fr_z, wh_z)
+
+        if int(np.sum(h1_mask)) >= min_half_bins:
+            corr_h1_vals[i] = _safe_corrcoef(
+                _zscore_trace(fr_trace[h1_mask]),
+                _zscore_trace(whisk_trace[h1_mask]),
+            )
+        if int(np.sum(h2_mask)) >= min_half_bins:
+            corr_h2_vals[i] = _safe_corrcoef(
+                _zscore_trace(fr_trace[h2_mask]),
+                _zscore_trace(whisk_trace[h2_mask]),
+            )
+
+    output["arousal_corr"] = corr_vals
+    output["arousal_corr_h1"] = corr_h1_vals
+    output["arousal_corr_h2"] = corr_h2_vals
+    output["arousal_corr_abs"] = np.abs(corr_vals)
+    output["arousal_mod"] = corr_vals
+    n_spont_bins = int(np.isfinite(whisk_trace).sum())
+    output["arousal_n_events"] = n_spont_bins
+    output["arousal_n_bins"] = n_spont_bins
+
+    group_vals = []
+    for corr_val, corr_h1, corr_h2 in zip(
+        output["arousal_corr"].to_numpy(dtype=float),
+        output["arousal_corr_h1"].to_numpy(dtype=float),
+        output["arousal_corr_h2"].to_numpy(dtype=float),
+    ):
+        if not np.isfinite(corr_val):
+            group_vals.append("neutral")
+            continue
+        if require_split_half:
+            pos_ok = (
+                np.isfinite(corr_h1)
+                and np.isfinite(corr_h2)
+                and corr_val >= corr_pos_thr
+                and corr_h1 >= corr_pos_thr
+                and corr_h2 >= corr_pos_thr
+            )
+            neg_ok = (
+                np.isfinite(corr_h1)
+                and np.isfinite(corr_h2)
+                and corr_val <= corr_neg_thr
+                and corr_h1 <= corr_neg_thr
+                and corr_h2 <= corr_neg_thr
+            )
+        else:
+            pos_ok = corr_val >= corr_pos_thr
+            neg_ok = corr_val <= corr_neg_thr
+        if pos_ok:
+            group_vals.append("arousal_plus")
+        elif neg_ok:
+            group_vals.append("arousal_minus")
+        else:
+            group_vals.append("neutral")
+    output["arousal_group"] = group_vals
+    return output
+
+
+def add_wh_delay_sorting(df, delay_cols, group_col="arousal_group"):
+    """
+    Add whisk-delay sorting indices within and across arousal +/- groups.
+
+    For each delay column ``delay_wh_*_times`` this function adds:
+    ``wh_*_sort_group`` and ``wh_*_sort_all``.
+    """
+    if df is None or len(df) == 0:
+        return df
+    out = df.copy()
+    if group_col not in out.columns:
+        out[group_col] = "neutral"
+    arousal_mask = out[group_col].isin(["arousal_plus", "arousal_minus"])
+
+    for delay_col in list(delay_cols or []):
+        if delay_col not in out.columns:
+            continue
+        key = str(delay_col)
+        if key.startswith("delay_"):
+            key = key[len("delay_") :]
+        if key.endswith("_times"):
+            key = key[: -len("_times")]
+
+        col_group = f"{key}_sort_group"
+        col_all = f"{key}_sort_all"
+        out[col_group] = np.nan
+        out[col_all] = np.nan
+
+        delay_vals = out[delay_col].to_numpy(dtype=float)
+        finite_delay = np.isfinite(delay_vals)
+
+        for group_name in ("arousal_plus", "arousal_minus"):
+            mask = (out[group_col].to_numpy(dtype=object) == group_name) & finite_delay
+            idx = out.index[mask]
+            if len(idx) == 0:
+                continue
+            sorted_idx = out.loc[idx, delay_col].sort_values().index
+            out.loc[sorted_idx, col_group] = np.arange(len(sorted_idx), dtype=float)
+
+        mask_all = arousal_mask.to_numpy(dtype=bool) & finite_delay
+        idx_all = out.index[mask_all]
+        if len(idx_all) > 0:
+            sorted_idx_all = out.loc[idx_all, delay_col].sort_values().index
+            out.loc[sorted_idx_all, col_all] = np.arange(len(sorted_idx_all), dtype=float)
+
+        out[col_group] = out[col_group].astype("Int64")
+        out[col_all] = out[col_all].astype("Int64")
+
+    return out
+
+
 def calculate_delays(
     spikes,
     clusters,
@@ -513,6 +1509,7 @@ def calculate_delays(
             "RESPONSIVE_WINDOW_START": win_start,
             "RESPONSIVE_WINDOW_END": win_end,
         }
+        event_method = get_event_delay_method(config, event_name)
 
         psth_by_cluster, bin_centers = compute_psth_for_clusters(
             spikes,
@@ -563,7 +1560,7 @@ def calculate_delays(
                 fr_smooth,
                 bin_centers,
                 event_config,
-                method=config.get("DELAY_METHOD"),
+                method=event_method,
                 neuron_spikes=neuron_spikes,
                 event_times=events,
                 trial_contrasts=contrasts,
@@ -577,7 +1574,7 @@ def calculate_delays(
                 fr_smooth_odd,
                 bin_centers_odd,
                 event_config,
-                method=config.get("DELAY_METHOD"),
+                method=event_method,
                 neuron_spikes=neuron_spikes,
                 event_times=events_odd,
                 trial_contrasts=contrasts_odd,
@@ -591,7 +1588,7 @@ def calculate_delays(
                 fr_smooth_even,
                 bin_centers_even,
                 event_config,
-                method=config.get("DELAY_METHOD"),
+                method=event_method,
                 neuron_spikes=neuron_spikes,
                 event_times=events_even,
                 trial_contrasts=contrasts_even,
@@ -759,6 +1756,7 @@ def calculate_event_delays(
             "RESPONSIVE_WINDOW_START": win_start,
             "RESPONSIVE_WINDOW_END": win_end,
         }
+        event_method = get_event_delay_method(config, event_name)
 
         psth_by_cluster, bin_centers = compute_psth_for_clusters(
             spikes,
@@ -827,7 +1825,7 @@ def calculate_event_delays(
                 fr_smooth,
                 bin_centers,
                 event_config,
-                method=config.get("DELAY_METHOD"),
+                method=event_method,
                 neuron_spikes=neuron_spikes,
                 event_times=events,
                 trial_contrasts=contrasts,
@@ -849,7 +1847,7 @@ def calculate_event_delays(
                         fr_smooth_odd,
                         bin_centers_odd,
                         event_config,
-                        method=config.get("DELAY_METHOD"),
+                        method=event_method,
                         neuron_spikes=neuron_spikes,
                         event_times=events_odd,
                         trial_contrasts=contrasts_odd,
@@ -865,7 +1863,7 @@ def calculate_event_delays(
                         fr_smooth_even,
                         bin_centers_even,
                         event_config,
-                        method=config.get("DELAY_METHOD"),
+                        method=event_method,
                         neuron_spikes=neuron_spikes,
                         event_times=events_even,
                         trial_contrasts=contrasts_even,
@@ -992,6 +1990,7 @@ def calculate_delay_reliability(
             "RESPONSIVE_WINDOW_START": config["RELIABILITY_WINDOW_START"],
             "RESPONSIVE_WINDOW_END": config["RELIABILITY_WINDOW_END"],
         }
+        event_method = get_event_delay_method(config, event_name)
 
         for cid, is_resp in tqdm(
             list(zip(selected_cluster_ids, responsive_mask)),
@@ -1016,7 +2015,7 @@ def calculate_delay_reliability(
                 fr_smooth_h1,
                 bin_centers_h1,
                 rel_config,
-                method=config.get("DELAY_METHOD"),
+                method=event_method,
                 neuron_spikes=neuron_spikes,
                 event_times=events_h1,
                 trial_contrasts=contrasts_h1,
@@ -1026,7 +2025,7 @@ def calculate_delay_reliability(
                 fr_smooth_h2,
                 bin_centers_h2,
                 rel_config,
-                method=config.get("DELAY_METHOD"),
+                method=event_method,
                 neuron_spikes=neuron_spikes,
                 event_times=events_h2,
                 trial_contrasts=contrasts_h2,

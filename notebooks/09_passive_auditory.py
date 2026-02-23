@@ -531,7 +531,7 @@ CONFIG_CALC = {
     "CALC_LABEL_MIN": 0.9,  # requested default for calculations
     "CALC_SPONT": True,
     "EVENT_NAMES": ["stimOn_times", "firstMovement_times", "response_times", "feedback_times"],
-    "DELAY_METHOD": "center_of_mass",  # "center_of_mass" or "psth_peak"
+    "DELAY_METHOD": "com",  # "com" or "psth_peak"
     "DELAY_UNITS": "ms",
     "FULL_CONTRAST_VALUES": (1.0, 100.0),
     "DELAY_WINDOWS": {

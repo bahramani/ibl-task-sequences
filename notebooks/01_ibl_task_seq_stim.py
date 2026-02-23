@@ -152,12 +152,12 @@ def calculate_delay(
     Compute delay within a responsive window and responsiveness.
 
     Supported methods:
-    - "center_of_mass": PSTH center of mass within the responsive window.
+    - "com": PSTH center of mass within the responsive window.
     - "psth_peak": peak time of the PSTH within the responsive window.
     - "tfs": time to first spike after stimulus onset (100% contrast trials only).
     """
     # Default to the configured delay method if none is provided explicitly.
-    method = method or config.get("DELAY_METHOD", "center_of_mass")
+    method = method or config.get("DELAY_METHOD", "com")
 
     if method == "tfs":
         # TFS relies on single-trial spike times, not the PSTH.
@@ -1569,7 +1569,7 @@ CONFIG_CALC = {
     "ATLAS_MAPPING": "Beryl",
     # Run calculations only on good units (label == 1) or on all units
     "CALC_ONLY_GOOD_UNITS": True,
-    # Delay calculation method: "center_of_mass", "psth_peak", or "tfs"
+    # Delay calculation method: "com", "psth_peak", or "tfs"
     "DELAY_METHOD": "psth_peak",
     # Values treated as 100% contrast for the TFS method
     "FULL_CONTRAST_VALUES": (1.0, 100.0),

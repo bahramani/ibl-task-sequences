@@ -2817,7 +2817,7 @@ else:
     if not skip_passive:
         _, cid_to_idx = build_cluster_id_map(clusters)
         passive_calc_config = dict(config_calc) if isinstance(config_calc, dict) else {}
-        passive_calc_config.setdefault("DELAY_METHOD", "center_of_mass")
+        passive_calc_config.setdefault("DELAY_METHOD", "com")
         passive_calc_config.setdefault("DELAY_UNITS", plot_config.get("DELAY_UNITS", "s"))
         passive_calc_config.setdefault("FULL_CONTRAST_VALUES", (1.0, 100.0))
         passive_calc_config.setdefault("BIN_SIZE", 0.005)
