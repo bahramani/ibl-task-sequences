@@ -595,8 +595,7 @@ def _merge_metric(
                     on="cluster_id",
                     how="left",
                 )
-                # Ascending sort is used downstream; negate to place larger |r| first.
-                df_units["sort_metric"] = -np.asarray(df_units["sort_metric"], dtype=float)
+                df_units["sort_metric"] = np.asarray(df_units["sort_metric"], dtype=float)
                 return df_units, sort_label
             if "arousal_corr" in df_res.columns:
                 df_units = df_units.merge(
@@ -606,7 +605,7 @@ def _merge_metric(
                     on="cluster_id",
                     how="left",
                 )
-                df_units["sort_metric"] = -np.abs(
+                df_units["sort_metric"] = np.abs(
                     np.asarray(df_units["sort_metric"], dtype=float)
                 )
                 return df_units, sort_label
@@ -744,14 +743,19 @@ def _merge_metric(
     return df_units, "Depth"
 
 
-def _sort_within_regions(df_units, sort_label):
+def _sort_within_regions(df_units, sort_label, metric_key="depth"):
+    metric_key_norm = str(metric_key or "depth").strip().lower()
+    # Raster y-axis increases bottom->top. For non-depth sorting we use
+    # descending metric order so low values appear on top and high values
+    # appear on the bottom.
+    sort_ascending = metric_key_norm in ("depth", "default")
     df_depth_sorted = df_units.sort_values(by="depth", ascending=True).reset_index(drop=True)
     region_order = df_depth_sorted["acronym"].dropna().unique().tolist()
     sorted_groups = []
     for region in region_order:
         region_df = df_depth_sorted[df_depth_sorted["acronym"] == region].copy()
         region_df = region_df.sort_values(
-            by="sort_metric", ascending=True, na_position="last"
+            by="sort_metric", ascending=sort_ascending, na_position="last"
         ).reset_index(drop=True)
         sorted_groups.append(region_df)
     if sorted_groups:
@@ -884,7 +888,9 @@ def plot_trial_raster_plotly(
         df_coupling_iti=df_coupling_iti,
         df_firing_rate=df_firing_rate,
     )
-    df_units, region_order, sort_label = _sort_within_regions(df_units, sort_label)
+    df_units, region_order, sort_label = _sort_within_regions(
+        df_units, sort_label, metric_key=sorting_metric
+    )
 
     mask_window = (spikes.times >= t_start) & (spikes.times <= t_end)
     window_spike_times_all = spikes.times[mask_window]
@@ -2441,7 +2447,9 @@ def plot_time_window_raster_plotly(
         df_coupling_iti=df_coupling_iti,
         df_firing_rate=df_firing_rate,
     )
-    df_units, region_order, sort_label = _sort_within_regions(df_units, sort_label)
+    df_units, region_order, sort_label = _sort_within_regions(
+        df_units, sort_label, metric_key=sorting_metric
+    )
 
     mask_window = (spikes.times >= t_start) & (spikes.times <= t_end)
     window_spike_times_all = spikes.times[mask_window]
@@ -2846,7 +2854,39 @@ def plot_population_sorted_plotly(
     bin_size = config_plot["POP_BIN_SIZE"]
     smooth_sigma = config_plot["POP_SMOOTH_SIGMA"]
     cmap_name = _normalize_colorscale(config_plot["POP_CMAP_NAME"])
-    normalize = config_plot["POP_NORMALIZE"]
+    normalize = bool(config_plot.get("POP_NORMALIZE", False))
+    pop_zscore = bool(config_plot.get("POP_ZSCORE", False))
+    pop_zscore_source = str(config_plot.get("POP_ZSCORE_SOURCE", "smooth")).strip().lower()
+    if pop_zscore_source not in {"raw", "smooth"}:
+        pop_zscore_source = "smooth"
+    try:
+        pop_baseline_pre = float(
+            config_plot.get("POP_BASELINE_PRE", config_plot.get("BASELINE_PRE", 0.2))
+        )
+    except Exception:
+        pop_baseline_pre = 0.2
+    if not np.isfinite(pop_baseline_pre) or pop_baseline_pre <= 0:
+        pop_baseline_pre = 0.2
+
+    def _float_or_none(value):
+        if value is None:
+            return None
+        try:
+            out = float(value)
+        except Exception:
+            return None
+        if not np.isfinite(out):
+            return None
+        return out
+
+    pop_zmin = _float_or_none(config_plot.get("POP_ZMIN", None))
+    pop_zmax = _float_or_none(config_plot.get("POP_ZMAX", None))
+    pop_has_fixed_range = (
+        pop_zscore
+        and pop_zmin is not None
+        and pop_zmax is not None
+        and pop_zmax > pop_zmin
+    )
 
     trials = _get_session_field(sl, "trials")
     if trials is None:
@@ -2856,7 +2896,25 @@ def plot_population_sorted_plotly(
     if align_event not in trials.keys():
         align_event = "stimOn_times"
     split_arousal_whisk = bool(config_plot.get("POP_SPLIT_AROUSAL_WHISK", False))
+    split_group_any_event = bool(config_plot.get("POP_SPLIT_GROUP_ANY_EVENT", False))
     arousal_group_col = str(config_plot.get("POP_AROUSAL_GROUP_COL", "arousal_group"))
+    group_col_by_event = config_plot.get("POP_GROUP_COL_BY_EVENT", {})
+    if isinstance(group_col_by_event, dict):
+        mapped_col = group_col_by_event.get(align_event, None)
+        if mapped_col is not None:
+            arousal_group_col = str(mapped_col)
+    arousal_split_line_color = str(
+        config_plot.get("POP_AROUSAL_SPLIT_LINE_COLOR", "black")
+    ).strip() or "black"
+    arousal_split_line_dash = str(
+        config_plot.get("POP_AROUSAL_SPLIT_LINE_DASH", "dot")
+    ).strip() or "dot"
+    try:
+        arousal_split_line_width = float(config_plot.get("POP_AROUSAL_SPLIT_LINE_WIDTH", 1.0))
+    except Exception:
+        arousal_split_line_width = 1.0
+    if not np.isfinite(arousal_split_line_width) or arousal_split_line_width <= 0:
+        arousal_split_line_width = 1.0
     delay_col = delay_column_name(align_event)
     delay_odd_col = delay_split_column_name(align_event, "odd")
     delay_even_col = delay_split_column_name(align_event, "even")
@@ -2905,8 +2963,9 @@ def plot_population_sorted_plotly(
         else:
             region_mask = cluster_acronyms.astype(str) == str(region)
         df_region = pd.DataFrame({"cluster_id": cluster_ids[region_mask]})
-        sort_desc = sort_mode not in ("depth", "default")
-        sort_ascending = not sort_desc
+        # Heatmap y-axis is reversed, so ascending sort places low values at
+        # the top and high values at the bottom. Depth already used ascending.
+        sort_ascending = True
         merge_cols = ["cluster_id"]
         rename_map = {}
         if df_res is not None:
@@ -3123,11 +3182,34 @@ def plot_population_sorted_plotly(
             )
             sort_label = delay_sort_label
 
-        if split_arousal_whisk and str(align_event).startswith("wh_"):
+        should_split_groups = split_arousal_whisk and (
+            str(align_event).startswith("wh_") or split_group_any_event
+        )
+        if should_split_groups:
             df_sorted = df_sorted.copy()
+            group_vals = (
+                df_sorted[arousal_group_col].fillna("neutral").astype(str).str.strip().str.lower()
+            )
+            # Heatmap y-axis is rendered with autorange="reversed", so assign
+            # ranks in display order inverse to desired top->bottom grouping.
+            # This yields visual top->bottom: inhibitory/-, neutral, excitatory/+.
+            group_rank_map = {
+                "arousal_plus": 0,
+                "exc": 0,
+                "excitatory": 0,
+                "increase": 0,
+                "neutral": 1,
+                "none": 1,
+                "nonresponsive": 1,
+                "non_responsive": 1,
+                "arousal_minus": 2,
+                "inh": 2,
+                "inhibitory": 2,
+                "decrease": 2,
+            }
             df_sorted["_group_rank"] = (
-                df_sorted[arousal_group_col]
-                .map({"arousal_minus": 0, "neutral": 1, "arousal_plus": 2})
+                group_vals
+                .map(group_rank_map)
                 .fillna(1)
                 .astype(float)
             )
@@ -3137,12 +3219,22 @@ def plot_population_sorted_plotly(
                 ascending=[True, True],
                 na_position="last",
             ).reset_index(drop=True)
-            group_vals = df_sorted[arousal_group_col].astype(str).to_numpy()
-            if group_vals.size > 1:
-                changes = np.where(group_vals[1:] != group_vals[:-1])[0]
+            ordered_group_vals = (
+                df_sorted[arousal_group_col]
+                .fillna("neutral")
+                .astype(str)
+                .str.strip()
+                .str.lower()
+                .to_numpy()
+            )
+            if ordered_group_vals.size > 1:
+                changes = np.where(ordered_group_vals[1:] != ordered_group_vals[:-1])[0]
                 group_boundaries = (changes + 0.5).tolist()
             df_sorted = df_sorted.drop(columns=["_group_rank", "_sort_rank"], errors="ignore")
-            sort_label = f"{sort_label}; arousal- to arousal+"
+            if np.isin(ordered_group_vals, ["exc", "inh"]).any():
+                sort_label = f"{sort_label}; response sign - to +"
+            else:
+                sort_label = f"{sort_label}; arousal- to arousal+"
 
         df_sorted = df_sorted.reset_index(drop=True)
         n_neurons = len(df_sorted)
@@ -3161,18 +3253,51 @@ def plot_population_sorted_plotly(
         )
 
         n_bins = len(bin_centers) if bin_centers is not None else 0
-        psth_matrix = np.zeros((n_neurons, n_bins))
+        if pop_zscore:
+            psth_matrix = np.full((n_neurons, n_bins), np.nan, dtype=float)
+        else:
+            psth_matrix = np.zeros((n_neurons, n_bins), dtype=float)
+        idx_baseline = np.zeros(n_bins, dtype=bool)
+        if bin_centers is not None and n_bins > 0:
+            bin_centers_arr = np.asarray(bin_centers, dtype=float)
+            idx_baseline = (bin_centers_arr >= -pop_baseline_pre) & (bin_centers_arr < 0)
+
         for i, row in df_sorted.iterrows():
             cid = row["cluster_id"]
             psth_entry = psth_by_cluster.get(cid)
             if not psth_entry:
                 continue
-            fr_smooth = psth_entry["fr_smooth"]
-            if normalize and fr_smooth.size > 0:
-                peak = np.max(fr_smooth)
-                if peak > 0:
-                    fr_smooth = fr_smooth / peak
-            psth_matrix[i, :] = fr_smooth
+            fr_raw = np.asarray(psth_entry.get("fr_raw", np.array([])), dtype=float).reshape(-1)
+            if fr_raw.size != n_bins:
+                continue
+            fr_smooth = np.asarray(psth_entry.get("fr_smooth", np.array([])), dtype=float).reshape(-1)
+            if fr_smooth.size != n_bins:
+                fr_smooth = fr_raw.copy()
+
+            if pop_zscore and pop_zscore_source == "raw":
+                fr_trace = fr_raw
+            else:
+                fr_trace = fr_smooth
+
+            if pop_zscore:
+                if not np.any(idx_baseline):
+                    continue
+                baseline = np.asarray(fr_trace[idx_baseline], dtype=float)
+                baseline = baseline[np.isfinite(baseline)]
+                if baseline.size == 0:
+                    continue
+                baseline_mean = float(np.mean(baseline))
+                baseline_std = float(np.std(baseline))
+                if (not np.isfinite(baseline_std)) or baseline_std <= 0:
+                    continue
+                fr_plot = (np.asarray(fr_trace, dtype=float) - baseline_mean) / baseline_std
+            else:
+                fr_plot = np.asarray(fr_trace, dtype=float)
+                if normalize and fr_plot.size > 0:
+                    peak = float(np.nanmax(fr_plot))
+                    if np.isfinite(peak) and peak > 0:
+                        fr_plot = fr_plot / peak
+            psth_matrix[i, :] = fr_plot
 
         def _scale_delay_for_plot(values):
             delay_s = _delay_to_seconds(values, config_plot)
@@ -3192,21 +3317,49 @@ def plot_population_sorted_plotly(
         df_sorted["delay_odd_plot"] = _scale_delay_for_plot(df_sorted["delay_odd"])
         df_sorted["delay_even_plot"] = _scale_delay_for_plot(df_sorted["delay_even"])
 
+        row_group_values = (
+            df_sorted[arousal_group_col]
+            .fillna("neutral")
+            .astype(str)
+            .str.strip()
+            .str.lower()
+            .tolist()
+        )
+        row_cluster_ids = []
+        for cid in df_sorted["cluster_id"].tolist():
+            if isinstance(cid, (np.integer, int)):
+                row_cluster_ids.append(int(cid))
+            elif isinstance(cid, (np.floating, float)):
+                row_cluster_ids.append(float(cid) if np.isfinite(cid) else None)
+            else:
+                row_cluster_ids.append(str(cid))
+
         show_scale = row_idx == 1
-        fig.add_trace(
-            go.Heatmap(
-                z=psth_matrix,
-                x=bin_centers,
-                y=np.arange(n_neurons),
-                colorscale=cmap_name,
-                colorbar=dict(
-                    title="Norm FR" if normalize else "FR",
-                    len=0.7,
-                    y=0.5,
-                    yanchor="middle",
-                ),
-                showscale=show_scale,
+        heatmap_kwargs = dict(
+            z=psth_matrix,
+            x=bin_centers,
+            y=np.arange(n_neurons),
+            colorscale=cmap_name,
+            meta=dict(
+                row_cluster_ids=row_cluster_ids,
+                row_group_values=row_group_values,
+                row_group_col=arousal_group_col,
             ),
+            colorbar=dict(
+                title="Baseline z-score" if pop_zscore else ("Norm FR" if normalize else "FR"),
+                len=0.7,
+                y=0.5,
+                yanchor="middle",
+            ),
+            showscale=show_scale,
+        )
+        if pop_zscore:
+            heatmap_kwargs["zmid"] = 0.0
+            if pop_has_fixed_range:
+                heatmap_kwargs["zmin"] = pop_zmin
+                heatmap_kwargs["zmax"] = pop_zmax
+        fig.add_trace(
+            go.Heatmap(**heatmap_kwargs),
             row=row_idx,
             col=1,
         )
@@ -3263,7 +3416,11 @@ def plot_population_sorted_plotly(
         for y_boundary in group_boundaries:
             fig.add_hline(
                 y=float(y_boundary),
-                line=dict(color="black", dash="dot", width=1),
+                line=dict(
+                    color=arousal_split_line_color,
+                    dash=arousal_split_line_dash,
+                    width=arousal_split_line_width,
+                ),
                 row=row_idx,
                 col=1,
             )

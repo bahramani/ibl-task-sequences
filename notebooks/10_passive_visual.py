@@ -272,6 +272,288 @@ def _has_passive_visual_part(passive_visual_times, passive_visual_contrasts):
     return counts["visual_nonzero"] > 0, counts
 
 
+def _extract_tr_field_local(tr_obj, keys, suffixes=None):
+    if tr_obj is None:
+        return None
+    if hasattr(tr_obj, "keys"):
+        key_list = list(tr_obj.keys())
+        for key in keys:
+            if key in tr_obj:
+                return np.asarray(tr_obj[key])
+        if suffixes:
+            for key in key_list:
+                key_str = str(key)
+                for suffix in suffixes:
+                    if key_str.endswith(suffix):
+                        return np.asarray(tr_obj[key])
+    for key in keys:
+        if hasattr(tr_obj, key):
+            return np.asarray(getattr(tr_obj, key))
+    if suffixes:
+        for suffix in suffixes:
+            if hasattr(tr_obj, suffix):
+                return np.asarray(getattr(tr_obj, suffix))
+    return None
+
+
+def _coerce_passive_base_obj(tr_obj):
+    if tr_obj is None:
+        return None
+    base_obj = tr_obj
+    if isinstance(tr_obj, dict) and "table" in tr_obj:
+        base_obj = tr_obj["table"]
+    elif isinstance(tr_obj, (list, tuple)):
+        if len(tr_obj) == 1:
+            base_obj = tr_obj[0]
+        elif len(tr_obj) > 1:
+            preferred = None
+            for item in tr_obj:
+                if isinstance(item, pd.DataFrame) and "start" in item.columns:
+                    preferred = item
+                    break
+                if hasattr(item, "dtype") and getattr(item.dtype, "names", None):
+                    if "start" in set(item.dtype.names):
+                        preferred = item
+                        break
+            base_obj = preferred if preferred is not None else tr_obj[0]
+    return base_obj
+
+
+def _extract_passive_visual_times_contrast_side(tr_obj):
+    times, contrasts = extract_passive_times_and_contrast(tr_obj)
+    if times is None or contrasts is None:
+        return np.array([], dtype=float), np.array([], dtype=float), np.array([], dtype=object)
+
+    times = np.asarray(times, dtype=float).reshape(-1)
+    contrasts = np.asarray(contrasts, dtype=float).reshape(-1)
+    if contrasts.shape[0] != times.shape[0]:
+        if contrasts.size == 1 and times.size > 0:
+            contrasts = np.full(times.shape[0], float(contrasts.ravel()[0]), dtype=float)
+        else:
+            contrasts = np.ones_like(times, dtype=float)
+
+    side = np.full(times.shape[0], "unknown", dtype=object)
+    base_obj = _coerce_passive_base_obj(tr_obj)
+    contrast_left = _extract_tr_field_local(
+        base_obj,
+        keys=("contrastLeft",),
+        suffixes=(".contrastLeft", "contrastLeft"),
+    )
+    contrast_right = _extract_tr_field_local(
+        base_obj,
+        keys=("contrastRight",),
+        suffixes=(".contrastRight", "contrastRight"),
+    )
+
+    left_arr = None
+    right_arr = None
+    if contrast_left is not None:
+        left_arr = np.asarray(contrast_left, dtype=float).reshape(-1)
+    if contrast_right is not None:
+        right_arr = np.asarray(contrast_right, dtype=float).reshape(-1)
+
+    if left_arr is not None or right_arr is not None:
+        if left_arr is None and right_arr is not None:
+            left_arr = np.full(right_arr.shape[0], np.nan, dtype=float)
+        if right_arr is None and left_arr is not None:
+            right_arr = np.full(left_arr.shape[0], np.nan, dtype=float)
+        if left_arr is not None and right_arr is not None and left_arr.shape[0] == times.shape[0]:
+            left_abs = np.abs(left_arr)
+            right_abs = np.abs(right_arr)
+            left_on = np.isfinite(left_abs) & (left_abs > 0)
+            right_on = np.isfinite(right_abs) & (right_abs > 0)
+            side[left_on & ~right_on] = "left"
+            side[right_on & ~left_on] = "right"
+            both_on = left_on & right_on
+            side[both_on & (left_abs > right_abs)] = "left"
+            side[both_on & (right_abs > left_abs)] = "right"
+
+    if not np.any((side == "left") | (side == "right")):
+        side_hint = _extract_tr_field_local(
+            base_obj,
+            keys=(
+                "position",
+                "stim_position",
+                "stimPos",
+                "azimuth",
+                "side",
+                "stim_side",
+                "stimSide",
+                "is_right",
+                "isRight",
+            ),
+            suffixes=(
+                ".position",
+                "position",
+                ".azimuth",
+                "azimuth",
+                ".side",
+                "side",
+                ".stim_side",
+                "stim_side",
+            ),
+        )
+        if side_hint is not None:
+            side_hint = np.asarray(side_hint).reshape(-1)
+            if side_hint.shape[0] == times.shape[0]:
+                if np.issubdtype(side_hint.dtype, np.number):
+                    side_hint_num = side_hint.astype(float)
+                    side[side_hint_num < 0] = "left"
+                    side[side_hint_num > 0] = "right"
+                else:
+                    side_hint_str = pd.Series(side_hint).astype(str).str.lower().to_numpy()
+                    right_mask = (
+                        (side_hint_str == "right")
+                        | (side_hint_str == "r")
+                        | (side_hint_str == "1")
+                        | (side_hint_str == "true")
+                    )
+                    left_mask = (
+                        (side_hint_str == "left")
+                        | (side_hint_str == "l")
+                        | (side_hint_str == "-1")
+                        | (side_hint_str == "false")
+                    )
+                    side[left_mask] = "left"
+                    side[right_mask] = "right"
+
+    if not np.any((side == "left") | (side == "right")):
+        signed_mask = np.isfinite(contrasts)
+        if np.any(contrasts[signed_mask] < 0) and np.any(contrasts[signed_mask] > 0):
+            side[contrasts < 0] = "left"
+            side[contrasts > 0] = "right"
+
+    contrast_abs = np.abs(contrasts)
+    finite_mask = np.isfinite(times) & np.isfinite(contrast_abs)
+    return times[finite_mask], contrast_abs[finite_mask], side[finite_mask]
+
+
+def _top_nonzero_contrasts(values, top_n=2, round_decimals=6):
+    vals = np.asarray(values, dtype=float).reshape(-1)
+    vals = vals[np.isfinite(vals) & (vals > 0)]
+    if vals.size == 0:
+        return np.array([], dtype=float)
+    vals = np.round(vals, int(round_decimals))
+    unique_vals = np.unique(vals.astype(float))
+    unique_vals = np.sort(unique_vals)[::-1]
+    return unique_vals[: int(top_n)]
+
+
+def _select_task_response_heatmap_events(sl, top_n=2, round_decimals=6):
+    trials = sl.trials
+    stim_times = np.asarray(trials["stimOn_times"], dtype=float).reshape(-1)
+    contrast_left = np.asarray(trials["contrastLeft"], dtype=float).reshape(-1)
+    contrast_right = np.asarray(trials["contrastRight"], dtype=float).reshape(-1)
+    if (
+        stim_times.shape[0] != contrast_left.shape[0]
+        or stim_times.shape[0] != contrast_right.shape[0]
+    ):
+        return {
+            "task_all_right_times": np.array([], dtype=float),
+            "task_all_left_times": np.array([], dtype=float),
+            "task_top2_right_times": np.array([], dtype=float),
+            "task_top2_left_times": np.array([], dtype=float),
+            "task_zero_lr_times": np.array([], dtype=float),
+            "task_all_right_values": np.array([], dtype=float),
+            "task_all_left_values": np.array([], dtype=float),
+            "task_top2_right_values": np.array([], dtype=float),
+            "task_top2_left_values": np.array([], dtype=float),
+        }
+
+    left_abs = np.abs(contrast_left)
+    right_abs = np.abs(contrast_right)
+    stim_valid = np.isfinite(stim_times)
+
+    left_pos = np.isfinite(left_abs) & (left_abs > 0)
+    right_pos = np.isfinite(right_abs) & (right_abs > 0)
+    left_only = left_pos & (~right_pos)
+    right_only = right_pos & (~left_pos)
+    both_pos = left_pos & right_pos
+    left_only = left_only | (both_pos & (left_abs > right_abs))
+    right_only = right_only | (both_pos & (right_abs > left_abs))
+
+    tol = 10.0 ** (-int(round_decimals))
+    left_zero = np.isfinite(left_abs) & np.isclose(left_abs, 0.0, atol=tol)
+    right_zero = np.isfinite(right_abs) & np.isclose(right_abs, 0.0, atol=tol)
+    left_missing = ~np.isfinite(contrast_left)
+    right_missing = ~np.isfinite(contrast_right)
+    all_right_mask = right_only & stim_valid
+    all_left_mask = left_only & stim_valid
+    all_right_vals = np.unique(np.round(right_abs[all_right_mask], int(round_decimals)))
+    all_left_vals = np.unique(np.round(left_abs[all_left_mask], int(round_decimals)))
+    all_right_vals = np.sort(all_right_vals)[::-1]
+    all_left_vals = np.sort(all_left_vals)[::-1]
+
+    right_top_vals = _top_nonzero_contrasts(right_abs[right_only], top_n=top_n, round_decimals=round_decimals)
+    left_top_vals = _top_nonzero_contrasts(left_abs[left_only], top_n=top_n, round_decimals=round_decimals)
+
+    right_top_mask = np.zeros_like(stim_valid, dtype=bool)
+    for val in right_top_vals:
+        right_top_mask |= np.isclose(right_abs, float(val), atol=tol)
+    right_top_mask &= right_only & stim_valid
+
+    left_top_mask = np.zeros_like(stim_valid, dtype=bool)
+    for val in left_top_vals:
+        left_top_mask |= np.isclose(left_abs, float(val), atol=tol)
+    left_top_mask &= left_only & stim_valid
+
+    zero_left_trials = left_zero & (right_missing | right_zero)
+    zero_right_trials = right_zero & (left_missing | left_zero)
+    zero_mask = stim_valid & (zero_left_trials | zero_right_trials)
+
+    return {
+        "task_all_right_times": np.sort(stim_times[all_right_mask]),
+        "task_all_left_times": np.sort(stim_times[all_left_mask]),
+        "task_top2_right_times": np.sort(stim_times[right_top_mask]),
+        "task_top2_left_times": np.sort(stim_times[left_top_mask]),
+        "task_zero_lr_times": np.sort(stim_times[zero_mask]),
+        "task_all_right_values": all_right_vals,
+        "task_all_left_values": all_left_vals,
+        "task_top2_right_values": right_top_vals,
+        "task_top2_left_values": left_top_vals,
+    }
+
+
+def _select_passive_response_heatmap_events(visual_tr, top_n=2, round_decimals=6):
+    times, contrasts, sides = _extract_passive_visual_times_contrast_side(visual_tr)
+    if times.size == 0:
+        return {
+            "passive_top2_right_times": np.array([], dtype=float),
+            "passive_top2_left_times": np.array([], dtype=float),
+            "passive_top2_right_values": np.array([], dtype=float),
+            "passive_top2_left_values": np.array([], dtype=float),
+        }
+
+    finite_nonzero = np.isfinite(times) & np.isfinite(contrasts) & (contrasts > 0)
+    times = times[finite_nonzero]
+    contrasts = contrasts[finite_nonzero]
+    sides = np.asarray(sides, dtype=object)[finite_nonzero]
+
+    right_mask = sides == "right"
+    left_mask = sides == "left"
+
+    right_top_vals = _top_nonzero_contrasts(contrasts[right_mask], top_n=top_n, round_decimals=round_decimals)
+    left_top_vals = _top_nonzero_contrasts(contrasts[left_mask], top_n=top_n, round_decimals=round_decimals)
+
+    tol = 10.0 ** (-int(round_decimals))
+    right_top_mask = np.zeros_like(right_mask, dtype=bool)
+    for val in right_top_vals:
+        right_top_mask |= np.isclose(contrasts, float(val), atol=tol)
+    right_top_mask &= right_mask
+
+    left_top_mask = np.zeros_like(left_mask, dtype=bool)
+    for val in left_top_vals:
+        left_top_mask |= np.isclose(contrasts, float(val), atol=tol)
+    left_top_mask &= left_mask
+
+    return {
+        "passive_top2_right_times": np.sort(times[right_top_mask]),
+        "passive_top2_left_times": np.sort(times[left_top_mask]),
+        "passive_top2_right_values": right_top_vals,
+        "passive_top2_left_values": left_top_vals,
+    }
+
+
 def _build_event_session(event_times, event_name):
     return {"trials": {event_name: np.asarray(event_times, dtype=float)}}
 
@@ -344,6 +626,45 @@ def _build_corr_heatmap_fig(corr_mat, n_mat, names, title, template):
     return fig
 
 
+def _attach_delay_columns_from_reference(df_res, target_event_name, ref_event_name):
+    if (
+        df_res is None
+        or ref_event_name is None
+        or str(target_event_name) == str(ref_event_name)
+    ):
+        return df_res
+    if not isinstance(df_res, pd.DataFrame) or df_res.empty:
+        return df_res
+
+    col_pairs = [
+        (
+            ana_utils.delay_column_name(target_event_name),
+            ana_utils.delay_column_name(ref_event_name),
+        ),
+        (
+            ana_utils.delay_split_column_name(target_event_name, "odd"),
+            ana_utils.delay_split_column_name(ref_event_name, "odd"),
+        ),
+        (
+            ana_utils.delay_split_column_name(target_event_name, "even"),
+            ana_utils.delay_split_column_name(ref_event_name, "even"),
+        ),
+    ]
+
+    updates = {}
+    for target_col, ref_col in col_pairs:
+        if target_col not in df_res.columns and ref_col in df_res.columns:
+            updates[target_col] = df_res[ref_col]
+
+    if not updates:
+        return df_res
+
+    df_res_out = df_res.copy()
+    for col_name, col_values in updates.items():
+        df_res_out[col_name] = col_values
+    return df_res_out
+
+
 def _build_multi_event_population_panel(
     event_specs,
     event_sessions,
@@ -355,6 +676,9 @@ def _build_multi_event_population_panel(
     plot_config,
     sort_mode,
     region_name,
+    pid=None,
+    sort_mode_by_event=None,
+    delay_reference_event_by_name=None,
     df_coupling=None,
     df_coupling_task=None,
     df_coupling_iti=None,
@@ -384,17 +708,28 @@ def _build_multi_event_population_panel(
         pop_window_post = float(cfg.get("POP_WINDOW_POST", 0.15))
         cfg["POP_WINDOW_PRE"] = pop_window_pre
         cfg["POP_WINDOW_POST"] = pop_window_post
-        sort_mode_event = sort_mode
-        if event_name == "passive_visual_times":
-            # Force passive visual panel to use the exact Stim On neuron order.
-            sort_mode_event = "delay:stimOn_times"
+        if isinstance(sort_mode_by_event, dict) and event_name in sort_mode_by_event:
+            sort_mode_event = str(sort_mode_by_event[event_name])
+        else:
+            sort_mode_event = sort_mode
+
+        if isinstance(delay_reference_event_by_name, dict):
+            delay_ref_event = delay_reference_event_by_name.get(event_name, None)
+        else:
+            delay_ref_event = None
+        df_res_event = _attach_delay_columns_from_reference(
+            df_res,
+            target_event_name=event_name,
+            ref_event_name=delay_ref_event,
+        )
+
         fig_event = plot_population_sorted_plotly(
             event_session,
             spikes,
             clusters,
             plot_cluster_ids,
             plot_cluster_acronyms,
-            df_res,
+            df_res_event,
             cfg,
             df_coupling=df_coupling,
             df_coupling_task=df_coupling_task,
@@ -425,8 +760,11 @@ def _build_multi_event_population_panel(
         fig_panel.update_xaxes(range=[-pop_window_pre, pop_window_post], row=row, col=col)
         fig_panel.update_yaxes(autorange="reversed", row=row, col=col)
 
+    title_text = f"Response Analysis (Region {region_name})"
+    if pid is not None:
+        title_text = f"{title_text} | PID {pid}"
     fig_panel.update_layout(
-        title=f"Response Analysis (Region {region_name})",
+        title=title_text,
         width=1500,
         height=350 * n_rows + 140,
         template=plot_config.get("PLOTLY_TEMPLATE", "plotly_white"),
@@ -981,15 +1319,101 @@ heatmap_sort_mode = HEATMAP_SORT_MAP.get(HEATMAP_SORT, "delay")
 heatmap_plot_config = dict(plot_config)
 heatmap_plot_config["POP_WINDOW_PRE"] = 0.1
 heatmap_plot_config["POP_WINDOW_POST"] = 0.2
+task_heatmap_events = _select_task_response_heatmap_events(sl, top_n=2, round_decimals=6)
+passive_heatmap_events = _select_passive_response_heatmap_events(visual_TR, top_n=2, round_decimals=6)
+
 heatmap_event_specs = [
-    ("Stim On", "stimOn_times"),
-    ("Passive Visual (Stim On sort)", "passive_visual_times"),
+    ("Task: all trials (Stim On)", "stimOn_times"),
+    (
+        "Task: all contrasts, right only",
+        "stimOn_times_task_all_right",
+    ),
+    (
+        "Task: all contrasts, left only",
+        "stimOn_times_task_all_left",
+    ),
+    (
+        "Task: top 2 contrasts, right only",
+        "stimOn_times_task_top2_right",
+    ),
+    (
+        "Task: top 2 contrasts, left only",
+        "stimOn_times_task_top2_left",
+    ),
+    (
+        "Task: zero contrast, both left/right",
+        "stimOn_times_task_zero_lr",
+    ),
+    (
+        "Passive: all non-zero contrasts",
+        "passive_visual_times",
+    ),
+    (
+        "Passive: top 2 contrasts, right only",
+        "passive_visual_top2_right_times",
+    ),
+    (
+        "Passive: top 2 contrasts, left only",
+        "passive_visual_top2_left_times",
+    ),
 ]
+
+heatmap_event_times = {
+    "stimOn_times": events_by_name.get("stimOn_times", np.array([], dtype=float)),
+    "passive_visual_times": events_by_name.get("passive_visual_times", np.array([], dtype=float)),
+    "stimOn_times_task_all_right": task_heatmap_events["task_all_right_times"],
+    "stimOn_times_task_all_left": task_heatmap_events["task_all_left_times"],
+    "stimOn_times_task_top2_right": task_heatmap_events["task_top2_right_times"],
+    "stimOn_times_task_top2_left": task_heatmap_events["task_top2_left_times"],
+    "passive_visual_top2_right_times": passive_heatmap_events["passive_top2_right_times"],
+    "passive_visual_top2_left_times": passive_heatmap_events["passive_top2_left_times"],
+    "stimOn_times_task_zero_lr": task_heatmap_events["task_zero_lr_times"],
+}
+
+heatmap_sort_mode_by_event = {
+    "passive_visual_times": "delay:stimOn_times",
+    "stimOn_times_task_all_right": "delay:stimOn_times",
+    "stimOn_times_task_all_left": "delay:stimOn_times",
+    "stimOn_times_task_top2_right": "delay:stimOn_times",
+    "stimOn_times_task_top2_left": "delay:stimOn_times",
+    "passive_visual_top2_right_times": "delay:stimOn_times",
+    "passive_visual_top2_left_times": "delay:stimOn_times",
+    "stimOn_times_task_zero_lr": "delay:stimOn_times",
+}
+
+heatmap_delay_reference_by_event = {
+    "stimOn_times_task_all_right": "stimOn_times",
+    "stimOn_times_task_all_left": "stimOn_times",
+    "stimOn_times_task_top2_right": "stimOn_times",
+    "stimOn_times_task_top2_left": "stimOn_times",
+    "stimOn_times_task_zero_lr": "stimOn_times",
+    "passive_visual_top2_right_times": "passive_visual_times",
+    "passive_visual_top2_left_times": "passive_visual_times",
+}
+
+print(
+    "Heatmap subsets:",
+    {
+        "task_all_right_contrasts": task_heatmap_events["task_all_right_values"].tolist(),
+        "task_all_right_n": int(task_heatmap_events["task_all_right_times"].size),
+        "task_all_left_contrasts": task_heatmap_events["task_all_left_values"].tolist(),
+        "task_all_left_n": int(task_heatmap_events["task_all_left_times"].size),
+        "task_top2_right_contrasts": task_heatmap_events["task_top2_right_values"].tolist(),
+        "task_top2_right_n": int(task_heatmap_events["task_top2_right_times"].size),
+        "task_top2_left_contrasts": task_heatmap_events["task_top2_left_values"].tolist(),
+        "task_top2_left_n": int(task_heatmap_events["task_top2_left_times"].size),
+        "passive_top2_right_contrasts": passive_heatmap_events["passive_top2_right_values"].tolist(),
+        "passive_top2_right_n": int(passive_heatmap_events["passive_top2_right_times"].size),
+        "passive_top2_left_contrasts": passive_heatmap_events["passive_top2_left_values"].tolist(),
+        "passive_top2_left_n": int(passive_heatmap_events["passive_top2_left_times"].size),
+        "task_zero_lr_n": int(task_heatmap_events["task_zero_lr_times"].size),
+    },
+)
 
 event_sessions = {}
 for _label, event_name in heatmap_event_specs:
     event_sessions[event_name] = _build_event_session(
-        events_by_name.get(event_name, np.array([])),
+        heatmap_event_times.get(event_name, np.array([])),
         event_name,
     )
 
@@ -1020,6 +1444,9 @@ else:
             heatmap_plot_config,
             sort_mode=heatmap_sort_mode,
             region_name=region_name,
+            pid=pid,
+            sort_mode_by_event=heatmap_sort_mode_by_event,
+            delay_reference_event_by_name=heatmap_delay_reference_by_event,
             df_coupling=df_coupling_plot,
             df_coupling_task=df_coupling_task_plot,
             df_coupling_iti=df_coupling_iti_plot,

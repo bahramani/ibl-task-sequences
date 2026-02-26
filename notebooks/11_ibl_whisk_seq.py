@@ -1,4 +1,5 @@
 # %% Imports
+
 from pathlib import Path
 import sys
 
@@ -261,9 +262,11 @@ def _build_whisk_trace(df_trace, config):
         "wh_norm",
         "n_views",
     ]
+    target_wh_mean = config.get("WH_TARGET_MEAN", None)
+    wh_signal_scale = 1.0
     use_binning = bool(config.get("WH_BIN_SIGNAL", True))
     if use_binning:
-        return ana_utils.bin_normalize_whisk_trace(
+        out = ana_utils.bin_normalize_whisk_trace(
             df_trace,
             bin_s=config["WH_BIN_S"],
             norm_pctl=config["WH_NORM_PCTL"],
@@ -271,6 +274,18 @@ def _build_whisk_trace(df_trace, config):
             bin_reduce=config.get("WH_BIN_REDUCE", "mean"),
             normalize_after_bin=config.get("WH_NORMALIZE_AFTER_BIN", False),
         )
+        # Rescale whisk signal right at creation so downstream calculations use the new mean level.
+        if target_wh_mean is not None and not out.empty:
+            wh_vals = out["wh_norm"].to_numpy(dtype=float)
+            curr_mean = float(np.nanmean(wh_vals))
+            if np.isfinite(curr_mean) and not np.isclose(curr_mean, 0.0):
+                wh_signal_scale = float(target_wh_mean) / curr_mean
+                out = out.copy()
+                out["wh_norm"] = wh_vals * wh_signal_scale
+        if isinstance(config, dict):
+            # Reuse this same scale for left/right camera traces in plotting.
+            config["WH_SIGNAL_SCALE"] = wh_signal_scale
+        return out
 
     if df_trace is None or len(df_trace) == 0:
         return pd.DataFrame(columns=columns)
@@ -363,6 +378,15 @@ def _build_whisk_trace(df_trace, config):
 
     t_out = t_ref[keep]
     wh_out = wh_norm[keep]
+    # Rescale whisk signal right at creation so downstream calculations use the new mean level.
+    if target_wh_mean is not None:
+        curr_mean = float(np.nanmean(wh_out))
+        if np.isfinite(curr_mean) and not np.isclose(curr_mean, 0.0):
+            wh_signal_scale = float(target_wh_mean) / curr_mean
+            wh_out = wh_out * wh_signal_scale
+    if isinstance(config, dict):
+        # Reuse this same scale for left/right camera traces in plotting.
+        config["WH_SIGNAL_SCALE"] = wh_signal_scale
     n_views_out = n_views[keep]
     out = pd.DataFrame(
         {
@@ -540,6 +564,59 @@ def _build_event_session(event_times, event_name):
     return {"trials": {event_name: np.asarray(event_times, dtype=float)}}
 
 
+def _extract_event_times_from_session(event_session, event_name):
+    if not isinstance(event_session, dict):
+        return np.array([], dtype=float)
+    trials_obj = event_session.get("trials", {})
+    if isinstance(trials_obj, dict):
+        arr = np.asarray(trials_obj.get(event_name, np.array([])), dtype=float).reshape(-1)
+    else:
+        try:
+            arr = np.asarray(trials_obj[event_name], dtype=float).reshape(-1)
+        except Exception:
+            arr = np.array([], dtype=float)
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return np.array([], dtype=float)
+    return np.sort(arr)
+
+
+def _compute_event_locked_whisk_mean(whisk_df, event_times, x_axis):
+    x_axis = np.asarray(x_axis, dtype=float).reshape(-1)
+    if x_axis.size == 0:
+        return np.array([], dtype=float)
+    out = np.full(x_axis.shape, np.nan, dtype=float)
+    if whisk_df is None or not isinstance(whisk_df, pd.DataFrame):
+        return out
+    if "bin_center_s" not in whisk_df.columns or "wh_norm" not in whisk_df.columns:
+        return out
+
+    t_wh = np.asarray(whisk_df["bin_center_s"], dtype=float).reshape(-1)
+    v_wh = np.asarray(whisk_df["wh_norm"], dtype=float).reshape(-1)
+    keep = np.isfinite(t_wh) & np.isfinite(v_wh)
+    t_wh = t_wh[keep]
+    v_wh = v_wh[keep]
+    if t_wh.size < 2:
+        return out
+    order = np.argsort(t_wh)
+    t_wh = t_wh[order]
+    v_wh = v_wh[order]
+
+    event_times = np.asarray(event_times, dtype=float).reshape(-1)
+    event_times = event_times[np.isfinite(event_times)]
+    if event_times.size == 0:
+        return out
+
+    aligned = []
+    for t_ev in event_times:
+        x_query = x_axis + float(t_ev)
+        vals = np.interp(x_query, t_wh, v_wh, left=np.nan, right=np.nan)
+        aligned.append(vals)
+    if len(aligned) == 0:
+        return out
+    return np.nanmean(np.vstack(aligned), axis=0)
+
+
 def _build_multi_event_population_panel(
     event_specs,
     event_sessions,
@@ -555,22 +632,150 @@ def _build_multi_event_population_panel(
     df_coupling_task=None,
     df_coupling_iti=None,
     df_firing_rate=None,
+    whisk_df=None,
 ):
     n_events = len(event_specs)
-    n_cols = 3
-    n_rows = int(np.ceil(n_events / n_cols))
+    n_cols = int(plot_config.get("HEATMAP_PANEL_COLS", 4))
+    n_cols = max(1, n_cols)
+    n_event_rows = int(np.ceil(n_events / n_cols))
+    heatmap_row_weight = float(plot_config.get("HEATMAP_MAIN_ROW_WEIGHT", 0.74))
+    fr_row_weight = float(plot_config.get("HEATMAP_FR_ROW_WEIGHT", 0.16))
+    whisk_row_weight = float(plot_config.get("HEATMAP_WHISK_ROW_WEIGHT", 0.10))
+    panel_vertical_spacing = float(plot_config.get("HEATMAP_VERTICAL_SPACING", 0.07))
+    title_yshift = float(plot_config.get("HEATMAP_TITLE_YSHIFT", 2))
+
+    no_aux_events = {"stimOn_times", "firstMovement_times", "feedback_times"}
+    panel_row_has_aux = []
+    for panel_row in range(n_event_rows):
+        i0 = panel_row * n_cols
+        i1 = min((panel_row + 1) * n_cols, n_events)
+        has_aux = any(
+            bool(event_specs[i][1]) and (event_specs[i][1] not in no_aux_events)
+            for i in range(i0, i1)
+        )
+        panel_row_has_aux.append(has_aux)
+
+    row_heights = []
+    panel_row_to_rows = []
+    next_row = 1
+    for panel_row in range(n_event_rows):
+        has_aux = panel_row_has_aux[panel_row]
+        row_heat = next_row
+        next_row += 1
+        if has_aux:
+            row_heights.extend([heatmap_row_weight, fr_row_weight, whisk_row_weight])
+            row_fr = next_row
+            next_row += 1
+            row_wh = next_row
+            next_row += 1
+        else:
+            row_heights.append(heatmap_row_weight)
+            row_fr = None
+            row_wh = None
+        panel_row_to_rows.append((row_heat, row_fr, row_wh))
+    n_rows = next_row - 1
+
+    subplot_titles = [""] * (n_rows * n_cols)
+    for idx, (label, _event_name) in enumerate(event_specs):
+        panel_row = idx // n_cols
+        col = idx % n_cols
+        row_heat, _row_fr, _row_wh = panel_row_to_rows[panel_row]
+        title_idx = (row_heat - 1) * n_cols + col
+        if 0 <= title_idx < len(subplot_titles):
+            subplot_titles[title_idx] = str(label)
+    subplot_specs = [[{"secondary_y": True} for _ in range(n_cols)] for _ in range(n_rows)]
     fig_panel = make_subplots(
         rows=n_rows,
         cols=n_cols,
-        subplot_titles=[label for label, _event in event_specs],
+        subplot_titles=subplot_titles,
         horizontal_spacing=0.06,
-        vertical_spacing=0.15,
+        vertical_spacing=panel_vertical_spacing,
+        row_heights=row_heights,
+        specs=subplot_specs,
     )
+    if fig_panel.layout.annotations:
+        for ann in fig_panel.layout.annotations:
+            ann.yshift = title_yshift
+            ann.xanchor = "center"
 
+    def _xaxis_name(row, col):
+        axis_idx = (row - 1) * n_cols + col
+        return "x" if axis_idx == 1 else f"x{axis_idx}"
+
+    whisk_brief_summary_key = (
+        "wh_brief_times_spont"
+        if "wh_brief_times_spont" in event_sessions
+        else "wh_brief_times"
+    )
+    whisk_long_summary_key = (
+        "wh_long_times_spont"
+        if "wh_long_times_spont" in event_sessions
+        else "wh_long_times"
+    )
+    brief_times_summary = _extract_event_times_from_session(
+        event_sessions.get(whisk_brief_summary_key),
+        whisk_brief_summary_key,
+    )
+    long_times_summary = _extract_event_times_from_session(
+        event_sessions.get(whisk_long_summary_key),
+        whisk_long_summary_key,
+    )
+    whisk_count_brief = int(brief_times_summary.size)
+    whisk_count_long = int(long_times_summary.size)
+
+    region_cluster_ids = np.asarray(
+        [
+            cid
+            for cid, reg in zip(plot_cluster_ids, plot_cluster_acronyms)
+            if str(reg) == str(region_name)
+        ],
+        dtype=np.asarray(plot_cluster_ids).dtype if len(plot_cluster_ids) else int,
+    )
+    arousal_plus_count = 0
+    arousal_minus_count = 0
+    arousal_neutral_count = 0
+    if (
+        isinstance(df_res, pd.DataFrame)
+        and not df_res.empty
+        and ("cluster_id" in df_res.columns)
+        and ("arousal_group" in df_res.columns)
+        and (region_cluster_ids.size > 0)
+    ):
+        df_region_arousal = (
+            df_res.loc[
+                df_res["cluster_id"].isin(region_cluster_ids),
+                ["cluster_id", "arousal_group"],
+            ]
+            .drop_duplicates(subset=["cluster_id"], keep="first")
+            .copy()
+        )
+        if not df_region_arousal.empty:
+            group_vals = df_region_arousal["arousal_group"].astype(str).str.strip().str.lower()
+            arousal_plus_count = int((group_vals == "arousal_plus").sum())
+            arousal_minus_count = int((group_vals == "arousal_minus").sum())
+            arousal_neutral_count = int((group_vals == "neutral").sum())
+
+    fr_axis_meta = {}
+    show_heatmap_colorbar = bool(plot_config.get("HEATMAP_SHOW_COLORBAR", True))
+    heatmap_colorbar_added = False
     event_window_overrides = plot_config.get("POP_WINDOWS_BY_EVENT", {})
+
+    def _finite_float(value):
+        try:
+            out = float(value)
+        except Exception:
+            return None
+        if not np.isfinite(out):
+            return None
+        return out
+
     for idx, (_event_label, event_name) in enumerate(event_specs):
-        row = idx // n_cols + 1
+        if not event_name:
+            continue
+        panel_row = idx // n_cols
         col = idx % n_cols + 1
+        row_heat, row_fr, row_wh = panel_row_to_rows[panel_row]
+        keep_aux = (event_name not in no_aux_events) and (row_fr is not None) and (row_wh is not None)
         event_session = event_sessions.get(event_name)
         if event_session is None:
             continue
@@ -603,33 +808,315 @@ def _build_multi_event_population_panel(
         if fig_event is None or len(fig_event.data) == 0:
             continue
 
+        heatmap_trace = None
         for trace in fig_event.data:
-            trace_copy = go.Figure(data=[trace]).data[0]
-            if isinstance(trace_copy, go.Heatmap):
-                trace_copy.showscale = idx == 0
-                if idx == 0:
-                    trace_copy.colorbar = dict(title="Norm FR", len=0.8, y=0.5)
-            else:
-                trace_copy.showlegend = False
-            fig_panel.add_trace(trace_copy, row=row, col=col)
+            if isinstance(trace, go.Heatmap):
+                heatmap_trace = go.Figure(data=[trace]).data[0]
+                break
+        if heatmap_trace is None:
+            continue
 
-        fig_panel.add_vline(
-            x=0,
-            row=row,
-            col=col,
-            line=dict(color="black", dash="dash"),
-        )
-        fig_panel.update_xaxes(range=[-pop_window_pre, pop_window_post], row=row, col=col)
-        fig_panel.update_yaxes(autorange="reversed", row=row, col=col)
+        x_vals = np.asarray(heatmap_trace.x, dtype=float).reshape(-1)
+        z_vals = np.asarray(heatmap_trace.z, dtype=float)
+        if z_vals.ndim == 1:
+            z_vals = z_vals.reshape(1, -1)
+        if x_vals.size == 0 and z_vals.ndim == 2 and z_vals.shape[1] > 0:
+            x_vals = np.linspace(-pop_window_pre, pop_window_post, z_vals.shape[1])
+        heatmap_trace.z = z_vals
+
+        pop_zscore = bool(cfg.get("POP_ZSCORE", False))
+        pop_zmin = _finite_float(cfg.get("POP_ZMIN", None))
+        pop_zmax = _finite_float(cfg.get("POP_ZMAX", None))
+        if pop_zscore:
+            heatmap_trace.zmid = 0.0
+        if pop_zmin is not None and pop_zmax is not None and pop_zmax > pop_zmin:
+            heatmap_trace.zmin = pop_zmin
+            heatmap_trace.zmax = pop_zmax
+
+        show_scale = show_heatmap_colorbar and (not heatmap_colorbar_added)
+        heatmap_trace.showscale = show_scale
+        if show_scale:
+            heatmap_trace.colorbar = dict(
+                title="Baseline z-score" if pop_zscore else (
+                    "Norm FR" if bool(cfg.get("POP_NORMALIZE", False)) else "FR"
+                ),
+                len=0.80,
+                y=0.5,
+                yanchor="middle",
+            )
+            heatmap_colorbar_added = True
+        fig_panel.add_trace(heatmap_trace, row=row_heat, col=col)
+
+        for trace in fig_event.data:
+            if not isinstance(trace, go.Scatter):
+                continue
+            tr_name = str(getattr(trace, "name", ""))
+            if tr_name not in {"Delay", "Odd delay", "Even delay"}:
+                continue
+            trace_copy = go.Figure(data=[trace]).data[0]
+            trace_copy.showlegend = False
+            fig_panel.add_trace(trace_copy, row=row_heat, col=col)
+
+        if keep_aux:
+            fr_mean_plus = np.full(x_vals.shape, np.nan, dtype=float)
+            fr_mean_minus = np.full(x_vals.shape, np.nan, dtype=float)
+            fr_mean_all = np.full(x_vals.shape, np.nan, dtype=float)
+            if z_vals.ndim == 2 and z_vals.shape[1] == x_vals.size and z_vals.shape[0] > 0:
+                fr_mean_all = np.nanmean(z_vals, axis=0)
+                row_groups = None
+                group_info_available = False
+                heatmap_meta = getattr(heatmap_trace, "meta", None)
+                if isinstance(heatmap_meta, dict):
+                    row_groups = heatmap_meta.get("row_group_values")
+                    if row_groups is None:
+                        row_cluster_ids = heatmap_meta.get("row_cluster_ids")
+                        if (
+                            row_cluster_ids is not None
+                            and len(row_cluster_ids) == z_vals.shape[0]
+                            and isinstance(df_res, pd.DataFrame)
+                            and ("cluster_id" in df_res.columns)
+                            and ("arousal_group" in df_res.columns)
+                        ):
+                            df_group_lookup = (
+                                df_res[["cluster_id", "arousal_group"]]
+                                .drop_duplicates(subset=["cluster_id"], keep="first")
+                                .copy()
+                            )
+                            group_lookup = dict(
+                                zip(
+                                    df_group_lookup["cluster_id"].tolist(),
+                                    df_group_lookup["arousal_group"].tolist(),
+                                )
+                            )
+                            row_groups = [group_lookup.get(cid, "neutral") for cid in row_cluster_ids]
+                if row_groups is not None and len(row_groups) == z_vals.shape[0]:
+                    group_info_available = True
+                    group_vals = pd.Series(row_groups).astype(str).str.strip().str.lower().to_numpy()
+                    plus_mask = np.isin(
+                        group_vals,
+                        ["arousal_plus", "exc", "excitatory", "increase"],
+                    )
+                    minus_mask = np.isin(
+                        group_vals,
+                        ["arousal_minus", "inh", "inhibitory", "decrease"],
+                    )
+                    if np.any(plus_mask):
+                        fr_mean_plus = np.nanmean(z_vals[plus_mask, :], axis=0)
+                    if np.any(minus_mask):
+                        fr_mean_minus = np.nanmean(z_vals[minus_mask, :], axis=0)
+                if not group_info_available:
+                    fr_mean_plus = fr_mean_all.copy()
+                    fr_mean_minus = fr_mean_all.copy()
+            plus_trace_name = "Arousal+ mean z-score" if pop_zscore else "Arousal+ mean FR"
+            fig_panel.add_trace(
+                go.Scatter(
+                    x=x_vals,
+                    y=fr_mean_plus,
+                    mode="lines",
+                    line=dict(color="#8b0000", width=2),
+                    showlegend=False,
+                    name=plus_trace_name,
+                    hovertemplate=(
+                        "Time: %{x:.3f}s<br>"
+                        + f"{plus_trace_name}: "
+                        + "%{y:.3f}<extra></extra>"
+                    ),
+                ),
+                row=row_fr,
+                col=col,
+            )
+            minus_trace_name = "Arousal- mean z-score" if pop_zscore else "Arousal- mean FR"
+            fig_panel.add_trace(
+                go.Scatter(
+                    x=x_vals,
+                    y=fr_mean_minus,
+                    mode="lines",
+                    line=dict(color="#00008b", width=2),
+                    showlegend=False,
+                    name=minus_trace_name,
+                    hovertemplate=(
+                        "Time: %{x:.3f}s<br>"
+                        + f"{minus_trace_name}: "
+                        + "%{y:.3f}<extra></extra>"
+                    ),
+                ),
+                row=row_fr,
+                col=col,
+            )
+            fr_finite = np.concatenate(
+                [
+                    np.asarray(fr_mean_plus, dtype=float).reshape(-1),
+                    np.asarray(fr_mean_minus, dtype=float).reshape(-1),
+                ]
+            )
+            fr_finite = fr_finite[np.isfinite(fr_finite)]
+            if fr_finite.size > 0:
+                fr_axis_meta[event_name] = {
+                    "row": row_fr,
+                    "col": col,
+                    "ymin": float(np.nanmin(fr_finite)),
+                    "ymax": float(np.nanmax(fr_finite)),
+                }
+
+            ev_times = _extract_event_times_from_session(event_session, event_name)
+            whisk_mean = _compute_event_locked_whisk_mean(whisk_df, ev_times, x_vals)
+            fig_panel.add_trace(
+                go.Scatter(
+                    x=x_vals,
+                    y=whisk_mean,
+                    mode="lines",
+                    line=dict(color="#c77c2e", width=2),
+                    showlegend=False,
+                    name="Mean whisk",
+                    hovertemplate="Time: %{x:.3f}s<br>Mean whisk: %{y:.3f}<extra></extra>",
+                ),
+                row=row_wh,
+                col=col,
+            )
+
+        target_rows = [row_heat]
+        if keep_aux:
+            target_rows.extend([row_fr, row_wh])
+        for target_row in target_rows:
+            fig_panel.add_vline(
+                x=0,
+                row=target_row,
+                col=col,
+                line=dict(color="black", dash="dash"),
+            )
+            fig_panel.update_xaxes(
+                range=[-pop_window_pre, pop_window_post],
+                row=target_row,
+                col=col,
+            )
+
+        if keep_aux:
+            # Lock zoom/pan among heatmap + FR + whisk for this event panel.
+            x_axis_ref = _xaxis_name(row_heat, col)
+            fig_panel.update_xaxes(matches=x_axis_ref, row=row_fr, col=col)
+            fig_panel.update_xaxes(matches=x_axis_ref, row=row_wh, col=col)
+
+        fig_panel.update_yaxes(autorange="reversed", row=row_heat, col=col)
+        fig_panel.update_yaxes(showticklabels=False, row=row_heat, col=col)
+        if panel_row == n_event_rows - 1 and keep_aux:
+            fig_panel.update_xaxes(title_text="Time from event (s)", row=row_wh, col=col)
+        elif panel_row == n_event_rows - 1:
+            fig_panel.update_xaxes(title_text="Time from event (s)", row=row_heat, col=col)
+
+        if col == 1:
+            fig_panel.update_yaxes(
+                title_text="Neurons",
+                title_standoff=28,
+                row=row_heat,
+                col=col,
+            )
+            if keep_aux:
+                fig_panel.update_yaxes(
+                    title_text="Mean z-score" if pop_zscore else "Firing rate",
+                    row=row_fr,
+                    col=col,
+                )
+                fig_panel.update_yaxes(title_text="Whisk", row=row_wh, col=col)
+
+    summary_slots = [idx for idx, (_label, event_name) in enumerate(event_specs) if not event_name]
+    if len(summary_slots) > 0:
+        summary_x_whisk = ["Wh brief", "Wh long"]
+        summary_y_whisk = [whisk_count_brief, whisk_count_long]
+        summary_x_arousal = ["Arousal+", "Arousal-", "Neutral"]
+        summary_y_arousal = [arousal_plus_count, arousal_minus_count, arousal_neutral_count]
+        whisk_y_max = max(summary_y_whisk + [1])
+        neuron_y_max = max(summary_y_arousal + [1])
+
+        for idx in summary_slots:
+            panel_row = idx // n_cols
+            col = idx % n_cols + 1
+            row_heat, _row_fr, _row_wh = panel_row_to_rows[panel_row]
+
+            fig_panel.add_trace(
+                go.Bar(
+                    x=summary_x_whisk,
+                    y=summary_y_whisk,
+                    name="Whisk events",
+                    legendgroup="summary_whisk",
+                    marker=dict(color=["#ff8c00", "#2ca02c"]),
+                    text=summary_y_whisk,
+                    textposition="outside",
+                    showlegend=(idx == summary_slots[0]),
+                    hovertemplate="%{x}: %{y}<extra>Whisk events</extra>",
+                ),
+                row=row_heat,
+                col=col,
+                secondary_y=False,
+            )
+            fig_panel.add_trace(
+                go.Bar(
+                    x=summary_x_arousal,
+                    y=summary_y_arousal,
+                    name="Neurons (arousal group)",
+                    legendgroup="summary_arousal",
+                    marker=dict(color=["#8b0000", "#00008b", "#7f7f7f"]),
+                    text=summary_y_arousal,
+                    textposition="outside",
+                    showlegend=(idx == summary_slots[0]),
+                    hovertemplate="%{x}: %{y}<extra>Neurons</extra>",
+                ),
+                row=row_heat,
+                col=col,
+                secondary_y=True,
+            )
+            fig_panel.update_xaxes(tickangle=-20, row=row_heat, col=col)
+            fig_panel.update_yaxes(
+                title_text="Whisk count",
+                range=[0, whisk_y_max * 1.15],
+                row=row_heat,
+                col=col,
+                secondary_y=False,
+            )
+            fig_panel.update_yaxes(
+                title_text="Neuron count",
+                range=[0, neuron_y_max * 1.15],
+                row=row_heat,
+                col=col,
+                secondary_y=True,
+            )
+
+    # Match Wh Long onset/offset FR axis ranges using the combined extrema of both.
+    fr_ref = fr_axis_meta.get("wh_long_times_spont")
+    if fr_ref is None:
+        fr_ref = fr_axis_meta.get("wh_long_times")
+    fr_target = fr_axis_meta.get("wh_long_offset_times_spont")
+    if fr_target is None:
+        fr_target = fr_axis_meta.get("wh_long_offset_times")
+    if fr_ref is not None and fr_target is not None:
+        y_min = min(float(fr_ref["ymin"]), float(fr_target["ymin"]))
+        y_max = max(float(fr_ref["ymax"]), float(fr_target["ymax"]))
+        if np.isfinite(y_min) and np.isfinite(y_max):
+            if y_max <= y_min:
+                pad = max(abs(y_min) * 0.05, 1e-6)
+                y_min -= pad
+                y_max += pad
+            y_range = [y_min, y_max]
+            fig_panel.update_yaxes(
+                range=y_range,
+                row=int(fr_ref["row"]),
+                col=int(fr_ref["col"]),
+            )
+            fig_panel.update_yaxes(
+                range=y_range,
+                row=int(fr_target["row"]),
+                col=int(fr_target["col"]),
+            )
 
     fig_panel.update_layout(
         title=f"Response Analysis (Region {region_name})",
-        width=1500,
-        height=350 * n_rows + 140,
+        width=max(1200, 360 * n_cols + 120),
+        height=max(640, int(340 * float(sum(row_heights))) + 220),
         template=plot_config.get("PLOTLY_TEMPLATE", "plotly_white"),
-        margin=dict(l=70, r=40, t=90, b=70),
+        barmode="group",
+        margin=dict(l=80, r=40, t=90, b=70),
     )
-    fig_panel.update_xaxes(title_text="Time from event (s)", row=n_rows, col=1)
+    fig_panel.update_xaxes(showgrid=False)
+    fig_panel.update_yaxes(showgrid=False)
     return fig_panel
 
 
@@ -674,7 +1161,8 @@ _set_plotly_renderer(PLOTLY_RENDERER)
 
 
 # %% PID and ONE session loading
-PID = "3eb6e6e0-8a57-49d6-b7c9-f39d5834e682" # "afe87fbb-3a17-461f-b333-e22903f1d70d"  
+PID = "c9664185-d3fd-4e0e-89cf-77c402038938"
+# PID = "3eb6e6e0-8a57-49d6-b7c9-f39d5834e682" # "afe87fbb-3a17-461f-b333-e22903f1d70d"  
 TARGET_REGION = None # "VISa"
 CALC_LABEL_MIN = 0.9
 MIN_REGION_NEURONS = 20
@@ -820,9 +1308,9 @@ CONFIG_CALC = {
     "CALC_LABEL_MIN": CALC_LABEL_MIN,
     "CALC_SPONT": True,
     "EVENT_NAMES": ["stimOn_times", "firstMovement_times", "feedback_times"],
-    # Options: "com", "psth_peak", "tfs", "latenzy"
-    "DELAY_METHOD": "com",
-    "WH_DELAY_METHOD": "com",
+    # Options: "com", "com_signed", "psth_peak", "psth_peak_signed", "tfs", "latenzy"
+    "DELAY_METHOD": "com_signed",
+    "WH_DELAY_METHOD": "com_signed",
     # latenzy options (used only when DELAY_METHOD or WH_DELAY_METHOD == "latenzy")
     # None -> call latenzy(spikes, events) without use_dur.
     # Set to scalar or (start, end) only if you explicitly want use_dur.
@@ -842,6 +1330,12 @@ CONFIG_CALC = {
     "PSTH_WINDOW_END": 1.0,
     "RESPONSIVE_WINDOW_START": 0.02,
     "RESPONSIVE_WINDOW_END": 0.35,
+    # If True, responsiveness/sign are computed on baseline z-scored PSTHs.
+    "RESPONSIVE_USE_ZSCORE": True,
+    # "smooth" (default) uses smoothed PSTH for z-scoring; "raw" uses unsmoothed.
+    "RESPONSIVE_ZSCORE_SOURCE": "smooth",
+    # COM methods: True -> compute COM on threshold-crossing bins; False -> full response window.
+    "COM_USE_THRESHOLD": True,
     "SMOOTH_SIGMA": 1,
     "MIN_TRIALS": 10,
     "MIN_TRIALS_SPLIT": 5,
@@ -858,6 +1352,8 @@ CONFIG_CALC = {
     "WH_NORM_TOP_PCTL": 100.0,
     "WH_BIN_REDUCE": "mean",
     "WH_NORMALIZE_AFTER_BIN": True,
+    # Target mean for the final whisk trace; scaling is applied when the signal is created.
+    "WH_TARGET_MEAN": 0.06, #0.05465713847833459,
     "WH_START_THR": 0.10,
     "WH_END_THR": 0.04,
     "WH_END_QUIET_WINDOW_S": 0.5,
@@ -867,8 +1363,10 @@ CONFIG_CALC = {
     "WH_LOCO_LOOKAHEAD_S": 6.0,
     "WH_LOCO_SPEED_THR_CM_S": 1.0,
     "WH_WHEEL_RADIUS_CM": 3.1,
-    "WH_DELAY_WINDOW": (-0.2, 0.5),   
+    "WH_DELAY_WINDOW": (0, 0.4), # (-0.2, 0.5),   
     "WH_SPLIT_MODE": "odd_even",
+    "AROUSAL_GROUP_MODE": "response_sign",  # "corr" or "response_sign"
+    "AROUSAL_SIGN_EVENT": "wh_brief_times_spont",
     "AROUSAL_POS_THR": 0.05,
     "AROUSAL_NEG_THR": -0.05,
     "AROUSAL_MIN_FR_HZ": 0.5,
@@ -877,6 +1375,11 @@ CONFIG_CALC = {
     "AROUSAL_BIN_S": 0.3,
     "AROUSAL_SMOOTH_SIGMA": 5,
     "AROUSAL_MIN_CORR_BINS": 10,
+    # If True, arousal corr z-scoring uses pre-event baseline bins [t0-BASELINE_PRE, t0).
+    "AROUSAL_USE_EVENT_BASELINE_ZSCORE": True,
+    # Optional override; when omitted, BASELINE_PRE is used.
+    "AROUSAL_BASELINE_PRE": 0.2,
+    "AROUSAL_MIN_BASELINE_BINS": 3,
     "AROUSAL_REQUIRE_SPLIT_HALF": True,
 }
 
@@ -903,6 +1406,8 @@ CONFIG_PLOT = {
     "POP_SMOOTH_SIGMA": 2,
     "POP_CMAP_NAME": "bwr",
     "POP_NORMALIZE": True,
+    "HEATMAP_PANEL_COLS": 4,
+    "HEATMAP_GROUP_BY_AROUSAL": True,  # Whisk: arousal-/neutral/arousal+; task: response-sign inh/none/exc.
     "SORT_BY_SPONT": True,
 }
 
@@ -922,9 +1427,9 @@ RASTER_SORT_MAP = {
     "Delay to Stim On": "delay:stimOn_times",
     "Delay to First Move": "delay:firstMovement_times",
     "Delay to Feedback": "delay:feedback_times",
-    "Delay to Wh Brief": "delay:wh_brief_times",
-    "Delay to Wh Long": "delay:wh_long_times",
-    "Delay to Wh All": "delay:wh_all_times",
+    "Delay to Wh Brief": "delay:wh_brief_times_spont",
+    "Delay to Wh Long": "delay:wh_long_times_spont",
+    "Delay to Wh All": "delay:wh_all_times_spont",
     "Task stPR Delay": "task",
     "Task stPR Strength": "task_strength",
     "Task stPR Max": "task_max",
@@ -944,9 +1449,9 @@ HEATMAP_SORT_MAP = {
     "Delay to Stim On": "delay:stimOn_times",
     "Delay to First Move": "delay:firstMovement_times",
     "Delay to Feedback": "delay:feedback_times",
-    "Delay to Wh Brief": "delay:wh_brief_times",
-    "Delay to Wh Long": "delay:wh_long_times",
-    "Delay to Wh All": "delay:wh_all_times",
+    "Delay to Wh Brief": "delay:wh_brief_times_spont",
+    "Delay to Wh Long": "delay:wh_long_times_spont",
+    "Delay to Wh All": "delay:wh_all_times_spont",
     "Task stPR Delay": "task",
     "Task stPR Strength": "task_strength",
     "ITI stPR Delay": "iti",
@@ -970,7 +1475,7 @@ pio.templates.default = plot_config["PLOTLY_TEMPLATE"]
 
 
 # %% Whisk normalization diagnostics (data stats only; no effect on calculations)
-WH_NORM_DEBUG = True
+WH_NORM_DEBUG = False
 if WH_NORM_DEBUG:
     dbg_df = df_me_raw[["times", "view", "value"]].copy()
     dbg_df = dbg_df.dropna(subset=["times", "value"])
@@ -1335,11 +1840,11 @@ if _missing_wh_vars:
         + ", ".join(_missing_wh_vars)
     )
 
-wh_delay_names = []
-for base_name in ("wh_brief_times", "wh_long_times", "wh_all_times"):
-    wh_delay_names.append(base_name)
-    for suffix in ("spont", "task", "iti"):
-        wh_delay_names.append(f"{base_name}_{suffix}")
+wh_delay_names = [
+    "wh_brief_times_spont",
+    "wh_long_times_spont",
+    "wh_all_times_spont",
+]
 
 DELAY_EVENT_NAMES = ["stimOn_times", "firstMovement_times", "feedback_times", *wh_delay_names]
 
@@ -1378,7 +1883,7 @@ df_arousal = ana_utils.compute_arousal_groups_from_whisk(
     target_region_cluster_acronyms,
     target_region_cid_to_idx,
     target_region_cluster_ids,
-    wh_events_by_period.get("wh_brief_times", np.array([])),
+    wh_events_by_period.get("wh_brief_times_spont", np.array([])),
     CONFIG_CALC,
     whisk_times=df_wh["bin_center_s"].to_numpy(dtype=float),
     whisk_values=df_wh["wh_norm"].to_numpy(dtype=float),
@@ -1408,12 +1913,33 @@ else:
     df_res["arousal_group"] = "neutral"
     df_res["arousal_n_events"] = 0
     df_res["arousal_n_bins"] = 0
+arousal_group_mode = str(CONFIG_CALC.get("AROUSAL_GROUP_MODE", "corr")).strip().lower()
+if arousal_group_mode not in {"corr", "response_sign"}:
+    print(
+        f"Unknown AROUSAL_GROUP_MODE='{arousal_group_mode}'. "
+        "Falling back to 'corr'."
+    )
+    arousal_group_mode = "corr"
+if arousal_group_mode == "response_sign":
+    arousal_sign_event = str(
+        CONFIG_CALC.get("AROUSAL_SIGN_EVENT", "wh_brief_times_spont")
+    ).strip()
+    arousal_sign_col = ana_utils.response_sign_column_name(arousal_sign_event)
+    sign_to_group = {"exc": "arousal_plus", "inh": "arousal_minus", "none": "neutral"}
+    if arousal_sign_col in df_res.columns:
+        sign_vals = df_res[arousal_sign_col].astype(str).str.lower()
+        df_res["arousal_group"] = sign_vals.map(sign_to_group).fillna("neutral")
+    else:
+        print(
+            f"AROUSAL_GROUP_MODE='response_sign' requested but '{arousal_sign_col}' "
+            "is missing. Keeping correlation-based arousal groups."
+        )
 df_res["arousal_group"] = df_res["arousal_group"].fillna("neutral")
 
 wh_sort_delay_cols = [
-    ana_utils.delay_column_name("wh_brief_times"),
-    ana_utils.delay_column_name("wh_long_times"),
-    ana_utils.delay_column_name("wh_all_times"),
+    ana_utils.delay_column_name("wh_brief_times_spont"),
+    ana_utils.delay_column_name("wh_long_times_spont"),
+    ana_utils.delay_column_name("wh_all_times_spont"),
 ]
 df_res = ana_utils.add_wh_delay_sorting(df_res, wh_sort_delay_cols, group_col="arousal_group")
 
@@ -1602,7 +2128,7 @@ if df_coupling_iti_plot is not None:
     print(f"ITI stPR shape: {df_coupling_iti_plot.shape}")
 
 
-# %% Whisk QC (normalized signal + detected bouts)
+# %% Whisk (normalized signal + detected bouts)
 df_me_vis = df_me_raw[["times", "view", "value"]].copy()
 df_me_vis = df_me_vis.dropna(subset=["times", "value"])
 df_me_vis["times"] = df_me_vis["times"].astype(float)
@@ -1611,6 +2137,8 @@ df_me_vis["view"] = df_me_vis["view"].astype(str)
 
 view_curves = {}
 use_bin_signal_qc = bool(CONFIG_CALC.get("WH_BIN_SIGNAL", True))
+# Apply the same whisk scaling to right/left camera curves so all whisk plots are consistent.
+wh_signal_scale = float(CONFIG_CALC.get("WH_SIGNAL_SCALE", 1.0))
 if not df_me_vis.empty:
     norm_pctl = float(CONFIG_CALC["WH_NORM_PCTL"])
     norm_top_pctl = float(CONFIG_CALC.get("WH_NORM_TOP_PCTL", 100.0))
@@ -1682,7 +2210,7 @@ if not df_me_vis.empty:
                 )
                 y_vals = agg_norm["value_norm"].to_numpy(dtype=float)
 
-            view_curves[view_name] = (x_vals, y_vals)
+            view_curves[view_name] = (x_vals, np.asarray(y_vals, dtype=float) * wh_signal_scale)
     else:
         for view_name, grp in df_me_vis.groupby("view", sort=False):
             vals = grp["value"].to_numpy(dtype=float)
@@ -1705,7 +2233,7 @@ if not df_me_vis.empty:
             else:
                 norm_vals = np.clip((vals_fin - lo) / (hi - lo), 0.0, 1.0)
             order = np.argsort(times_fin)
-            view_curves[view_name] = (times_fin[order], norm_vals[order])
+            view_curves[view_name] = (times_fin[order], norm_vals[order] * wh_signal_scale)
 
 if use_bin_signal_qc:
     bin_ms = 1000.0 * float(CONFIG_CALC["WH_BIN_S"])
@@ -2005,34 +2533,88 @@ fig_general = plot_time_window_raster_plotly(
 show_fig(fig_general)
 
 
-# %% Response heatmaps (task + whisk events)
-heatmap_sort_mode = HEATMAP_SORT_MAP.get(HEATMAP_SORT, "delay:wh_all_times")
+# %% Response heatmaps (task + spontaneous whisk events)
+heatmap_sort_mode = HEATMAP_SORT_MAP.get(HEATMAP_SORT, "delay:wh_all_times_spont")
 heatmap_plot_config = dict(plot_config)
+heatmap_plot_config["HEATMAP_PANEL_COLS"] = 4
 heatmap_plot_config["POP_WINDOW_PRE"] = 0.1
 heatmap_plot_config["POP_WINDOW_POST"] = 0.2
-heatmap_plot_config["POP_SPLIT_AROUSAL_WHISK"] = True
+heatmap_plot_config["POP_NORMALIZE"] = False
+heatmap_plot_config["POP_ZSCORE"] = True
+heatmap_plot_config["POP_ZSCORE_SOURCE"] = str(
+    CONFIG_CALC.get("RESPONSIVE_ZSCORE_SOURCE", "smooth")
+).strip().lower()
+heatmap_plot_config["POP_BASELINE_PRE"] = float(CONFIG_CALC.get("BASELINE_PRE", 0.2))
+heatmap_plot_config["POP_ZMIN"] = -10.0
+heatmap_plot_config["POP_ZMAX"] = 10.0
+heatmap_plot_config["HEATMAP_SHOW_COLORBAR"] = True
+heatmap_plot_config["POP_SPLIT_AROUSAL_WHISK"] = bool(
+    plot_config.get("HEATMAP_GROUP_BY_AROUSAL", True)
+)
+heatmap_plot_config["POP_SPLIT_GROUP_ANY_EVENT"] = True
 heatmap_plot_config["POP_AROUSAL_GROUP_COL"] = "arousal_group"
+heatmap_plot_config["POP_GROUP_COL_BY_EVENT"] = {
+    "stimOn_times": ana_utils.response_sign_column_name("stimOn_times"),
+    "firstMovement_times": ana_utils.response_sign_column_name("firstMovement_times"),
+    "feedback_times": ana_utils.response_sign_column_name("feedback_times"),
+}
 heatmap_plot_config["POP_WINDOWS_BY_EVENT"] = {
     "stimOn_times": (0.5, 1.0),
     "firstMovement_times": (0.5, 1.0),
     "feedback_times": (0.5, 1.0),
-    "wh_all_times": (0.5, 2.0),
-    "wh_brief_times": (0.5, 2.0),
-    "wh_long_times": (0.5, 2.0),
+    "wh_long_offset_times_spont": (0.5, 2.0),
+    "wh_all_times_spont": (0.5, 2.0),
+    "wh_brief_times_spont": (0.5, 2.0),
+    "wh_long_times_spont": (0.5, 2.0),
 }
+
+long_bouts_for_offsets = np.asarray(
+    wh_detect.get("long_bouts", np.empty((0, 2))),
+    dtype=float,
+).reshape(-1, 2)
+if long_bouts_for_offsets.size > 0:
+    valid_long_offset = (
+        np.isfinite(long_bouts_for_offsets[:, 0])
+        & np.isfinite(long_bouts_for_offsets[:, 1])
+        & (long_bouts_for_offsets[:, 1] > long_bouts_for_offsets[:, 0])
+    )
+    long_bouts_for_offsets = long_bouts_for_offsets[valid_long_offset]
+    if long_bouts_for_offsets.size > 0:
+        spont_arr = np.asarray(spont_intervals, dtype=float).reshape(-1, 2)
+        long_onsets = long_bouts_for_offsets[:, 0]
+        onset_spont_mask = np.zeros(long_onsets.shape[0], dtype=bool)
+        for t0, t1 in spont_arr:
+            if not np.isfinite(t0) or not np.isfinite(t1) or (t1 <= t0):
+                continue
+            onset_spont_mask |= (long_onsets >= float(t0)) & (long_onsets <= float(t1))
+        long_bouts_for_offsets = long_bouts_for_offsets[onset_spont_mask]
+    if long_bouts_for_offsets.size > 0:
+        wh_long_offset_times_spont = np.sort(long_bouts_for_offsets[:, 1])
+    else:
+        wh_long_offset_times_spont = np.array([], dtype=float)
+else:
+    wh_long_offset_times_spont = np.array([], dtype=float)
+
 heatmap_event_specs = [
     ("Stim On", "stimOn_times"),
     ("First Move", "firstMovement_times"),
     ("Feedback", "feedback_times"),
-    ("Wh All", "wh_all_times"),
-    ("Wh Brief", "wh_brief_times"),
-    ("Wh Long", "wh_long_times"),
+    ("Whisk / Arousal Counts (Spont)", None),
+    ("Wh All (Spont)", "wh_all_times_spont"),
+    ("Wh Brief (Spont)", "wh_brief_times_spont"),
+    ("Wh Long (Spont)", "wh_long_times_spont"),
+    ("Wh Long Offset (Spont)", "wh_long_offset_times_spont"),
 ]
+
+event_time_lookup = dict(events_by_name)
+event_time_lookup["wh_long_offset_times_spont"] = wh_long_offset_times_spont
 
 event_sessions = {}
 for _label, event_name in heatmap_event_specs:
+    if not event_name:
+        continue
     event_sessions[event_name] = _build_event_session(
-        events_by_name.get(event_name, np.array([])),
+        event_time_lookup.get(event_name, np.array([])),
         event_name,
     )
 
@@ -2067,8 +2649,274 @@ else:
             df_coupling_task=df_coupling_task_plot,
             df_coupling_iti=df_coupling_iti_plot,
             df_firing_rate=df_firing_rate,
+            whisk_df=df_wh,
         )
         show_fig(fig_panel)
+
+
+# %% Debug grouped z-PSTHs helper (exact traces + thresholds used for categorization)
+def _debug_grouped_z_psths(
+    region_name,
+    event_name,
+    df_res_debug,
+    group_prefix="Arousal",
+    compare_with_arousal_group=False,
+):
+    event_name = str(event_name).strip()
+    sign_col = ana_utils.response_sign_column_name(event_name)
+    group_map = {"exc": "arousal_plus", "inh": "arousal_minus", "none": "neutral"}
+    use_zscore_dbg = bool(CONFIG_CALC.get("RESPONSIVE_USE_ZSCORE", False))
+    zscore_source_dbg = str(
+        CONFIG_CALC.get("RESPONSIVE_ZSCORE_SOURCE", "smooth")
+    ).strip().lower()
+    z_thr_dbg = float(CONFIG_CALC.get("RESPONSIVE_Z_THR", 2.0))
+
+    if not use_zscore_dbg:
+        print(
+            "[Debug PSTH] WARNING: RESPONSIVE_USE_ZSCORE is False. "
+            "Plots remain z-scored for inspection, but categorization is not."
+        )
+
+    df_debug = df_res_debug.copy()
+    if sign_col in df_debug.columns:
+        sign_vals_dbg = df_debug[sign_col].astype(str).str.strip().str.lower()
+        df_debug["group_from_sign"] = sign_vals_dbg.map(group_map).fillna("neutral")
+    else:
+        print(
+            f"[Debug PSTH] Warning: '{sign_col}' missing. "
+            "Falling back to arousal_group if available."
+        )
+        if "arousal_group" in df_debug.columns:
+            df_debug["group_from_sign"] = (
+                df_debug["arousal_group"].astype(str).str.strip().str.lower().fillna("neutral")
+            )
+        else:
+            df_debug["group_from_sign"] = "neutral"
+
+    if compare_with_arousal_group and "arousal_group" in df_debug.columns:
+        arousal_orig = (
+            df_debug["arousal_group"].astype(str).str.strip().str.lower().fillna("neutral")
+        )
+        mismatch_mask = arousal_orig != df_debug["group_from_sign"]
+        n_mismatch = int(mismatch_mask.sum())
+        print(
+            f"[Debug PSTH] mismatch (stored arousal_group vs sign-derived) "
+            f"{n_mismatch}/{len(df_debug)}"
+        )
+
+    region_cluster_ids_dbg = np.asarray(
+        [
+            int(cid)
+            for cid, reg in zip(plot_cluster_ids, plot_cluster_acronyms)
+            if str(reg) == str(region_name)
+        ],
+        dtype=int,
+    )
+    if region_cluster_ids_dbg.size == 0:
+        region_cluster_ids_dbg = np.asarray(
+            [
+                int(cid)
+                for cid, reg in zip(plot_cluster_ids, plot_cluster_acronyms)
+                if str(reg).startswith(str(region_name))
+            ],
+            dtype=int,
+        )
+
+    if region_cluster_ids_dbg.size == 0:
+        print(f"[Debug PSTH] No neurons found for region '{region_name}'.")
+        return
+
+    events_dbg = np.asarray(events_by_name.get(event_name, np.array([])), dtype=float)
+    events_dbg = events_dbg[np.isfinite(events_dbg)]
+    if events_dbg.size == 0:
+        print(f"[Debug PSTH] No finite events found for '{event_name}'.")
+        return
+
+    delay_cfg_ref = delay_config if "delay_config" in globals() else CONFIG_CALC
+    win_start_dbg, win_end_dbg = ana_utils.get_event_delay_window(delay_cfg_ref, event_name)
+    psth_by_cluster_dbg, bin_centers_dbg = ana_utils.compute_psth_for_clusters(
+        spikes,
+        region_cluster_ids_dbg,
+        events_dbg,
+        CONFIG_CALC["PSTH_WINDOW_START"],
+        CONFIG_CALC["PSTH_WINDOW_END"],
+        CONFIG_CALC["BIN_SIZE"],
+        CONFIG_CALC["SMOOTH_SIGMA"],
+        show_progress=False,
+        desc=f"Debug PSTH ({event_name})",
+    )
+    if bin_centers_dbg is None or len(bin_centers_dbg) == 0:
+        print("[Debug PSTH] Could not compute PSTH bin centers.")
+        return
+
+    bin_centers_dbg = np.asarray(bin_centers_dbg, dtype=float)
+    idx_baseline_dbg = (
+        (bin_centers_dbg >= -float(CONFIG_CALC["BASELINE_PRE"]))
+        & (bin_centers_dbg < 0)
+    )
+    if not np.any(idx_baseline_dbg):
+        print("[Debug PSTH] Baseline window is empty.")
+        return
+
+    df_region_dbg = df_debug[
+        pd.to_numeric(df_debug["cluster_id"], errors="coerce")
+        .fillna(-1)
+        .astype(int)
+        .isin(region_cluster_ids_dbg)
+    ].copy()
+    group_specs_dbg = [
+        ("arousal_plus", f"{group_prefix} +", "#1f77b4"),
+        ("neutral", "Neutral", "#7f7f7f"),
+        ("arousal_minus", f"{group_prefix} -", "#ff7f0e"),
+    ]
+
+    print(
+        f"[Debug PSTH] Region={region_name} | Event={event_name} | "
+        f"n_events={len(events_dbg)} | use_zscore={use_zscore_dbg} | "
+        f"z_source={zscore_source_dbg} | z_thr={z_thr_dbg:.2f} | "
+        f"window=({win_start_dbg:.3f}, {win_end_dbg:.3f}) s"
+    )
+
+    for group_key_dbg, group_label_dbg, color_dbg in group_specs_dbg:
+        cids_dbg = (
+            df_region_dbg.loc[
+                df_region_dbg["group_from_sign"].astype(str).str.strip().str.lower()
+                == group_key_dbg,
+                "cluster_id",
+            ]
+            .dropna()
+            .astype(int)
+            .tolist()
+        )
+
+        if len(cids_dbg) == 0:
+            print(f"[Debug PSTH] {group_label_dbg}: no neurons in {region_name}.")
+            continue
+
+        fig_dbg = go.Figure()
+        traces_z = []
+        used_cids = []
+        for cid_dbg in cids_dbg:
+            psth_entry_dbg = psth_by_cluster_dbg.get(int(cid_dbg))
+            if psth_entry_dbg is None:
+                continue
+            fr_raw_dbg = np.asarray(
+                psth_entry_dbg.get("fr_raw", np.array([])),
+                dtype=float,
+            ).reshape(-1)
+            fr_smooth_dbg = np.asarray(
+                psth_entry_dbg.get("fr_smooth", np.array([])),
+                dtype=float,
+            ).reshape(-1)
+            if fr_raw_dbg.size != bin_centers_dbg.size:
+                continue
+            if fr_smooth_dbg.size != bin_centers_dbg.size:
+                fr_smooth_dbg = fr_raw_dbg.copy()
+
+            if use_zscore_dbg and zscore_source_dbg == "raw":
+                z_src_dbg = fr_raw_dbg
+            else:
+                z_src_dbg = fr_smooth_dbg
+
+            baseline_dbg = np.asarray(z_src_dbg[idx_baseline_dbg], dtype=float)
+            baseline_dbg = baseline_dbg[np.isfinite(baseline_dbg)]
+            if baseline_dbg.size == 0:
+                continue
+
+            base_mean_dbg = float(np.mean(baseline_dbg))
+            base_std_dbg = float(np.std(baseline_dbg))
+            if (not np.isfinite(base_std_dbg)) or base_std_dbg <= 0:
+                continue
+            z_trace_dbg = (np.asarray(z_src_dbg, dtype=float) - base_mean_dbg) / base_std_dbg
+
+            traces_z.append(z_trace_dbg)
+            used_cids.append(int(cid_dbg))
+            fig_dbg.add_trace(
+                go.Scatter(
+                    x=bin_centers_dbg,
+                    y=z_trace_dbg,
+                    mode="lines",
+                    line=dict(color=color_dbg, width=1),
+                    opacity=0.16,
+                    showlegend=False,
+                    hovertemplate=(
+                        f"cid={int(cid_dbg)}<br>"
+                        "t=%{x:.3f}s<br>"
+                        "z=%{y:.3f}<extra></extra>"
+                    ),
+                )
+            )
+
+        if len(traces_z) == 0:
+            print(f"[Debug PSTH] {group_label_dbg}: no valid z-scored PSTH traces.")
+            continue
+
+        mat_z_dbg = np.vstack(traces_z)
+        mean_z_dbg = np.nanmean(mat_z_dbg, axis=0)
+        fig_dbg.add_trace(
+            go.Scatter(
+                x=bin_centers_dbg,
+                y=mean_z_dbg,
+                mode="lines",
+                line=dict(color=color_dbg, width=3),
+                name=f"{group_label_dbg} mean z-PSTH",
+            )
+        )
+        fig_dbg.add_hline(
+            y=float(z_thr_dbg),
+            line=dict(color="black", width=2, dash="dash"),
+            annotation_text=f"+z threshold ({z_thr_dbg:.1f})",
+            annotation_position="top right",
+        )
+        fig_dbg.add_hline(
+            y=-float(z_thr_dbg),
+            line=dict(color="black", width=2, dash="dash"),
+            annotation_text=f"-z threshold ({z_thr_dbg:.1f})",
+            annotation_position="bottom right",
+        )
+        fig_dbg.add_vrect(
+            x0=float(win_start_dbg),
+            x1=float(win_end_dbg),
+            fillcolor="gray",
+            opacity=0.12,
+            line_width=0,
+            layer="below",
+        )
+        fig_dbg.add_vline(x=0, line=dict(color="black", dash="dash"))
+        fig_dbg.update_layout(
+            title=(
+                f"{group_label_dbg} neurons | Region {region_name} | "
+                f"Event {ana_utils.event_label(event_name)}<br>"
+                f"(n={len(used_cids)}; z-scored PSTH traces used for categorization)"
+            ),
+            template=plot_config.get("PLOTLY_TEMPLATE", "plotly_white"),
+            width=1000,
+            height=480,
+            margin=dict(l=70, r=40, t=90, b=70),
+        )
+        fig_dbg.update_xaxes(title_text=f"Time from {ana_utils.event_label(event_name)} (s)")
+        fig_dbg.update_yaxes(title_text="Baseline z-score")
+        show_fig(fig_dbg)
+
+
+# %% Debug arousal grouping PSTHs (ProS, exact z-scored traces + thresholds used for categorization)
+_debug_grouped_z_psths(
+    region_name="ProS",
+    event_name=str(CONFIG_CALC.get("AROUSAL_SIGN_EVENT", "wh_brief_times_spont")).strip(),
+    df_res_debug=df_res_plot,
+    group_prefix="Arousal",
+    compare_with_arousal_group=True,
+)
+
+
+# %% Debug event grouping PSTHs (VISp, Stim On; exact z-scored traces + thresholds used for categorization)
+_debug_grouped_z_psths(
+    region_name="VISp",
+    event_name="stimOn_times",
+    df_res_debug=df_res_plot,
+    group_prefix="Response",
+    compare_with_arousal_group=False,
+)
 
 
 # %% Correlation matrices (Pearson + Spearman)
@@ -2098,8 +2946,8 @@ CORR_VARIABLE_SPECS = [
         "key": "delay_wh_brief",
         "name": "Delay (Wh Brief)",
         "df": "df_res",
-        "v1": "delay_wh_brief_times_odd",
-        "v2": "delay_wh_brief_times_even",
+        "v1": "delay_wh_brief_times_spont_odd",
+        "v2": "delay_wh_brief_times_spont_even",
     },
     {
         "key": "delay_wh_long",

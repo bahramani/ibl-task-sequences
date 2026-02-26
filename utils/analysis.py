@@ -186,12 +186,20 @@ def responsive_column_name(event_name):
     return f"responsive_{event_name}"
 
 
+def response_sign_column_name(event_name):
+    return f"response_sign_{event_name}"
+
+
 def delay_split_column_name(event_name, split_label):
     return f"{delay_column_name(event_name)}_{split_label}"
 
 
 def responsive_split_column_name(event_name, split_label):
     return f"{responsive_column_name(event_name)}_{split_label}"
+
+
+def response_sign_split_column_name(event_name, split_label):
+    return f"{response_sign_column_name(event_name)}_{split_label}"
 
 
 def reliability_column_names(event_name):
@@ -284,37 +292,55 @@ def calculate_delay(
     neuron_spikes=None,
     event_times=None,
     trial_contrasts=None,
+    return_sign=False,
 ):
     """
     Compute delay within a responsive window and responsiveness.
 
     Supported methods:
     - "com": PSTH center of mass within the responsive window.
+    - "com_signed": signed center of mass; supports both excitation and inhibition.
     - "psth_peak": peak time of the PSTH within the responsive window.
+    - "psth_peak_signed": signed peak/trough time in the responsive window.
     - "tfs": time to first spike after event onset (100% contrast trials only).
     - "latenzy": non-parametric latency estimate from spike/event times.
+
+    Optional config knobs for PSTH-based methods:
+    - RESPONSIVE_USE_ZSCORE (bool): if True, classify responsiveness/sign on a
+      baseline z-scored PSTH trace.
+    - RESPONSIVE_ZSCORE_SOURCE ("smooth" or "raw"): PSTH trace used for
+      z-scoring when RESPONSIVE_USE_ZSCORE is True.
+    - RESPONSIVE_Z_THR (float): z-threshold magnitude (default: 2.0).
+    - COM_USE_THRESHOLD (bool): COM methods only. If True (default), COM is
+      computed on threshold-crossing bins; if False, COM uses all bins in the
+      responsive window.
     """
+    def _result(delay_val, is_responsive, sign_val="none"):
+        if return_sign:
+            return delay_val, bool(is_responsive), str(sign_val)
+        return delay_val, bool(is_responsive)
+
     # Default to the configured delay method if none is provided explicitly.
     method = str(method or config.get("DELAY_METHOD", "com")).strip().lower()
 
     if method == "latenzy":
         # latenzy operates directly on spike/event times.
         if neuron_spikes is None or event_times is None:
-            return np.nan, False
+            return _result(np.nan, False, "none")
 
         spikes_arr = np.asarray(neuron_spikes, dtype=float).reshape(-1)
         events_arr = np.asarray(event_times, dtype=float).reshape(-1)
         spikes_arr = spikes_arr[np.isfinite(spikes_arr)]
         events_arr = events_arr[np.isfinite(events_arr)]
         if spikes_arr.size == 0 or events_arr.size == 0:
-            return np.nan, False
+            return _result(np.nan, False, "none")
         spikes_arr = np.sort(spikes_arr)
         events_arr = np.sort(events_arr)
 
         latenzy_fn = _get_latenzy_callable()
         if latenzy_fn is None:
             _warn_latenzy_unavailable_once()
-            return np.nan, False
+            return _result(np.nan, False, "none")
 
         # LATENZY_USE_DUR is optional.
         # If None, call latenzy with (spikes, events) only.
@@ -350,14 +376,14 @@ def calculate_delay(
                 latenzy_out = latenzy_fn(spikes_arr, events_arr)
             except Exception as exc:
                 _warn_latenzy_runtime_once(exc)
-                return np.nan, False
+                return _result(np.nan, False, "none")
         except Exception as exc:
             _warn_latenzy_runtime_once(exc)
-            return np.nan, False
+            return _result(np.nan, False, "none")
 
         delay, score = _parse_latenzy_output(latenzy_out)
         if not np.isfinite(delay):
-            return np.nan, False
+            return _result(np.nan, False, "none")
 
         min_score = config.get("LATENZY_MIN_SCORE", None)
         if min_score is not None:
@@ -367,17 +393,17 @@ def calculate_delay(
                 min_score = None
         if min_score is not None:
             if not np.isfinite(score):
-                return np.nan, False
+                return _result(np.nan, False, "none")
             if score < min_score:
-                return np.nan, False
-        return float(delay), True
+                return _result(np.nan, False, "none")
+        return _result(float(delay), True, "exc")
 
     if method == "tfs":
         # TFS relies on single-trial spike times, not the PSTH.
         if neuron_spikes is None or event_times is None or trial_contrasts is None:
-            return np.nan, False
+            return _result(np.nan, False, "none")
         if len(neuron_spikes) == 0 or len(event_times) == 0:
-            return np.nan, False
+            return _result(np.nan, False, "none")
 
         # Identify 100% contrast trials. Accept 1.0 or 100.0 by default.
         full_contrast_values = config.get("FULL_CONTRAST_VALUES", (1.0, 100.0))
@@ -385,7 +411,7 @@ def calculate_delay(
         for val in full_contrast_values:
             full_mask |= np.isclose(trial_contrasts, val)
         if not np.any(full_mask):
-            return np.nan, False
+            return _result(np.nan, False, "none")
 
         # For each full-contrast trial, take the first spike in the responsive window.
         first_spike_offsets = []
@@ -400,41 +426,184 @@ def calculate_delay(
                 first_spike_offsets.append(neuron_spikes[idx0] - t_ev)
 
         if len(first_spike_offsets) == 0:
-            return np.nan, False
-        return float(np.mean(first_spike_offsets)), True
+            return _result(np.nan, False, "none")
+        return _result(float(np.mean(first_spike_offsets)), True, "exc")
 
     # From here on we rely on the PSTH representation.
     if fr_raw is None or bin_centers is None:
-        return np.nan, False
+        return _result(np.nan, False, "none")
 
-    # Compute a baseline threshold from the unsmoothed PSTH to avoid smoothing bias.
+    fr_raw = np.asarray(fr_raw, dtype=float)
+    bin_centers = np.asarray(bin_centers, dtype=float)
+    if fr_raw.size != bin_centers.size or fr_raw.size == 0:
+        return _result(np.nan, False, "none")
+    if fr_smooth is not None:
+        fr_smooth = np.asarray(fr_smooth, dtype=float)
+        if fr_smooth.size != fr_raw.size:
+            fr_smooth = None
+
+    resp_signal = fr_smooth if fr_smooth is not None else fr_raw
+    use_zscore = bool(config.get("RESPONSIVE_USE_ZSCORE", False))
+    zscore_source = str(config.get("RESPONSIVE_ZSCORE_SOURCE", "smooth")).strip().lower()
+    if use_zscore and zscore_source == "raw":
+        z_source = fr_raw
+    else:
+        z_source = resp_signal
+
+    # Compute baseline statistics for thresholding.
     idx_baseline = (bin_centers >= -config["BASELINE_PRE"]) & (bin_centers < 0)
-    baseline_fr = fr_raw[idx_baseline]
+    baseline_trace = z_source if use_zscore else fr_raw
+    baseline_fr = np.asarray(baseline_trace[idx_baseline], dtype=float)
+    baseline_fr = baseline_fr[np.isfinite(baseline_fr)]
     if len(baseline_fr) == 0:
-        return np.nan, False
+        return _result(np.nan, False, "none")
 
-    threshold = np.mean(baseline_fr) + 2 * np.std(baseline_fr)
+    baseline_mean = float(np.mean(baseline_fr))
+    baseline_std = float(np.std(baseline_fr))
+    z_thr = config.get("RESPONSIVE_Z_THR", 2.0)
+    try:
+        z_thr = float(z_thr)
+    except (TypeError, ValueError):
+        z_thr = 2.0
+    if not np.isfinite(z_thr) or z_thr <= 0:
+        z_thr = 2.0
+
+    if use_zscore:
+        if (not np.isfinite(baseline_std)) or baseline_std <= 0:
+            return _result(np.nan, False, "none")
+        eval_signal = (z_source - baseline_mean) / baseline_std
+        threshold_hi = z_thr
+        threshold_lo = -z_thr
+    else:
+        eval_signal = fr_raw
+        threshold_hi = baseline_mean + z_thr * baseline_std
+        threshold_lo = baseline_mean - z_thr * baseline_std
+
     idx_responsive = (bin_centers >= config["RESPONSIVE_WINDOW_START"]) & (
         bin_centers <= config["RESPONSIVE_WINDOW_END"]
     )
+    com_use_threshold = bool(config.get("COM_USE_THRESHOLD", True))
 
-    responsive_mask = idx_responsive & (fr_raw > threshold)
+    if method in {"com_signed", "signed_com"}:
+        exc_mask_thr = idx_responsive & (eval_signal > threshold_hi)
+        inh_mask_thr = idx_responsive & (eval_signal < threshold_lo)
+        if not np.any(exc_mask_thr) and not np.any(inh_mask_thr):
+            return _result(np.nan, False, "none")
+
+        if use_zscore:
+            exc_weights_thr = np.clip(eval_signal[exc_mask_thr] - threshold_hi, 0.0, None)
+            inh_weights_thr = np.clip(threshold_lo - eval_signal[inh_mask_thr], 0.0, None)
+        else:
+            exc_weights_thr = np.clip(resp_signal[exc_mask_thr] - baseline_mean, 0.0, None)
+            inh_weights_thr = np.clip(baseline_mean - resp_signal[inh_mask_thr], 0.0, None)
+        exc_strength = float(np.nansum(exc_weights_thr)) if exc_weights_thr.size else 0.0
+        inh_strength = float(np.nansum(inh_weights_thr)) if inh_weights_thr.size else 0.0
+        if exc_strength <= 0 and inh_strength <= 0:
+            return _result(np.nan, False, "none")
+
+        if inh_strength > exc_strength:
+            chosen_sign = "inh"
+        else:
+            chosen_sign = "exc"
+
+        if com_use_threshold:
+            if chosen_sign == "inh":
+                chosen_time = np.asarray(bin_centers[inh_mask_thr], dtype=float)
+                chosen_weights = np.asarray(inh_weights_thr, dtype=float)
+            else:
+                chosen_time = np.asarray(bin_centers[exc_mask_thr], dtype=float)
+                chosen_weights = np.asarray(exc_weights_thr, dtype=float)
+        else:
+            com_mask = np.asarray(idx_responsive, dtype=bool)
+            chosen_time = np.asarray(bin_centers[com_mask], dtype=float)
+            if use_zscore:
+                metric = np.asarray(eval_signal[com_mask], dtype=float)
+                if chosen_sign == "inh":
+                    chosen_weights = np.clip(-metric, 0.0, None)
+                else:
+                    chosen_weights = np.clip(metric, 0.0, None)
+            else:
+                metric = np.asarray(resp_signal[com_mask], dtype=float)
+                if chosen_sign == "inh":
+                    chosen_weights = np.clip(baseline_mean - metric, 0.0, None)
+                else:
+                    chosen_weights = np.clip(metric - baseline_mean, 0.0, None)
+
+        finite = np.isfinite(chosen_time) & np.isfinite(chosen_weights)
+        if not np.any(finite):
+            return _result(np.nan, False, "none")
+        chosen_time = chosen_time[finite]
+        chosen_weights = chosen_weights[finite]
+
+        weight_sum = float(np.nansum(chosen_weights))
+        if weight_sum <= 0:
+            return _result(np.nan, False, "none")
+        delay = float(np.nansum(chosen_weights * chosen_time) / weight_sum)
+        return _result(delay, True, chosen_sign)
+
+    if method in {"psth_peak_signed", "signed_psth_peak", "psth_signed_peak"}:
+        exc_mask = idx_responsive & (eval_signal > threshold_hi)
+        inh_mask = idx_responsive & (eval_signal < threshold_lo)
+        if not np.any(exc_mask) and not np.any(inh_mask):
+            return _result(np.nan, False, "none")
+
+        exc_strength = 0.0
+        inh_strength = 0.0
+        if np.any(exc_mask):
+            exc_vals = np.asarray(eval_signal[exc_mask], dtype=float)
+            exc_peak = float(np.nanmax(exc_vals))
+            if np.isfinite(exc_peak):
+                exc_strength = max(exc_peak - threshold_hi, 0.0)
+        if np.any(inh_mask):
+            inh_vals = np.asarray(eval_signal[inh_mask], dtype=float)
+            inh_trough = float(np.nanmin(inh_vals))
+            if np.isfinite(inh_trough):
+                inh_strength = max(threshold_lo - inh_trough, 0.0)
+        if exc_strength <= 0 and inh_strength <= 0:
+            return _result(np.nan, False, "none")
+
+        if inh_strength > exc_strength:
+            chosen_time = np.asarray(bin_centers[inh_mask], dtype=float)
+            chosen_signal = np.asarray(resp_signal[inh_mask], dtype=float)
+            finite = np.isfinite(chosen_time) & np.isfinite(chosen_signal)
+            if not np.any(finite):
+                return _result(np.nan, False, "none")
+            chosen_time = chosen_time[finite]
+            chosen_signal = chosen_signal[finite]
+            trough_idx = int(np.argmin(chosen_signal))
+            return _result(float(chosen_time[trough_idx]), True, "inh")
+
+        chosen_time = np.asarray(bin_centers[exc_mask], dtype=float)
+        chosen_signal = np.asarray(resp_signal[exc_mask], dtype=float)
+        finite = np.isfinite(chosen_time) & np.isfinite(chosen_signal)
+        if not np.any(finite):
+            return _result(np.nan, False, "none")
+        chosen_time = chosen_time[finite]
+        chosen_signal = chosen_signal[finite]
+        peak_idx = int(np.argmax(chosen_signal))
+        return _result(float(chosen_time[peak_idx]), True, "exc")
+
+    responsive_mask = idx_responsive & (eval_signal > threshold_hi)
     if not np.any(responsive_mask):
-        return np.nan, False
+        return _result(np.nan, False, "none")
 
-    resp_fr = fr_smooth[responsive_mask] if fr_smooth is not None else fr_raw[responsive_mask]
-    resp_time = bin_centers[responsive_mask]
     if method == "psth_peak":
         # Peak time is the bin center at maximum firing rate within the window.
+        resp_fr = fr_smooth[responsive_mask] if fr_smooth is not None else fr_raw[responsive_mask]
+        resp_time = bin_centers[responsive_mask]
         peak_idx = int(np.argmax(resp_fr))
-        return float(resp_time[peak_idx]), True
+        return _result(float(resp_time[peak_idx]), True, "exc")
+
+    com_mask = responsive_mask if com_use_threshold else idx_responsive
+    resp_fr = fr_smooth[com_mask] if fr_smooth is not None else fr_raw[com_mask]
+    resp_time = bin_centers[com_mask]
 
     # Default: center of mass (previous behavior).
     sum_fr = np.sum(resp_fr)
     if sum_fr <= 0:
-        return np.nan, False
+        return _result(np.nan, False, "none")
     delay = np.sum(resp_fr * resp_time) / sum_fr
-    return delay, True
+    return _result(delay, True, "exc")
 
 
 def compute_trial_end_times(trials, event_names, post_event_s=1.0):
@@ -1104,14 +1273,29 @@ def _fill_nan_linear(arr):
     return np.interp(idx, idx[finite], arr[finite])
 
 
-def _zscore_trace(arr):
+def _zscore_trace(arr, baseline_mask=None):
     arr = np.asarray(arr, dtype=float).reshape(-1)
     if arr.size == 0:
         return arr
     if not np.isfinite(arr).any():
         return np.full(arr.shape, np.nan, dtype=float)
-    mu = float(np.nanmean(arr))
-    sd = float(np.nanstd(arr))
+
+    ref = arr
+    if baseline_mask is not None:
+        baseline_mask = np.asarray(baseline_mask, dtype=bool).reshape(-1)
+        if baseline_mask.size != arr.size:
+            return np.full(arr.shape, np.nan, dtype=float)
+        ref = arr[baseline_mask]
+        if ref.size == 0:
+            return np.full(arr.shape, np.nan, dtype=float)
+
+    ref = np.asarray(ref, dtype=float)
+    ref = ref[np.isfinite(ref)]
+    if ref.size == 0:
+        return np.full(arr.shape, np.nan, dtype=float)
+
+    mu = float(np.mean(ref))
+    sd = float(np.std(ref))
     if not np.isfinite(sd) or sd <= 0:
         return np.full(arr.shape, np.nan, dtype=float)
     return (arr - mu) / sd
@@ -1135,7 +1319,8 @@ def compute_arousal_groups_from_whisk(
     This mirrors the paper protocol:
     - bin whisking and firing traces in fixed windows (default: 300 ms),
     - smooth traces with a Gaussian kernel (default sigma=5 bins),
-    - z-score traces,
+    - z-score traces (full trace by default, or pre-event baseline bins if
+      ``AROUSAL_USE_EVENT_BASELINE_ZSCORE`` is enabled),
     - compute Pearson correlations in full recording and split halves.
     Neurons are ``arousal_plus`` if correlation exceeds threshold in full + both
     halves, ``arousal_minus`` if below negative threshold in full + both halves.
@@ -1181,6 +1366,20 @@ def compute_arousal_groups_from_whisk(
     smooth_sigma = float(config.get("AROUSAL_SMOOTH_SIGMA", 5.0))
     min_bins = int(config.get("AROUSAL_MIN_CORR_BINS", 10))
     require_split_half = bool(config.get("AROUSAL_REQUIRE_SPLIT_HALF", True))
+    use_event_baseline_zscore = bool(
+        config.get("AROUSAL_USE_EVENT_BASELINE_ZSCORE", False)
+    )
+    try:
+        baseline_pre = float(
+            config.get("AROUSAL_BASELINE_PRE", config.get("BASELINE_PRE", 0.2))
+        )
+    except Exception:
+        baseline_pre = 0.2
+    if not np.isfinite(baseline_pre) or baseline_pre <= 0:
+        baseline_pre = 0.2
+    min_baseline_bins = int(config.get("AROUSAL_MIN_BASELINE_BINS", 3))
+    if min_baseline_bins < 1:
+        min_baseline_bins = 1
     if bin_s <= 0:
         bin_s = 0.3
 
@@ -1266,6 +1465,19 @@ def compute_arousal_groups_from_whisk(
         whisk_trace = gaussian_filter1d(whisk_trace, sigma=smooth_sigma)
 
     centers_spont = bin_centers[spont_bin_mask]
+    baseline_mask_spont = None
+    if use_event_baseline_zscore:
+        baseline_mask_spont = np.zeros(centers_spont.shape[0], dtype=bool)
+        for t_ev in wh_brief_times:
+            if not np.isfinite(t_ev):
+                continue
+            baseline_mask_spont |= (
+                (centers_spont >= float(t_ev) - baseline_pre)
+                & (centers_spont < float(t_ev))
+            )
+        if int(np.sum(baseline_mask_spont)) < min_baseline_bins:
+            return output
+
     t_half = float(np.nanmin(centers_spont) + np.nanmax(centers_spont)) / 2.0
     h1_mask = centers_spont <= t_half
     h2_mask = centers_spont > t_half
@@ -1288,19 +1500,25 @@ def compute_arousal_groups_from_whisk(
         if smooth_sigma > 0 and fr_trace.size > 1:
             fr_trace = gaussian_filter1d(fr_trace, sigma=smooth_sigma)
 
-        fr_z = _zscore_trace(fr_trace)
-        wh_z = _zscore_trace(whisk_trace)
+        fr_z = _zscore_trace(fr_trace, baseline_mask=baseline_mask_spont)
+        wh_z = _zscore_trace(whisk_trace, baseline_mask=baseline_mask_spont)
         corr_vals[i] = _safe_corrcoef(fr_z, wh_z)
 
         if int(np.sum(h1_mask)) >= min_half_bins:
+            baseline_h1 = (
+                baseline_mask_spont[h1_mask] if baseline_mask_spont is not None else None
+            )
             corr_h1_vals[i] = _safe_corrcoef(
-                _zscore_trace(fr_trace[h1_mask]),
-                _zscore_trace(whisk_trace[h1_mask]),
+                _zscore_trace(fr_trace[h1_mask], baseline_mask=baseline_h1),
+                _zscore_trace(whisk_trace[h1_mask], baseline_mask=baseline_h1),
             )
         if int(np.sum(h2_mask)) >= min_half_bins:
+            baseline_h2 = (
+                baseline_mask_spont[h2_mask] if baseline_mask_spont is not None else None
+            )
             corr_h2_vals[i] = _safe_corrcoef(
-                _zscore_trace(fr_trace[h2_mask]),
-                _zscore_trace(whisk_trace[h2_mask]),
+                _zscore_trace(fr_trace[h2_mask], baseline_mask=baseline_h2),
+                _zscore_trace(whisk_trace[h2_mask], baseline_mask=baseline_h2),
             )
 
     output["arousal_corr"] = corr_vals
@@ -1481,12 +1699,18 @@ def calculate_delays(
         delay_odd_col = delay_split_column_name(event_name, "odd")
         delay_even_col = delay_split_column_name(event_name, "even")
         resp_col = responsive_column_name(event_name)
+        sign_col = response_sign_column_name(event_name)
+        sign_odd_col = response_sign_split_column_name(event_name, "odd")
+        sign_even_col = response_sign_split_column_name(event_name, "even")
 
         if events is None or len(events) < min_trials:
             df_res[delay_col] = np.nan
             df_res[delay_odd_col] = np.nan
             df_res[delay_even_col] = np.nan
             df_res[resp_col] = False
+            df_res[sign_col] = "none"
+            df_res[sign_odd_col] = "none"
+            df_res[sign_even_col] = "none"
             continue
 
         odd_mask = (trial_idx % 2) == 1
@@ -1501,6 +1725,9 @@ def calculate_delays(
             df_res[delay_odd_col] = np.nan
             df_res[delay_even_col] = np.nan
             df_res[resp_col] = False
+            df_res[sign_col] = "none"
+            df_res[sign_odd_col] = "none"
+            df_res[sign_even_col] = "none"
             continue
 
         win_start, win_end = get_event_delay_window(config, event_name)
@@ -1549,13 +1776,16 @@ def calculate_delays(
         delays_odd = []
         delays_even = []
         responsive_flags = []
+        response_signs = []
+        response_signs_odd = []
+        response_signs_even = []
         for cid in tqdm(selected_cluster_ids, desc=f"Delays ({event_name})", unit="cluster"):
             neuron_spikes = spike_times_by_cluster.get(cid, np.array([]))
             psth_entry = psth_by_cluster.get(cid)
             fr_raw = psth_entry["fr_raw"] if psth_entry else None
             fr_smooth = psth_entry["fr_smooth"] if psth_entry else None
 
-            delay, is_responsive = calculate_delay(
+            delay, is_responsive, response_sign = calculate_delay(
                 fr_raw,
                 fr_smooth,
                 bin_centers,
@@ -1564,12 +1794,13 @@ def calculate_delays(
                 neuron_spikes=neuron_spikes,
                 event_times=events,
                 trial_contrasts=contrasts,
+                return_sign=True,
             )
 
             psth_entry_odd = psth_by_cluster_odd.get(cid)
             fr_raw_odd = psth_entry_odd["fr_raw"] if psth_entry_odd else None
             fr_smooth_odd = psth_entry_odd["fr_smooth"] if psth_entry_odd else None
-            delay_odd, resp_odd = calculate_delay(
+            delay_odd, resp_odd, response_sign_odd = calculate_delay(
                 fr_raw_odd,
                 fr_smooth_odd,
                 bin_centers_odd,
@@ -1578,12 +1809,13 @@ def calculate_delays(
                 neuron_spikes=neuron_spikes,
                 event_times=events_odd,
                 trial_contrasts=contrasts_odd,
+                return_sign=True,
             )
 
             psth_entry_even = psth_by_cluster_even.get(cid)
             fr_raw_even = psth_entry_even["fr_raw"] if psth_entry_even else None
             fr_smooth_even = psth_entry_even["fr_smooth"] if psth_entry_even else None
-            delay_even, resp_even = calculate_delay(
+            delay_even, resp_even, response_sign_even = calculate_delay(
                 fr_raw_even,
                 fr_smooth_even,
                 bin_centers_even,
@@ -1592,6 +1824,7 @@ def calculate_delays(
                 neuron_spikes=neuron_spikes,
                 event_times=events_even,
                 trial_contrasts=contrasts_even,
+                return_sign=True,
             )
 
             if not (resp_odd and resp_even) or not (
@@ -1602,16 +1835,25 @@ def calculate_delays(
                 delay_even = np.nan
                 delay = np.nan
                 is_responsive = False
+                response_sign = "none"
+                response_sign_odd = "none"
+                response_sign_even = "none"
 
             delays.append(delay)
             delays_odd.append(delay_odd)
             delays_even.append(delay_even)
             responsive_flags.append(is_responsive)
+            response_signs.append(response_sign if is_responsive else "none")
+            response_signs_odd.append(response_sign_odd if np.isfinite(delay_odd) else "none")
+            response_signs_even.append(response_sign_even if np.isfinite(delay_even) else "none")
 
         df_res[delay_col] = delays
         df_res[delay_odd_col] = delays_odd
         df_res[delay_even_col] = delays_even
         df_res[resp_col] = responsive_flags
+        df_res[sign_col] = response_signs
+        df_res[sign_odd_col] = response_signs_odd
+        df_res[sign_even_col] = response_signs_even
 
     output_path = path_data_processed / f"{pid}_delay_results.csv"
     df_res.to_csv(output_path, index=False)
@@ -1736,18 +1978,24 @@ def calculate_event_delays(
 
         delay_col = delay_column_name(event_name)
         resp_col = responsive_column_name(event_name)
+        sign_col = response_sign_column_name(event_name)
         delay_columns.append(delay_col)
         if include_splits:
             delay_odd_col = delay_split_column_name(event_name, "odd")
             delay_even_col = delay_split_column_name(event_name, "even")
+            sign_odd_col = response_sign_split_column_name(event_name, "odd")
+            sign_even_col = response_sign_split_column_name(event_name, "even")
             delay_columns.extend([delay_odd_col, delay_even_col])
 
         if events.size < min_trials:
             df_res[delay_col] = np.nan
             df_res[resp_col] = False
+            df_res[sign_col] = "none"
             if include_splits:
                 df_res[delay_odd_col] = np.nan
                 df_res[delay_even_col] = np.nan
+                df_res[sign_odd_col] = "none"
+                df_res[sign_even_col] = "none"
             continue
 
         win_start, win_end = get_event_delay_window(config, event_name)
@@ -1813,14 +2061,17 @@ def calculate_event_delays(
 
         delays = []
         responsive_flags = []
+        response_signs = []
         delays_odd = []
         delays_even = []
+        response_signs_odd = []
+        response_signs_even = []
         for cid in tqdm(selected_cluster_ids, desc=f"Delays ({event_name})", unit="cluster"):
             neuron_spikes = spike_times_by_cluster.get(cid, np.array([]))
             psth_entry = psth_by_cluster.get(cid)
             fr_raw = psth_entry["fr_raw"] if psth_entry else None
             fr_smooth = psth_entry["fr_smooth"] if psth_entry else None
-            delay, is_responsive = calculate_delay(
+            delay, is_responsive, response_sign = calculate_delay(
                 fr_raw,
                 fr_smooth,
                 bin_centers,
@@ -1829,20 +2080,25 @@ def calculate_event_delays(
                 neuron_spikes=neuron_spikes,
                 event_times=events,
                 trial_contrasts=contrasts,
+                return_sign=True,
             )
             if not is_responsive:
                 delay = np.nan
+                response_sign = "none"
             delays.append(delay)
             responsive_flags.append(bool(is_responsive))
+            response_signs.append(response_sign)
 
             if include_splits:
                 delay_odd = np.nan
                 delay_even = np.nan
+                response_sign_odd = "none"
+                response_sign_even = "none"
                 if split_ready:
                     odd_entry = psth_by_cluster_odd.get(cid)
                     fr_raw_odd = odd_entry["fr_raw"] if odd_entry else None
                     fr_smooth_odd = odd_entry["fr_smooth"] if odd_entry else None
-                    delay_odd, resp_odd = calculate_delay(
+                    delay_odd, resp_odd, response_sign_odd = calculate_delay(
                         fr_raw_odd,
                         fr_smooth_odd,
                         bin_centers_odd,
@@ -1851,14 +2107,16 @@ def calculate_event_delays(
                         neuron_spikes=neuron_spikes,
                         event_times=events_odd,
                         trial_contrasts=contrasts_odd,
+                        return_sign=True,
                     )
                     if not resp_odd:
                         delay_odd = np.nan
+                        response_sign_odd = "none"
 
                     even_entry = psth_by_cluster_even.get(cid)
                     fr_raw_even = even_entry["fr_raw"] if even_entry else None
                     fr_smooth_even = even_entry["fr_smooth"] if even_entry else None
-                    delay_even, resp_even = calculate_delay(
+                    delay_even, resp_even, response_sign_even = calculate_delay(
                         fr_raw_even,
                         fr_smooth_even,
                         bin_centers_even,
@@ -1867,17 +2125,24 @@ def calculate_event_delays(
                         neuron_spikes=neuron_spikes,
                         event_times=events_even,
                         trial_contrasts=contrasts_even,
+                        return_sign=True,
                     )
                     if not resp_even:
                         delay_even = np.nan
+                        response_sign_even = "none"
                 delays_odd.append(delay_odd)
                 delays_even.append(delay_even)
+                response_signs_odd.append(response_sign_odd if np.isfinite(delay_odd) else "none")
+                response_signs_even.append(response_sign_even if np.isfinite(delay_even) else "none")
 
         df_res[delay_col] = delays
         df_res[resp_col] = responsive_flags
+        df_res[sign_col] = response_signs
         if include_splits:
             df_res[delay_odd_col] = delays_odd
             df_res[delay_even_col] = delays_even
+            df_res[sign_odd_col] = response_signs_odd
+            df_res[sign_even_col] = response_signs_even
 
     if str(config.get("DELAY_UNITS", "s")).lower().startswith("ms"):
         for col in delay_columns:

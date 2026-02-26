@@ -22,8 +22,8 @@ BASE_PATH = Path(__file__).resolve().parents[1]
 CACHE_DIR = BASE_PATH / "data" / "dashboard_cache"
 DEFAULT_LABEL_MIN = 0.9
 
-REGION_QUERY = "AUDp"
-REGION_CORR = "AUDp"
+REGION_QUERY = "VISp"  # set to region name to skip prompt
+REGION_CORR = "VISp"  # set to region name to skip prompt
 
 GOOD_ONLY_FOR_CORR = True
 USE_GOOD_STPR = False
