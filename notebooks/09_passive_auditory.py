@@ -372,6 +372,15 @@ def _build_multi_event_population_panel(
         vertical_spacing=0.15,
     )
 
+    def _finite_float(value):
+        try:
+            out = float(value)
+        except Exception:
+            return None
+        if not np.isfinite(out):
+            return None
+        return out
+
     for idx, (_event_label, event_name) in enumerate(event_specs):
         row = idx // n_cols + 1
         col = idx % n_cols + 1
@@ -406,9 +415,25 @@ def _build_multi_event_population_panel(
         for trace in fig_event.data:
             trace_copy = go.Figure(data=[trace]).data[0]
             if isinstance(trace_copy, go.Heatmap):
+                pop_zscore = bool(cfg.get("POP_ZSCORE", False))
+                pop_zmin = _finite_float(cfg.get("POP_ZMIN", None))
+                pop_zmax = _finite_float(cfg.get("POP_ZMAX", None))
+                if pop_zscore:
+                    trace_copy.zmid = 0.0
+                if pop_zmin is not None and pop_zmax is not None and pop_zmax > pop_zmin:
+                    trace_copy.zmin = pop_zmin
+                    trace_copy.zmax = pop_zmax
                 trace_copy.showscale = idx == 0
                 if idx == 0:
-                    trace_copy.colorbar = dict(title="Norm FR", len=0.8, y=0.5)
+                    trace_copy.colorbar = dict(
+                        title=(
+                            "Baseline z-score"
+                            if pop_zscore
+                            else ("Norm FR" if bool(cfg.get("POP_NORMALIZE", False)) else "FR")
+                        ),
+                        len=0.8,
+                        y=0.5,
+                    )
             else:
                 trace_copy.showlegend = False
             fig_panel.add_trace(trace_copy, row=row, col=col)
@@ -531,7 +556,8 @@ CONFIG_CALC = {
     "CALC_LABEL_MIN": 0.9,  # requested default for calculations
     "CALC_SPONT": True,
     "EVENT_NAMES": ["stimOn_times", "firstMovement_times", "response_times", "feedback_times"],
-    "DELAY_METHOD": "com",  # "com" or "psth_peak"
+    # Options: "com", "com_signed", "psth_peak", "psth_peak_signed", "tfs", "latenzy"
+    "DELAY_METHOD": "com_signed",
     "DELAY_UNITS": "ms",
     "FULL_CONTRAST_VALUES": (1.0, 100.0),
     "DELAY_WINDOWS": {
@@ -551,6 +577,12 @@ CONFIG_CALC = {
     "PSTH_WINDOW_END": 1.0,
     "RESPONSIVE_WINDOW_START": 0.02,
     "RESPONSIVE_WINDOW_END": 0.35,
+    # If True, responsiveness/sign are computed on baseline z-scored PSTHs.
+    "RESPONSIVE_USE_ZSCORE": True,
+    # "smooth" (default) uses smoothed PSTH for z-scoring; "raw" uses unsmoothed.
+    "RESPONSIVE_ZSCORE_SOURCE": "smooth",
+    # COM methods: True -> compute COM on threshold-crossing bins; False -> full response window.
+    "COM_USE_THRESHOLD": True,
     "SMOOTH_SIGMA": 1,
     "MIN_TRIALS": 10,
     "MIN_TRIALS_SPLIT": 5,
@@ -586,6 +618,7 @@ CONFIG_PLOT = {
     "POP_SMOOTH_SIGMA": 2,
     "POP_CMAP_NAME": "bwr",
     "POP_NORMALIZE": True,
+    "HEATMAP_GROUP_BY_RESPONSE_SIGN": True,  # group by event response sign: inh/none/exc
     "SORT_BY_SPONT": True,
 }
 
@@ -957,6 +990,31 @@ show_fig(fig_general)
 
 # %% Response heatmaps (6 events in one figure per selected region)
 heatmap_sort_mode = HEATMAP_SORT_MAP.get(HEATMAP_SORT, "delay")
+heatmap_plot_config = dict(plot_config)
+heatmap_plot_config["POP_NORMALIZE"] = False
+heatmap_plot_config["POP_ZSCORE"] = True
+heatmap_plot_config["POP_ZSCORE_SOURCE"] = str(
+    CONFIG_CALC.get("RESPONSIVE_ZSCORE_SOURCE", "smooth")
+).strip().lower()
+heatmap_plot_config["POP_BASELINE_PRE"] = float(CONFIG_CALC.get("BASELINE_PRE", 0.2))
+heatmap_plot_config["POP_ZMIN"] = -10.0
+heatmap_plot_config["POP_ZMAX"] = 10.0
+heatmap_plot_config["POP_SPLIT_AROUSAL_WHISK"] = bool(
+    plot_config.get(
+        "HEATMAP_GROUP_BY_RESPONSE_SIGN",
+        plot_config.get("HEATMAP_GROUP_BY_AROUSAL", True),
+    )
+)
+heatmap_plot_config["POP_SPLIT_GROUP_ANY_EVENT"] = True
+heatmap_plot_config["POP_AROUSAL_GROUP_COL"] = ana_utils.response_sign_column_name("stimOn_times")
+heatmap_plot_config["POP_GROUP_COL_BY_EVENT"] = {
+    "stimOn_times": ana_utils.response_sign_column_name("stimOn_times"),
+    "feedback_correct_times": ana_utils.response_sign_column_name("feedback_correct_times"),
+    "feedback_incorrect_times": ana_utils.response_sign_column_name("feedback_incorrect_times"),
+    "passive_tone_times": ana_utils.response_sign_column_name("passive_tone_times"),
+    "passive_valve_times": ana_utils.response_sign_column_name("passive_valve_times"),
+    "passive_noise_times": ana_utils.response_sign_column_name("passive_noise_times"),
+}
 heatmap_event_specs = [
     ("Stim On", "stimOn_times"),
     ("Feedback Correct", "feedback_correct_times"),
@@ -997,7 +1055,7 @@ else:
             plot_cluster_ids,
             plot_cluster_acronyms,
             df_res_plot,
-            plot_config,
+            heatmap_plot_config,
             sort_mode=heatmap_sort_mode,
             region_name=region_name,
             df_coupling=df_coupling_plot,
