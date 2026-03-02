@@ -27,14 +27,18 @@ from utils.plotting_plotly import (
     plot_trial_raster_plotly,
     plot_time_window_raster_plotly,
     plot_population_sorted_plotly,
+    plot_multi_event_population_panel_plotly,
+    plot_whisking_overview_plotly,
     plot_population_coupling_heatmap_plotly,
     plot_single_neuron_plotly,
     plot_single_neuron_conditioned_event_plotly,
+    plot_single_neuron_event_groups_plotly,
     plot_single_neuron_passive_visual_plotly,
     plot_single_neuron_passive_auditory_plotly,
     plot_stpr_curve_halves_plotly,
 )
 import utils.plotting_plotly as plotting_utils
+import utils.analysis as ana_utils
 from utils.io import (
     setup_paths,
     init_one,
@@ -378,7 +382,7 @@ def _plot_stpr_mean_comparison(df_spont, df_task, df_iti, config_calc, cluster_i
         added = True
 
     if not added:
-        fig.add_annotation(text="No stPR mean curves available", showarrow=False)
+        fig.add_annotation(text="No Coupling mean curves available", showarrow=False)
 
     for delay, color in delays:
         if np.isfinite(delay):
@@ -386,9 +390,9 @@ def _plot_stpr_mean_comparison(df_spont, df_task, df_iti, config_calc, cluster_i
 
     fig.add_vline(x=0, line=dict(color="gray", dash="dot"))
     fig.update_layout(
-        title="stPR Mean Curves (Task vs Spont vs ITI)",
+        title="Coupling Mean Curves (Task vs Spont vs ITI)",
         xaxis_title="Lag (ms)",
-        yaxis_title="stPR (z)",
+        yaxis_title="Coupling (z)",
         template=template,
         width=900,
         height=550,
@@ -401,103 +405,141 @@ def _plot_stpr_mean_comparison(df_spont, df_task, df_iti, config_calc, cluster_i
 def _get_cached_value(state_key, key, builder):
     cache_key = f"{state_key}_key"
     value_key = f"{state_key}_value"
-    if st.session_state.get(cache_key) != key:
+    needs_refresh = (st.session_state.get(cache_key) != key) or (value_key not in st.session_state)
+    if needs_refresh:
+        value = builder()
+        st.session_state[value_key] = value
         st.session_state[cache_key] = key
-        st.session_state[value_key] = builder()
     return st.session_state.get(value_key)
 
 
 CORR_MIN_N = 2
 CORR_VARIABLES = [
     {
-        "name": "Delay (Stim On)",
+        "name": "Depth",
+        "df": "df_depth",
+        "v1": "depth_h1",
+        "v2": "depth_h2",
+    },
+    {
+        "name": "Firing Rate",
+        "df": "df_firing_rate",
+        "v1": "firing_rate_h1",
+        "v2": "firing_rate_h2",
+    },
+    {
+        "name": "Correlation to Whisking",
+        "df": "df_arousal_corr",
+        "v1": "arousal_corr_abs_h1",
+        "v2": "arousal_corr_abs_h2",
+    },
+    {
+        "name": "Delay to Stim On",
         "df": "df_res",
         "v1": "delay_stimOn_times_odd",
         "v2": "delay_stimOn_times_even",
     },
     {
-        "name": "Delay (First Move)",
+        "name": "Delay to First Move",
         "df": "df_res",
         "v1": "delay_firstMovement_times_odd",
         "v2": "delay_firstMovement_times_even",
     },
     {
-        "name": "Delay (Response)",
-        "df": "df_res",
-        "v1": "delay_response_times_odd",
-        "v2": "delay_response_times_even",
-    },
-    {
-        "name": "Delay (Feedback)",
+        "name": "Delay to Feedback",
         "df": "df_res",
         "v1": "delay_feedback_times_odd",
         "v2": "delay_feedback_times_even",
     },
     {
-        "name": "stPR Delay (Spont)",
+        "name": "Delay to Whisking Events",
+        "df": "df_res",
+        "v1": "delay_wh_brief_times_spont_odd",
+        "v2": "delay_wh_brief_times_spont_even",
+    },
+    {
+        "name": "Delay to Passive Visual",
+        "df": "df_res",
+        "v1": "delay_passive_visual_times_odd",
+        "v2": "delay_passive_visual_times_even",
+    },
+    {
+        "name": "Delay to Passive Tone",
+        "df": "df_res",
+        "v1": "delay_passive_tone_times_odd",
+        "v2": "delay_passive_tone_times_even",
+    },
+    {
+        "name": "Delay to Passive Valve",
+        "df": "df_res",
+        "v1": "delay_passive_valve_times_odd",
+        "v2": "delay_passive_valve_times_even",
+    },
+    {
+        "name": "Delay to Passive Noise",
+        "df": "df_res",
+        "v1": "delay_passive_noise_times_odd",
+        "v2": "delay_passive_noise_times_even",
+    },
+    {
+        "name": "Coupling Delay (Spont)",
         "df": "df_coupling",
         "v1": "coupling_delay_ms_h1",
         "v2": "coupling_delay_ms_h2",
     },
     {
-        "name": "stPR Delay (Task)",
-        "df": "df_coupling_task",
-        "v1": "coupling_delay_ms_odd",
-        "v2": "coupling_delay_ms_even",
-    },
-    {
-        "name": "stPR Delay (ITI)",
+        "name": "Coupling Delay (ITI)",
         "df": "df_coupling_iti",
         "v1": "coupling_delay_ms_odd",
         "v2": "coupling_delay_ms_even",
     },
     {
-        "name": "stPR Strength (Spont)",
+        "name": "Coupling Delay (Task)",
+        "df": "df_coupling_task",
+        "v1": "coupling_delay_ms_odd",
+        "v2": "coupling_delay_ms_even",
+    },
+    {
+        "name": "Coupling Strength (Spont)",
         "df": "df_coupling",
         "v1": "coupling_strength_h1",
         "v2": "coupling_strength_h2",
     },
     {
-        "name": "stPR Strength (Task)",
-        "df": "df_coupling_task",
-        "v1": "coupling_strength_odd",
-        "v2": "coupling_strength_even",
-    },
-    {
-        "name": "stPR Strength (ITI)",
+        "name": "Coupling Strength (ITI)",
         "df": "df_coupling_iti",
         "v1": "coupling_strength_odd",
         "v2": "coupling_strength_even",
     },
     {
-        "name": "stPR Max (Spont)",
+        "name": "Coupling Strength (Task)",
+        "df": "df_coupling_task",
+        "v1": "coupling_strength_odd",
+        "v2": "coupling_strength_even",
+    },
+    {
+        "name": "Coupling Max (Spont)",
         "df": "df_coupling",
         "v1": "coupling_max_h1",
         "v2": "coupling_max_h2",
     },
     {
-        "name": "stPR Max (Task)",
-        "df": "df_coupling_task",
-        "v1": "coupling_max_odd",
-        "v2": "coupling_max_even",
-    },
-    {
-        "name": "stPR Max (ITI)",
+        "name": "Coupling Max (ITI)",
         "df": "df_coupling_iti",
         "v1": "coupling_max_odd",
         "v2": "coupling_max_even",
     },
     {
-        "name": "Firing rate",
-        "df": "df_firing_rate",
-        "v1": "firing_rate_h1",
-        "v2": "firing_rate_h2",
+        "name": "Coupling Max (Task)",
+        "df": "df_coupling_task",
+        "v1": "coupling_max_odd",
+        "v2": "coupling_max_even",
     },
 ]
 
 
 def _is_firing_rate_spec(spec):
-    return spec.get("df") == "df_firing_rate"
+    return spec.get("df") in {"df_firing_rate", "df_depth", "df_arousal_corr"}
 
 
 def _is_spont_spec(spec):
@@ -537,7 +579,7 @@ def _spearmanr_with_n(x, y, min_n=CORR_MIN_N):
     return float(np.corrcoef(x_rank, y_rank)[0, 1]), n
 
 
-def _build_region_lookup(cluster_ids, cluster_acronyms, labels, label_min=None):
+def _build_region_lookup(cluster_ids, cluster_acronyms, labels, label_min=None, strict_gt=False):
     if cluster_ids is None or cluster_acronyms is None:
         return pd.DataFrame(columns=["cluster_id", "region"])
     region_df = pd.DataFrame(
@@ -549,7 +591,10 @@ def _build_region_lookup(cluster_ids, cluster_acronyms, labels, label_min=None):
     if label_min is not None and labels is not None:
         try:
             labels_float = np.asarray(labels, dtype=float)
-            good_ids = np.asarray(cluster_ids)[labels_float >= float(label_min)]
+            if strict_gt:
+                good_ids = np.asarray(cluster_ids)[labels_float > float(label_min)]
+            else:
+                good_ids = np.asarray(cluster_ids)[labels_float >= float(label_min)]
         except (TypeError, ValueError):
             good_ids = np.asarray(cluster_ids)[np.asarray(labels) == 1]
         region_df = region_df[region_df["cluster_id"].isin(good_ids)]
@@ -874,6 +919,7 @@ if not pid_list:
     st.stop()
 
 pid = st.sidebar.selectbox("Select PID", pid_list)
+plotly_dark_mode = st.sidebar.toggle("Plotly dark mode", value=False, key="plotly_dark_mode")
 st.sidebar.subheader("Raw data")
 load_wheel = st.sidebar.toggle("Load wheel data", value=False)
 load_pose = st.sidebar.toggle("Load pose data", value=False)
@@ -1062,18 +1108,17 @@ st.dataframe(region_table, width="stretch")
 calc_label_min = config_calc.get("CALC_LABEL_MIN", None)
 if calc_label_min is None and config_calc.get("CALC_ONLY_GOOD_UNITS", False):
     calc_label_min = 1.0
-calc_label = "All neurons" if calc_label_min is None else f"Label >= {calc_label_min}"
-st.caption(f"Calculations: {calc_label}")
+calc_label_strict_gt = bool(config_calc.get("CALC_LABEL_STRICT_GT", False))
+if calc_label_min is None:
+    calc_label = "All neurons"
+else:
+    comp = ">" if calc_label_strict_gt else ">="
+    calc_label = f"Label {comp} {calc_label_min}"
+st.caption(f"Calculations / plots: {calc_label}")
 
-plot_label_min = st.number_input(
-    "Plot label min",
-    min_value=0.0,
-    max_value=1.0,
-    value=float(calc_label_min if calc_label_min is not None else 0.5),
-    step=0.1,
-)
+plot_label_min = float(calc_label_min) if calc_label_min is not None else None
 use_good_stpr = st.toggle(
-    "Use stPR computed from good neuron population",
+    "Use Coupling computed from good neuron population",
     value=False,
 )
 
@@ -1085,7 +1130,6 @@ plot_config["TRIAL_RASTER_USE_EVENT_WINDOW"] = True
 plot_config["SINGLE_NEURON_SMOOTH_SIGMA"] = 0.5
 plot_config["SINGLE_NEURON_BIN_SIZE"] = 0.01
 plot_config["DELAY_UNITS"] = config_calc.get("DELAY_UNITS", "s")
-plotly_dark_mode = st.toggle("Plotly dark mode", value=False)
 plot_config["PLOTLY_TEMPLATE"] = "plotly_dark" if plotly_dark_mode else "plotly_white"
 plotting_utils.DEFAULT_TEMPLATE = plot_config["PLOTLY_TEMPLATE"]
 pio.templates.default = plot_config["PLOTLY_TEMPLATE"]
@@ -1093,21 +1137,26 @@ plot_config["PLOT_LABEL_MIN"] = plot_label_min
 region_colors = _build_region_colors(cluster_acronyms)
 
 sort_map = {
-    "Default (Depth)": "depth",
-    "Delay to Stim On": "stim",
-    "Delay to First Move": "move",
-    "Delay to Response": "response",
-    "Delay to Feedback": "feedback",
-    "Task stPR Delay": "task",
-    "Task stPR Strength": "task_strength",
-    "Task stPR Max": "task_max",
-    "ITI stPR Delay": "iti",
-    "ITI stPR Strength": "iti_strength",
-    "ITI stPR Max": "iti_max",
-    "Spont stPR Delay": "spont",
-    "Spont stPR Strength": "spont_strength",
-    "Spont stPR Max": "spont_max",
-    "Firing rate": "firing_rate",
+    "Depth": "depth",
+    "Firing Rate": "firing_rate",
+    "Correlation to Whisking": "whisk_corr_abs",
+    "Delay to Stim On": "delay:stimOn_times",
+    "Delay to First Move": "delay:firstMovement_times",
+    "Delay to Feedback": "delay:feedback_times",
+    "Delay to Whisking Events": "delay:wh_brief_times_spont",
+    "Delay to Passive Visual": "delay:passive_visual_times",
+    "Delay to Passive Tone": "delay:passive_tone_times",
+    "Delay to Passive Valve": "delay:passive_valve_times",
+    "Delay to Passive Noise": "delay:passive_noise_times",
+    "Coupling Delay (Spont)": "spont",
+    "Coupling Delay (ITI)": "iti",
+    "Coupling Delay (Task)": "task",
+    "Coupling Strength (Spont)": "spont_strength",
+    "Coupling Strength (ITI)": "iti_strength",
+    "Coupling Strength (Task)": "task_strength",
+    "Coupling Max (Spont)": "spont_max",
+    "Coupling Max (ITI)": "iti_max",
+    "Coupling Max (Task)": "task_max",
 }
 
 df_coupling_good = data.get("df_coupling_good")
@@ -1123,12 +1172,12 @@ if use_good_stpr:
         missing.append("ITI")
     if len(missing) == 3:
         st.warning(
-            "Good-neuron stPR not available in cache; using all neurons for stPR metrics."
+            "Good-neuron Coupling not available in cache; using all neurons for Coupling metrics."
         )
         use_good_stpr = False
     elif missing:
         st.warning(
-            "Good-neuron stPR missing for: "
+            "Good-neuron Coupling missing for: "
             + ", ".join(missing)
             + ". Using all neurons for those contexts."
         )
@@ -1148,7 +1197,10 @@ df_coupling_iti_plot = (
 )
 df_comparison_plot = data.get("df_comparison")
 if plot_label_values is not None and plot_label_min is not None:
-    plot_mask = plot_label_values >= float(plot_label_min)
+    if calc_label_strict_gt:
+        plot_mask = plot_label_values > float(plot_label_min)
+    else:
+        plot_mask = plot_label_values >= float(plot_label_min)
     plot_cluster_ids = plot_cluster_ids[plot_mask]
     plot_cluster_acronyms = plot_cluster_acronyms[plot_mask]
     plot_label_values = plot_label_values[plot_mask]
@@ -1172,15 +1224,31 @@ data_for_corr["df_firing_rate"] = df_firing_rate
 data_for_corr["df_coupling"] = df_coupling_plot
 data_for_corr["df_coupling_task"] = df_coupling_task_plot
 data_for_corr["df_coupling_iti"] = df_coupling_iti_plot
+try:
+    depth_vals = plotting_utils._get_depths(clusters, len(cluster_ids))
+    df_depth = pd.DataFrame(
+        {
+            "cluster_id": np.asarray(cluster_ids),
+            "depth_h1": np.asarray(depth_vals, dtype=float),
+            "depth_h2": np.asarray(depth_vals, dtype=float),
+        }
+    )
+except Exception:
+    df_depth = None
+if data.get("df_res") is not None and "arousal_corr_abs" in data.get("df_res").columns:
+    df_arousal_corr = data.get("df_res")[["cluster_id", "arousal_corr_abs"]].copy()
+    df_arousal_corr = df_arousal_corr.rename(
+        columns={
+            "arousal_corr_abs": "arousal_corr_abs_h1",
+        }
+    )
+    df_arousal_corr["arousal_corr_abs_h2"] = df_arousal_corr["arousal_corr_abs_h1"].astype(float)
+else:
+    df_arousal_corr = None
+data_for_corr["df_depth"] = df_depth
+data_for_corr["df_arousal_corr"] = df_arousal_corr
 
 st.subheader("General Raster")
-variability_choice = st.radio(
-    "PSTH variability metric",
-    ["Fano Factor", "CV"],
-    horizontal=True,
-    key="psth_variability_metric",
-)
-variability_metric = "fano" if variability_choice == "Fano Factor" else "cv"
 min_time = float(np.nanmin(spikes["times"]))
 max_time = float(np.nanmax(spikes["times"]))
 if "general_t_start" not in st.session_state:
@@ -1233,23 +1301,7 @@ with col_b:
 
 general_sort = st.selectbox(
     "General raster sorting",
-    [
-        "Default (Depth)",
-        "Delay to Stim On",
-        "Delay to First Move",
-        "Delay to Response",
-        "Delay to Feedback",
-        "Task stPR Delay",
-        "Task stPR Strength",
-        "Task stPR Max",
-        "ITI stPR Delay",
-        "ITI stPR Strength",
-        "ITI stPR Max",
-        "Spont stPR Delay",
-        "Spont stPR Strength",
-        "Spont stPR Max",
-        "Firing rate",
-    ],
+    list(sort_map.keys()),
     key="general_sort",
 )
 
@@ -1283,7 +1335,6 @@ else:
         plot_config,
         t_start,
         t_end,
-        variability_metric=variability_metric,
         sorting_metric=sort_map[general_sort],
         df_res=data.get("df_res"),
         df_coupling=df_coupling_plot,
@@ -1313,23 +1364,7 @@ st.table(trial_table)
 
 sort_choice = st.selectbox(
     "Sorting", 
-    [
-        "Default (Depth)",
-        "Delay to Stim On",
-        "Delay to First Move",
-        "Delay to Response",
-        "Delay to Feedback",
-        "Task stPR Delay",
-        "Task stPR Strength",
-        "Task stPR Max",
-        "ITI stPR Delay",
-        "ITI stPR Strength",
-        "ITI stPR Max",
-        "Spont stPR Delay",
-        "Spont stPR Strength",
-        "Spont stPR Max",
-        "Firing rate",
-    ],
+    list(sort_map.keys()),
 )
 
 fig_trial = plot_trial_raster_plotly(
@@ -1340,7 +1375,6 @@ fig_trial = plot_trial_raster_plotly(
     session,
     plot_config,
     trial_idx,
-    variability_metric=variability_metric,
     sorting_metric=sort_map[sort_choice],
     df_res=data.get("df_res"),
     df_coupling=df_coupling_plot,
@@ -1351,88 +1385,303 @@ fig_trial = plot_trial_raster_plotly(
 )
 st.plotly_chart(fig_trial, width="stretch")
 
+st.subheader("Whisking")
+df_wh_cache = data.get("df_wh")
+wh_detect_cache = data.get("wh_detect", {})
+wh_event_base_cache = data.get("wh_event_base", {})
+if df_wh_cache is None or not isinstance(df_wh_cache, pd.DataFrame) or df_wh_cache.empty:
+    st.info("Motion energy is not available for this PID. Whisking plots are disabled.")
+else:
+    wh_t = np.asarray(df_wh_cache.get("bin_center_s", np.array([])), dtype=float)
+    wh_t = wh_t[np.isfinite(wh_t)]
+    if wh_t.size == 0:
+        st.info("Whisking trace is unavailable for this PID.")
+    else:
+        wh_min = float(np.nanmin(wh_t))
+        wh_max = float(np.nanmax(wh_t))
+        if "whisk_t_start" not in st.session_state:
+            st.session_state.whisk_t_start = wh_min
+        if "whisk_t_end" not in st.session_state:
+            st.session_state.whisk_t_end = float(min(wh_min + 20.0, wh_max))
+        wcol_a, wcol_b, wcol_shift = st.columns([1, 1, 0.5])
+        with wcol_shift:
+            whisk_shift = st.number_input(
+                "Shift (s)",
+                key="whisk_shift_seconds",
+                value=1.0,
+                min_value=0.0,
+                step=0.5,
+            )
+            whisk_shift_btn = st.button("Shift +", key="whisk_shift_plus", use_container_width=True)
+        if whisk_shift_btn:
+            window = st.session_state.whisk_t_end - st.session_state.whisk_t_start
+            total_range = wh_max - wh_min
+            if window <= 0:
+                window = min(20.0, total_range)
+            if total_range > 0 and window > total_range:
+                window = total_range
+            shift_val = float(whisk_shift)
+            new_start = st.session_state.whisk_t_start + shift_val
+            new_end = st.session_state.whisk_t_end + shift_val
+            if new_end > wh_max:
+                new_end = wh_max
+                new_start = wh_max - window
+            if new_start < wh_min:
+                new_start = wh_min
+                new_end = wh_min + window
+            st.session_state.whisk_t_start = float(new_start)
+            st.session_state.whisk_t_end = float(new_end)
+        with wcol_a:
+            whisk_t_start = st.number_input(
+                "Start time (s)",
+                key="whisk_t_start",
+                min_value=wh_min,
+                max_value=wh_max,
+            )
+        with wcol_b:
+            whisk_t_end = st.number_input(
+                "End time (s)",
+                key="whisk_t_end",
+                min_value=wh_min,
+                max_value=wh_max,
+            )
+        if whisk_t_end <= whisk_t_start:
+            st.warning("Whisking end time must be greater than start time.")
+        else:
+            fig_whisk = plot_whisking_overview_plotly(
+                df_wh_cache,
+                wh_detect=wh_detect_cache,
+                wh_event_base=wh_event_base_cache,
+                config_calc=config_calc,
+                t_start=float(whisk_t_start),
+                t_end=float(whisk_t_end),
+                template=plot_config.get("PLOTLY_TEMPLATE"),
+            )
+            st.plotly_chart(fig_whisk, width="stretch")
+
 st.subheader("Response Analysis")
-plot_sort = st.selectbox(
-    "Population sort", 
-    [
-        "Default (Depth)",
-        "Own Event Delay",
-        "Task stPR Delay",
-        "Task stPR Strength",
-        "Task stPR Max",
-        "ITI stPR Delay",
-        "ITI stPR Strength",
-        "ITI stPR Max",
-        "Spont stPR Delay",
-        "Spont stPR Strength",
-        "Spont stPR Max",
-        "Firing rate",
-    ],
-    index=1,
+st.caption("All heatmaps are baseline z-scored PSTHs with fixed color range [-8, +8].")
+response_sort_options = [
+    "Event Own Delay",
+    "Depth",
+    "Firing Rate",
+    "Correlation to Whisking",
+    "Delay to Stim On",
+    "Delay to First Move",
+    "Delay to Feedback",
+    "Delay to Whisking Events",
+    "Delay to Passive Visual",
+    "Delay to Passive Tone",
+    "Delay to Passive Valve",
+    "Delay to Passive Noise",
+    "Coupling Delay (Spont)",
+    "Coupling Delay (ITI)",
+    "Coupling Delay (Task)",
+    "Coupling Strength (Spont)",
+    "Coupling Strength (ITI)",
+    "Coupling Strength (Task)",
+    "Coupling Max (Spont)",
+    "Coupling Max (ITI)",
+    "Coupling Max (Task)",
+]
+response_sort = st.selectbox(
+    "Population sort",
+    response_sort_options,
+    index=0,
+    key="response_sort",
 )
-plot_sort_map = {
-    "Default (Depth)": "depth",
-    "Own Event Delay": "delay",
-    "Task stPR Delay": "task",
-    "Task stPR Strength": "task_strength",
-    "Task stPR Max": "task_max",
-    "ITI stPR Delay": "iti",
-    "ITI stPR Strength": "iti_strength",
-    "ITI stPR Max": "iti_max",
-    "Spont stPR Delay": "spont",
-    "Spont stPR Strength": "spont_strength",
-    "Spont stPR Max": "spont_max",
-    "Firing rate": "firing_rate",
+response_sort_map = {
+    "Event Own Delay": "delay",
+    "Depth": "depth",
+    "Firing Rate": "firing_rate",
+    "Correlation to Whisking": "whisk_corr_abs",
+    "Delay to Stim On": "delay:stimOn_times",
+    "Delay to First Move": "delay:firstMovement_times",
+    "Delay to Feedback": "delay:feedback_times",
+    "Delay to Whisking Events": "delay:wh_brief_times_spont",
+    "Delay to Passive Visual": "delay:passive_visual_times",
+    "Delay to Passive Tone": "delay:passive_tone_times",
+    "Delay to Passive Valve": "delay:passive_valve_times",
+    "Delay to Passive Noise": "delay:passive_noise_times",
+    "Coupling Delay (Spont)": "spont",
+    "Coupling Delay (ITI)": "iti",
+    "Coupling Delay (Task)": "task",
+    "Coupling Strength (Spont)": "spont_strength",
+    "Coupling Strength (ITI)": "iti_strength",
+    "Coupling Strength (Task)": "task_strength",
+    "Coupling Max (Spont)": "spont_max",
+    "Coupling Max (ITI)": "iti_max",
+    "Coupling Max (Task)": "task_max",
 }
-pop_key = (
-    pid,
-    plot_label_min,
-    plot_sort,
-    use_good_stpr,
-    plot_config["PLOTLY_TEMPLATE"],
-    tuple(config_plot.get("PLOT_REGIONS") or []),
-    config_plot.get("POP_BIN_SIZE"),
-    config_plot.get("POP_SMOOTH_SIGMA"),
-    config_plot.get("POP_CMAP_NAME"),
-    config_plot.get("POP_NORMALIZE"),
-    "hide_colorbar",
+heatmap_plot_config = dict(plot_config)
+heatmap_plot_config["HEATMAP_PANEL_COLS"] = 4
+heatmap_plot_config["POP_NORMALIZE"] = False
+heatmap_plot_config["POP_ZSCORE"] = True
+heatmap_plot_config["POP_ZSCORE_SOURCE"] = str(
+    config_calc.get("RESPONSIVE_ZSCORE_SOURCE", "smooth")
+).strip().lower()
+heatmap_plot_config["POP_BASELINE_PRE"] = float(config_calc.get("BASELINE_PRE", 0.2))
+heatmap_plot_config["POP_ZMIN"] = -8.0
+heatmap_plot_config["POP_ZMAX"] = 8.0
+heatmap_plot_config["HEATMAP_SHOW_COLORBAR"] = True
+heatmap_plot_config["POP_SPLIT_AROUSAL_WHISK"] = True
+heatmap_plot_config["POP_SPLIT_GROUP_ANY_EVENT"] = True
+heatmap_plot_config["POP_AROUSAL_GROUP_COL"] = "arousal_group"
+heatmap_plot_config["POP_GROUP_COL_BY_EVENT"] = {
+    "stimOn_times": ana_utils.response_sign_column_name("stimOn_times"),
+    "stimOn_times_task_zero_lr": ana_utils.response_sign_column_name("stimOn_times"),
+    "firstMovement_times": ana_utils.response_sign_column_name("firstMovement_times"),
+    "feedback_times": ana_utils.response_sign_column_name("feedback_times"),
+    "passive_tone_times": ana_utils.response_sign_column_name("passive_tone_times"),
+    "passive_valve_times": ana_utils.response_sign_column_name("passive_valve_times"),
+    "passive_noise_times": ana_utils.response_sign_column_name("passive_noise_times"),
+    "passive_visual_times": ana_utils.response_sign_column_name("passive_visual_times"),
+    "passive_visual_top2_left_times": ana_utils.response_sign_column_name("passive_visual_times"),
+}
+heatmap_plot_config["POP_WINDOWS_BY_EVENT"] = {
+    "stimOn_times": (0.5, 1.0),
+    "firstMovement_times": (0.5, 1.0),
+    "feedback_times": (0.5, 1.0),
+    "passive_tone_times": (0.5, 1.0),
+    "passive_valve_times": (0.5, 1.0),
+    "passive_noise_times": (0.5, 1.0),
+    "passive_visual_times": (0.5, 1.0),
+    "passive_visual_top2_left_times": (0.5, 1.0),
+    "stimOn_times_task_zero_lr": (0.5, 1.0),
+    "wh_all_times_spont": (0.5, 2.0),
+    "wh_brief_times_spont": (0.5, 2.0),
+    "wh_long_times_spont": (0.5, 2.0),
+    "wh_long_offset_times_spont": (0.5, 2.0),
+}
+
+task_zero_times = np.asarray(
+    (data.get("task_stim_subsets") or {}).get("task_zero_lr_times", np.array([])),
+    dtype=float,
 )
+if task_zero_times.size == 0 and "contrast" in trials.columns and "stimOn_times" in trials.columns:
+    task_zero_times = np.asarray(
+        trials.loc[
+            np.isfinite(trials["stimOn_times"].to_numpy(dtype=float))
+            & np.isclose(trials["contrast"].to_numpy(dtype=float), 0.0, atol=1e-9),
+            "stimOn_times",
+        ],
+        dtype=float,
+    )
+task_nonzero_times = np.asarray(
+    trials.loc[
+        np.isfinite(trials["stimOn_times"].to_numpy(dtype=float))
+        & (trials["contrast"].to_numpy(dtype=float) > 0),
+        "stimOn_times",
+    ],
+    dtype=float,
+)
+first_move_times = np.asarray(trials["firstMovement_times"], dtype=float)
+first_move_times = first_move_times[np.isfinite(first_move_times)]
+feedback_times = np.asarray(trials["feedback_times"], dtype=float)
+feedback_times = feedback_times[np.isfinite(feedback_times)]
+passive_cache = data.get("passive_events") or {}
+wh_period_cache = data.get("wh_events_by_period") or {}
+event_time_lookup = {
+    "stimOn_times": np.sort(task_nonzero_times[np.isfinite(task_nonzero_times)]),
+    "firstMovement_times": np.sort(first_move_times),
+    "feedback_times": np.sort(feedback_times),
+    "passive_tone_times": np.sort(np.asarray(passive_cache.get("passive_tone_times", np.array([])), dtype=float)),
+    "passive_valve_times": np.sort(np.asarray(passive_cache.get("passive_valve_times", np.array([])), dtype=float)),
+    "passive_noise_times": np.sort(np.asarray(passive_cache.get("passive_noise_times", np.array([])), dtype=float)),
+    "stimOn_times_task_zero_lr": np.sort(task_zero_times[np.isfinite(task_zero_times)]),
+    "passive_visual_times": np.sort(
+        np.asarray(passive_cache.get("passive_visual_top2_right_times", np.array([])), dtype=float)
+    ),
+    "passive_visual_top2_left_times": np.sort(
+        np.asarray(passive_cache.get("passive_visual_top2_left_times", np.array([])), dtype=float)
+    ),
+    "wh_all_times_spont": np.sort(np.asarray(wh_period_cache.get("wh_all_times_spont", np.array([])), dtype=float)),
+    "wh_brief_times_spont": np.sort(
+        np.asarray(wh_period_cache.get("wh_brief_times_spont", np.array([])), dtype=float)
+    ),
+    "wh_long_times_spont": np.sort(np.asarray(wh_period_cache.get("wh_long_times_spont", np.array([])), dtype=float)),
+    "wh_long_offset_times_spont": np.sort(
+        np.asarray(wh_period_cache.get("wh_long_offset_times_spont", np.array([])), dtype=float)
+    ),
+}
+panel_event_specs = [
+    {"label": "Stim On\n(non-zero\ncontrasts)", "event_name": "stimOn_times"},
+    {"label": "First Move", "event_name": "firstMovement_times"},
+    {"label": "Feedback", "event_name": "feedback_times"},
+    {"label": "Histogram\nFiring Rate of\nthese neurons", "summary_type": "firing_hist"},
+    {"label": "Passive Tone", "event_name": "passive_tone_times"},
+    {"label": "Passive Valve", "event_name": "passive_valve_times"},
+    {"label": "Passive Noise", "event_name": "passive_noise_times"},
+    {"label": "Bar Plot\nArousal\n(+/-/neutral)", "summary_type": "arousal_bar"},
+    {"label": "Stim On (only\nzero\ncontrasts)", "event_name": "stimOn_times_task_zero_lr"},
+    {"label": "Passive Visual\n(top 2\ncontrast right)", "event_name": "passive_visual_times"},
+    {"label": "Passive Visual\n(top 2\ncontrast left)", "event_name": "passive_visual_top2_left_times"},
+    {"label": "Bar Plot\nwhisking\nevents (Brief\nvs. Long)", "summary_type": "whisk_count_bar"},
+    {"label": "Wh All (Spont)", "event_name": "wh_all_times_spont"},
+    {"label": "Wh Brief (Spont)", "event_name": "wh_brief_times_spont"},
+    {"label": "Wh Long (Spont)", "event_name": "wh_long_times_spont"},
+    {"label": "Wh Long Offset (Spont)", "event_name": "wh_long_offset_times_spont"},
+]
+event_sessions = {}
+for spec in panel_event_specs:
+    event_name = spec.get("event_name")
+    if not event_name:
+        continue
+    event_sessions[event_name] = {"trials": {event_name: event_time_lookup.get(event_name, np.array([]))}}
 
-def _build_population_figs():
-    def _hide_heatmap_colorbars(fig):
-        if fig is None:
-            return fig
-        fig.update_traces(showscale=False, selector=dict(type="heatmap"))
-        return fig
-
-    figs = []
-    for event_name in ["stimOn_times", "firstMovement_times", "feedback_times"]:
-        cfg = dict(config_plot)
-        cfg["PLOT_EVENT"] = event_name
-        cfg["PLOT_ONLY_GOOD_UNITS"] = False
-        cfg["PLOTLY_TEMPLATE"] = plot_config["PLOTLY_TEMPLATE"]
-        fig = plot_population_sorted_plotly(
-            session,
-            spikes,
-            clusters,
-            plot_cluster_ids,
-            plot_cluster_acronyms,
-            data.get("df_res"),
-            cfg,
-            df_coupling=df_coupling_plot,
-            df_coupling_task=df_coupling_task_plot,
-            df_coupling_iti=df_coupling_iti_plot,
-            df_firing_rate=df_firing_rate,
-            region_acronyms=cfg.get("PLOT_REGIONS"),
-            sort_mode=plot_sort_map[plot_sort],
+regions_all = sorted(pd.Series(plot_cluster_acronyms).astype(str).unique().tolist())
+region_filters = config_plot.get("PLOT_REGIONS")
+if region_filters:
+    selected_regions = []
+    for region in regions_all:
+        if any(str(region).startswith(str(r)) for r in region_filters):
+            selected_regions.append(region)
+else:
+    selected_regions = regions_all
+if not selected_regions:
+    st.info("No regions available for Response Analysis.")
+else:
+    for i, region_name in enumerate(selected_regions):
+        panel_cache_key = (
+            pid,
+            str(region_name),
+            str(response_sort_map.get(response_sort, "depth")),
+            float(plot_label_min) if plot_label_min is not None else None,
+            bool(use_good_stpr),
+            str(plot_config.get("PLOTLY_TEMPLATE", "plotly_white")),
+            tuple(config_plot.get("PLOT_REGIONS") or []),
         )
-        figs.append(_hide_heatmap_colorbars(fig))
-    return figs
 
-pop_figs = _get_cached_value("population_analysis_figs", pop_key, _build_population_figs)
-cols = st.columns(3)
-for fig_pop, col in zip(pop_figs or [], cols):
-    col.plotly_chart(fig_pop, width="stretch")
+        def _build_region_panel():
+            return plot_multi_event_population_panel_plotly(
+                panel_event_specs,
+                event_sessions,
+                spikes,
+                clusters,
+                plot_cluster_ids,
+                plot_cluster_acronyms,
+                data.get("df_res"),
+                heatmap_plot_config,
+                sort_mode=response_sort_map[response_sort],
+                region_name=region_name,
+                df_coupling=df_coupling_plot,
+                df_coupling_task=df_coupling_task_plot,
+                df_coupling_iti=df_coupling_iti_plot,
+                df_firing_rate=df_firing_rate,
+                whisk_df=df_wh_cache,
+            )
+
+        fig_panel = _get_cached_value(
+            f"response_panel_{region_name}",
+            panel_cache_key,
+            _build_region_panel,
+        )
+        if not isinstance(fig_panel, go.Figure):
+            fig_panel = _build_region_panel()
+            st.session_state[f"response_panel_{region_name}_value"] = fig_panel
+            st.session_state[f"response_panel_{region_name}_key"] = panel_cache_key
+        with st.expander(f"Region {region_name}", expanded=(i == 0)):
+            st.plotly_chart(fig_panel, width="stretch")
 
 st.subheader("Coupling")
 coupling_key = (
@@ -1444,31 +1693,11 @@ coupling_key = (
     config_calc.get("STPR_BIN_SIZE"),
     config_calc.get("STPR_WINDOW_MS"),
     plot_config.get("POP_CMAP_NAME"),
-    True,
-    "per_row_all",
-    "hide_colorbar",
-    "context_titles",
 )
 
 def _build_coupling_figs():
     region_acronyms = config_plot.get("PLOT_REGIONS")
-    def _clamp_coupling_colorbar(fig, zmin=-2, zmax=2):
-        if fig is None:
-            return fig
-        fig.update_traces(zmin=zmin, zmax=zmax, selector=dict(type="heatmap"))
-        return fig
-    def _hide_heatmap_colorbars(fig):
-        if fig is None:
-            return fig
-        fig.update_traces(showscale=False, selector=dict(type="heatmap"))
-        return fig
-    def _set_coupling_title(fig, label):
-        if fig is None:
-            return fig
-        fig.update_layout(title=f"Spike-triggered Population Rate ({label})")
-        return fig
-
-    fig_spont = plot_population_coupling_heatmap_plotly(
+    fig_spont_local = plot_population_coupling_heatmap_plotly(
         df_coupling_plot,
         plot_config,
         config_calc,
@@ -1476,15 +1705,7 @@ def _build_coupling_figs():
         zscore_by_region=True,
         colorbar_mode="per_row",
     )
-    fig_task = plot_population_coupling_heatmap_plotly(
-        df_coupling_task_plot,
-        plot_config,
-        config_calc,
-        region_acronyms=region_acronyms,
-        zscore_by_region=True,
-        colorbar_mode="per_row",
-    )
-    fig_iti = plot_population_coupling_heatmap_plotly(
+    fig_iti_local = plot_population_coupling_heatmap_plotly(
         df_coupling_iti_plot,
         plot_config,
         config_calc,
@@ -1492,18 +1713,27 @@ def _build_coupling_figs():
         zscore_by_region=True,
         colorbar_mode="per_row",
     )
-    fig_spont = _set_coupling_title(
-        _hide_heatmap_colorbars(_clamp_coupling_colorbar(fig_spont)), "Spont"
+    fig_task_local = plot_population_coupling_heatmap_plotly(
+        df_coupling_task_plot,
+        plot_config,
+        config_calc,
+        region_acronyms=region_acronyms,
+        zscore_by_region=True,
+        colorbar_mode="per_row",
     )
-    fig_task = _set_coupling_title(
-        _hide_heatmap_colorbars(_clamp_coupling_colorbar(fig_task)), "Task"
-    )
-    fig_iti = _set_coupling_title(
-        _hide_heatmap_colorbars(_clamp_coupling_colorbar(fig_iti)), "ITI"
-    )
-    return fig_spont, fig_task, fig_iti
+    for fig_local, label in (
+        (fig_spont_local, "Spont"),
+        (fig_iti_local, "ITI"),
+        (fig_task_local, "Task"),
+    ):
+        if fig_local is None:
+            continue
+        fig_local.update_traces(showscale=False, selector=dict(type="heatmap"))
+        fig_local.update_traces(zmin=-2, zmax=2, selector=dict(type="heatmap"))
+        fig_local.update_layout(title=f"Population Coupling ({label})")
+    return fig_spont_local, fig_iti_local, fig_task_local
 
-fig_spont, fig_task, fig_iti = _get_cached_value(
+fig_spont, fig_iti, fig_task = _get_cached_value(
     "coupling_figs", coupling_key, _build_coupling_figs
 )
 col1, col2, col3 = st.columns(3)
@@ -1511,148 +1741,152 @@ with col1:
     st.markdown("**Spont Coupling**")
     st.plotly_chart(fig_spont, width="stretch")
 with col2:
-    st.markdown("**Task Coupling**")
-    st.plotly_chart(fig_task, width="stretch")
-with col3:
     st.markdown("**ITI Coupling**")
     st.plotly_chart(fig_iti, width="stretch")
+with col3:
+    st.markdown("**Task Coupling**")
+    st.plotly_chart(fig_task, width="stretch")
 
-st.subheader("stPR Strength by Region (Spont vs Task)")
-if (
-    df_coupling_plot is None
-    or df_coupling_task_plot is None
-    or plot_cluster_ids is None
-    or plot_cluster_acronyms is None
-):
-    st.warning("stPR coupling tables or cluster metadata missing.")
-else:
-    strength_col_spont = _pick_coupling_strength_col(df_coupling_plot)
-    strength_col_task = _pick_coupling_strength_col(df_coupling_task_plot)
-    if strength_col_spont is None or strength_col_task is None:
-        st.warning("Coupling strength columns not found in stPR tables.")
+ENABLE_COUPLING_STRENGTH_BY_REGION = False  # Set True to re-enable the legacy per-region strength block.
+if ENABLE_COUPLING_STRENGTH_BY_REGION:
+    st.subheader("Coupling Strength by Region (Spont vs Task)")
+    # Legacy block is intentionally retained here and gated by the flag above.
+    if (
+        df_coupling_plot is None
+        or df_coupling_task_plot is None
+        or plot_cluster_ids is None
+        or plot_cluster_acronyms is None
+    ):
+        st.warning("Coupling tables or cluster metadata missing.")
     else:
-        region_list = [
-            region
-            for region in pd.Series(plot_cluster_acronyms).astype(str).unique().tolist()
-            if region not in ("void", "root")
-        ]
-        if not region_list:
-            st.warning("No valid regions found (excluding void/root).")
+        strength_col_spont = _pick_coupling_strength_col(df_coupling_plot)
+        strength_col_task = _pick_coupling_strength_col(df_coupling_task_plot)
+        if strength_col_spont is None or strength_col_task is None:
+            st.warning("Coupling strength columns not found in coupling tables.")
         else:
-            color_map = _resolve_region_colors(region_list, region_colors)
-            map_spont = dict(
-                zip(
-                    df_coupling_plot["cluster_id"],
-                    df_coupling_plot[strength_col_spont],
+            region_list = [
+                region
+                for region in pd.Series(plot_cluster_acronyms).astype(str).unique().tolist()
+                if region not in ("void", "root")
+            ]
+            if not region_list:
+                st.warning("No valid regions found (excluding void/root).")
+            else:
+                color_map = _resolve_region_colors(region_list, region_colors)
+                map_spont = dict(
+                    zip(
+                        df_coupling_plot["cluster_id"],
+                        df_coupling_plot[strength_col_spont],
+                    )
                 )
-            )
-            map_task = dict(
-                zip(
-                    df_coupling_task_plot["cluster_id"],
-                    df_coupling_task_plot[strength_col_task],
+                map_task = dict(
+                    zip(
+                        df_coupling_task_plot["cluster_id"],
+                        df_coupling_task_plot[strength_col_task],
+                    )
                 )
-            )
-            template = plot_config.get("PLOTLY_TEMPLATE", pio.templates.default)
-            for region in region_list:
-                region_mask = np.asarray(plot_cluster_acronyms).astype(str) == region
-                region_cluster_ids = np.asarray(plot_cluster_ids)[region_mask]
-                if len(region_cluster_ids) == 0:
-                    continue
-                y_spont = np.array(
-                    [map_spont.get(cid, np.nan) for cid in region_cluster_ids],
-                    dtype=float,
-                )
-                y_task = np.array(
-                    [map_task.get(cid, np.nan) for cid in region_cluster_ids],
-                    dtype=float,
-                )
-                sort_key = np.nanmean(np.vstack([y_spont, y_task]), axis=0)
-                sort_key = np.where(np.isfinite(sort_key), sort_key, np.inf)
-                order = np.argsort(sort_key)
-                region_cluster_ids = region_cluster_ids[order]
-                y_spont = y_spont[order]
-                y_task = y_task[order]
-                neuron_idx = np.arange(1, len(region_cluster_ids) + 1)
-                color = color_map.get(region)
-                marker_base = dict(size=7, opacity=0.8)
-                if color:
-                    marker_base["color"] = color
-                diff_vals = y_task - y_spont
-                diff_vals = diff_vals[np.isfinite(diff_vals)]
-                fig_region = make_subplots(
-                    rows=1,
-                    cols=2,
-                    column_widths=[0.28, 0.72],
-                    horizontal_spacing=0.08,
-                    subplot_titles=("Task - Spont stPR", f"{region}"),
-                )
-                fig_region.add_trace(
-                    go.Histogram(
-                        x=diff_vals,
-                        nbinsx=40,
-                        marker=dict(color=color or "#888888", opacity=0.7),
-                        showlegend=False,
-                    ),
-                    row=1,
-                    col=1,
-                )
-                fig_region.add_trace(
-                    go.Scatter(
-                        x=neuron_idx,
-                        y=y_spont,
-                        mode="markers",
-                        marker=dict(**marker_base, symbol="circle"),
-                        name="Spont",
-                        customdata=region_cluster_ids,
-                        hovertemplate=(
-                            "Neuron %{x}<br>Cluster %{customdata}<br>"
-                            "Spont stPR=%{y:.3f}<extra></extra>"
+                template = plot_config.get("PLOTLY_TEMPLATE", pio.templates.default)
+                for region in region_list:
+                    region_mask = np.asarray(plot_cluster_acronyms).astype(str) == region
+                    region_cluster_ids = np.asarray(plot_cluster_ids)[region_mask]
+                    if len(region_cluster_ids) == 0:
+                        continue
+                    y_spont = np.array(
+                        [map_spont.get(cid, np.nan) for cid in region_cluster_ids],
+                        dtype=float,
+                    )
+                    y_task = np.array(
+                        [map_task.get(cid, np.nan) for cid in region_cluster_ids],
+                        dtype=float,
+                    )
+                    sort_key = np.nanmean(np.vstack([y_spont, y_task]), axis=0)
+                    sort_key = np.where(np.isfinite(sort_key), sort_key, np.inf)
+                    order = np.argsort(sort_key)
+                    region_cluster_ids = region_cluster_ids[order]
+                    y_spont = y_spont[order]
+                    y_task = y_task[order]
+                    neuron_idx = np.arange(1, len(region_cluster_ids) + 1)
+                    color = color_map.get(region)
+                    marker_base = dict(size=7, opacity=0.8)
+                    if color:
+                        marker_base["color"] = color
+                    diff_vals = y_task - y_spont
+                    diff_vals = diff_vals[np.isfinite(diff_vals)]
+                    fig_region = make_subplots(
+                        rows=1,
+                        cols=2,
+                        column_widths=[0.28, 0.72],
+                        horizontal_spacing=0.08,
+                        subplot_titles=("Task - Spont Coupling", f"{region}"),
+                    )
+                    fig_region.add_trace(
+                        go.Histogram(
+                            x=diff_vals,
+                            nbinsx=40,
+                            marker=dict(color=color or "#888888", opacity=0.7),
+                            showlegend=False,
                         ),
-                    ),
-                    row=1,
-                    col=2,
-                )
-                fig_region.add_trace(
-                    go.Scatter(
-                        x=neuron_idx,
-                        y=y_task,
-                        mode="markers",
-                        marker=dict(**marker_base, symbol="triangle-up"),
-                        name="Task",
-                        customdata=region_cluster_ids,
-                        hovertemplate=(
-                            "Neuron %{x}<br>Cluster %{customdata}<br>"
-                            "Task stPR=%{y:.3f}<extra></extra>"
+                        row=1,
+                        col=1,
+                    )
+                    fig_region.add_trace(
+                        go.Scatter(
+                            x=neuron_idx,
+                            y=y_spont,
+                            mode="markers",
+                            marker=dict(**marker_base, symbol="circle"),
+                            name="Spont",
+                            customdata=region_cluster_ids,
+                            hovertemplate=(
+                                "Neuron %{x}<br>Cluster %{customdata}<br>"
+                                "Spont Coupling=%{y:.3f}<extra></extra>"
+                            ),
                         ),
-                    ),
-                    row=1,
-                    col=2,
-                )
-                fig_region.update_xaxes(title_text="Δ stPR (Task - Spont)", row=1, col=1)
-                fig_region.update_yaxes(title_text="Count", row=1, col=1)
-                fig_region.add_vline(
-                    x=0.0,
-                    line=dict(color="gray", dash="dash", width=1.5),
-                    row=1,
-                    col=1,
-                )
-                fig_region.update_xaxes(
-                    title_text="Neuron # in region (sorted by stPR strength)", row=1, col=2
-                )
-                fig_region.update_yaxes(title_text="stPR strength", row=1, col=2)
-                fig_region.update_layout(
-                    height=320,
-                    template=template,
-                    legend=dict(
-                        orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0
-                    ),
-                    margin=dict(l=60, r=30, t=60, b=50),
-                )
-                with st.expander(
-                    f"{region} ({len(region_cluster_ids)} neurons)", expanded=False
-                ):
-                    st.plotly_chart(fig_region, width="stretch")
-
+                        row=1,
+                        col=2,
+                    )
+                    fig_region.add_trace(
+                        go.Scatter(
+                            x=neuron_idx,
+                            y=y_task,
+                            mode="markers",
+                            marker=dict(**marker_base, symbol="triangle-up"),
+                            name="Task",
+                            customdata=region_cluster_ids,
+                            hovertemplate=(
+                                "Neuron %{x}<br>Cluster %{customdata}<br>"
+                                "Task Coupling=%{y:.3f}<extra></extra>"
+                            ),
+                        ),
+                        row=1,
+                        col=2,
+                    )
+                    fig_region.update_xaxes(title_text="Delta Coupling (Task - Spont)", row=1, col=1)
+                    fig_region.update_yaxes(title_text="Count", row=1, col=1)
+                    fig_region.add_vline(
+                        x=0.0,
+                        line=dict(color="gray", dash="dash", width=1.5),
+                        row=1,
+                        col=1,
+                    )
+                    fig_region.update_xaxes(
+                        title_text="Neuron # in region (sorted by coupling strength)", row=1, col=2
+                    )
+                    fig_region.update_yaxes(title_text="Coupling strength", row=1, col=2)
+                    fig_region.update_layout(
+                        height=320,
+                        template=template,
+                        legend=dict(
+                            orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0
+                        ),
+                        margin=dict(l=60, r=30, t=60, b=50),
+                    )
+                    with st.expander(
+                        f"{region} ({len(region_cluster_ids)} neurons)", expanded=False
+                    ):
+                        st.plotly_chart(fig_region, width="stretch")
+else:
+    st.caption("Coupling Strength by Region is disabled (set `ENABLE_COUPLING_STRENGTH_BY_REGION = True` to re-enable).")
 st.subheader("Correlation Matrices")
 corr_key = (
     pid,
@@ -1663,6 +1897,7 @@ corr_key = (
     plot_config["PLOTLY_TEMPLATE"],
     tuple(config_plot.get("PLOT_REGIONS") or []),
 )
+label_comp_text = ">" if calc_label_strict_gt else ">="
 
 def _build_corr_figs():
     region_lookup = _build_region_lookup(
@@ -1670,6 +1905,7 @@ def _build_corr_figs():
         cluster_acronyms,
         labels,
         label_min=plot_label_min,
+        strict_gt=calc_label_strict_gt,
     )
     if region_lookup.empty:
         return []
@@ -1804,7 +2040,7 @@ def _build_corr_figs():
         fig.update_layout(
             title=(
                 "Reliability (diag) + Pairwise Pearson (off-diag) | "
-                f"Region {region} | N total (label>= {plot_label_min}): {n_total}"
+                f"Region {region} | N total (label{label_comp_text} {plot_label_min}): {n_total}"
             ),
             height=min(1000, max(500, 40 * n_vars + 200)),
             template=plot_config["PLOTLY_TEMPLATE"],
@@ -1861,7 +2097,7 @@ def _build_corr_figs():
         fig_s.update_layout(
             title=(
                 "Reliability (diag) + Pairwise Spearman (off-diag) | "
-                f"Region {region} | N total (label>= {plot_label_min}): {n_total}"
+                f"Region {region} | N total (label{label_comp_text} {plot_label_min}): {n_total}"
             ),
             height=min(1000, max(500, 40 * n_vars + 200)),
             template=plot_config["PLOTLY_TEMPLATE"],
@@ -1915,22 +2151,26 @@ else:
 if plot_label_min is not None and plot_label_values is not None:
     units_df = units_df[units_df["cluster_id"].isin(plot_cluster_ids)]
 
+if isinstance(data.get("df_res"), pd.DataFrame) and "cluster_id" in data["df_res"].columns:
+    df_arousal_units = data["df_res"][["cluster_id"]].copy()
+    if "arousal_group" in data["df_res"].columns:
+        df_arousal_units["arousal_group"] = data["df_res"]["arousal_group"]
+    else:
+        df_arousal_units["arousal_group"] = "neutral"
+    df_arousal_units = df_arousal_units.drop_duplicates(subset=["cluster_id"], keep="first")
+    units_df = units_df.merge(df_arousal_units, on="cluster_id", how="left")
+else:
+    units_df["arousal_group"] = "neutral"
+units_df["arousal_group"] = units_df["arousal_group"].fillna("neutral")
+
 units_df = units_df.sort_values(["region", "cluster_id"]).reset_index(drop=True)
 label_map = {}
 units_df_empty = units_df.empty
-if units_df_empty:
-    selected_cluster_id = None
-else:
+if not units_df_empty:
     for _, row in units_df.iterrows():
         label_val = row.get("label_value", np.nan)
         label_text = "NA" if pd.isna(label_val) else f"label={label_val:.2f}"
         label_map[row["cluster_id"]] = f"{row['cluster_id']} | {row['region']} | {label_text}"
-
-    default_cluster_id = int(units_df["cluster_id"].iloc[0])
-    selected_cluster_id = st.session_state.get("single_neuron_select", default_cluster_id)
-    if selected_cluster_id not in units_df["cluster_id"].values:
-        selected_cluster_id = default_cluster_id
-        st.session_state["single_neuron_select"] = selected_cluster_id
 
 st.subheader("Variable Correlation")
 region_lookup_plot = _build_region_lookup(
@@ -1938,6 +2178,7 @@ region_lookup_plot = _build_region_lookup(
     cluster_acronyms,
     labels,
     label_min=plot_label_min,
+    strict_gt=calc_label_strict_gt,
 )
 available_specs = []
 for spec in CORR_VARIABLES:
@@ -2001,29 +2242,53 @@ else:
                     region_lookup_plot["region"] == region_choice
                 ]
 
-            fig_corr, corr_msg = _build_pairwise_corr_plot(
-                data_for_corr,
-                region_lookup_sel,
-                spec_by_name[var_x],
-                spec_by_name[var_y],
-                plot_config["PLOTLY_TEMPLATE"],
-                region_label,
-                region_colors=region_colors,
-                highlight_cluster_id=selected_cluster_id,
+            var_corr_key = (
+                pid,
+                str(var_x),
+                str(var_y),
+                str(region_choice),
+                float(plot_label_min) if plot_label_min is not None else None,
+                bool(use_good_stpr),
+                str(plot_config.get("PLOTLY_TEMPLATE", "plotly_white")),
+                tuple(config_plot.get("PLOT_REGIONS") or []),
+            )
+
+            def _build_var_corr_fig():
+                return _build_pairwise_corr_plot(
+                    data_for_corr,
+                    region_lookup_sel,
+                    spec_by_name[var_x],
+                    spec_by_name[var_y],
+                    plot_config["PLOTLY_TEMPLATE"],
+                    region_label,
+                    region_colors=region_colors,
+                    highlight_cluster_id=None,
+                )
+
+            fig_corr, corr_msg = _get_cached_value(
+                "variable_correlation_fig",
+                var_corr_key,
+                _build_var_corr_fig,
             )
             if fig_corr is None:
                 st.info(corr_msg or "Not enough data to plot correlations.")
             else:
                 st.plotly_chart(fig_corr, width="stretch")
 
-st.subheader("Single Neuron")
-if units_df_empty or selected_cluster_id is None:
-    st.info("No neurons available for selection with current filters.")
-else:
-    selected_idx = int(
-        np.where(units_df["cluster_id"].values == selected_cluster_id)[0][0]
-    )
-    selected_cluster_id = st.selectbox(
+def _render_single_neuron_section():
+    st.subheader("Single Neuron")
+    if units_df_empty:
+        st.info("No neurons available for selection with current filters.")
+        return
+
+    default_cluster_id = int(units_df["cluster_id"].iloc[0])
+    selected_cluster_id_local = st.session_state.get("single_neuron_select", default_cluster_id)
+    if selected_cluster_id_local not in units_df["cluster_id"].values:
+        selected_cluster_id_local = default_cluster_id
+        st.session_state["single_neuron_select"] = selected_cluster_id_local
+
+    selected_idx = int(np.where(units_df["cluster_id"].values == selected_cluster_id_local)[0][0])
+    selected_cluster_id_local = st.selectbox(
         "Select neuron",
         units_df["cluster_id"].tolist(),
         index=selected_idx,
@@ -2031,14 +2296,31 @@ else:
         key="single_neuron_select",
     )
 
-    selected_row = units_df.loc[units_df["cluster_id"] == selected_cluster_id].iloc[0]
+    selected_row = units_df.loc[units_df["cluster_id"] == selected_cluster_id_local].iloc[0]
     label_val = selected_row.get("label_value", np.nan)
     quality_text = "NA" if pd.isna(label_val) else f"{label_val:.2f}"
+    arousal_raw = str(selected_row.get("arousal_group", "neutral")).strip().lower()
+    arousal_label_map = {
+        "arousal_plus": "Arousal +",
+        "exc": "Arousal +",
+        "excitatory": "Arousal +",
+        "increase": "Arousal +",
+        "arousal_minus": "Arousal -",
+        "inh": "Arousal -",
+        "inhibitory": "Arousal -",
+        "decrease": "Arousal -",
+        "neutral": "Neutral",
+        "none": "Neutral",
+        "nonresponsive": "Neutral",
+        "non_responsive": "Neutral",
+    }
+    arousal_text = arousal_label_map.get(arousal_raw, "Neutral")
 
-    info_cols = st.columns(3)
-    info_cols[0].metric("Cluster ID", selected_cluster_id)
+    info_cols = st.columns(4)
+    info_cols[0].metric("Cluster ID", selected_cluster_id_local)
     info_cols[1].metric("Region", selected_row["region"])
     info_cols[2].metric("Label", quality_text)
+    info_cols[3].metric("Arousal", arousal_text)
 
     fig_single = plot_single_neuron_plotly(
         session,
@@ -2048,41 +2330,126 @@ else:
         cluster_acronyms,
         data.get("df_res"),
         plot_config,
-        selected_cluster_id,
+        selected_cluster_id_local,
     )
     st.plotly_chart(fig_single, width="stretch")
 
-    st.markdown("**First Movement (Left vs Right)**")
-    fig_move = plot_single_neuron_conditioned_event_plotly(
-        session,
-        spikes,
-        clusters,
-        cluster_ids,
-        cluster_acronyms,
-        data.get("df_res"),
-        plot_config,
-        selected_cluster_id,
-        event_name="firstMovement_times",
-        condition_type="choice",
-        title="First Movement Response",
-    )
-    st.plotly_chart(fig_move, width="stretch")
+    col_move, col_feedback = st.columns(2)
+    with col_move:
+        st.markdown("**First Movement (Left vs Right)**")
+        fig_move = plot_single_neuron_conditioned_event_plotly(
+            session,
+            spikes,
+            clusters,
+            cluster_ids,
+            cluster_acronyms,
+            data.get("df_res"),
+            plot_config,
+            selected_cluster_id_local,
+            event_name="firstMovement_times",
+            condition_type="choice",
+            title="First Movement Response",
+        )
+        st.plotly_chart(fig_move, width="stretch")
+    with col_feedback:
+        st.markdown("**Feedback (Correct vs Incorrect)**")
+        fig_feedback = plot_single_neuron_conditioned_event_plotly(
+            session,
+            spikes,
+            clusters,
+            cluster_ids,
+            cluster_acronyms,
+            data.get("df_res"),
+            plot_config,
+            selected_cluster_id_local,
+            event_name="feedback_times",
+            condition_type="feedback",
+            title="Feedback Response",
+        )
+        st.plotly_chart(fig_feedback, width="stretch")
 
-    st.markdown("**Feedback (Correct vs Incorrect)**")
-    fig_feedback = plot_single_neuron_conditioned_event_plotly(
-        session,
-        spikes,
-        clusters,
-        cluster_ids,
-        cluster_acronyms,
-        data.get("df_res"),
-        plot_config,
-        selected_cluster_id,
-        event_name="feedback_times",
-        condition_type="feedback",
-        title="Feedback Response",
+    whisk_period_cache = data.get("wh_events_by_period") or {}
+    whisk_brief_events = np.asarray(
+        whisk_period_cache.get("wh_brief_times_spont", np.array([])),
+        dtype=float,
     )
-    st.plotly_chart(fig_feedback, width="stretch")
+    whisk_long_events = np.asarray(
+        whisk_period_cache.get("wh_long_times_spont", np.array([])),
+        dtype=float,
+    )
+    whisk_long_offset_events = np.asarray(
+        whisk_period_cache.get("wh_long_offset_times_spont", np.array([])),
+        dtype=float,
+    )
+    whisk_sn_cfg = dict(plot_config)
+    whisk_window = (
+        heatmap_plot_config.get("POP_WINDOWS_BY_EVENT", {}).get("wh_brief_times_spont", (0.5, 2.0))
+        if isinstance(heatmap_plot_config, dict)
+        else (0.5, 2.0)
+    )
+    if isinstance(whisk_window, (list, tuple)) and len(whisk_window) == 2:
+        whisk_sn_cfg["SINGLE_NEURON_RASTER_PRE"] = float(whisk_window[0])
+        whisk_sn_cfg["SINGLE_NEURON_RASTER_POST"] = float(whisk_window[1])
+    else:
+        whisk_sn_cfg["SINGLE_NEURON_RASTER_PRE"] = 0.5
+        whisk_sn_cfg["SINGLE_NEURON_RASTER_POST"] = 2.0
+
+    if (df_wh_cache is None) or (not isinstance(df_wh_cache, pd.DataFrame)) or df_wh_cache.empty:
+        st.info("Whisking motion-energy trace is unavailable for single-neuron whisk plots.")
+    else:
+        st.markdown("**Whisking Brief**")
+        if whisk_brief_events.size > 0:
+            fig_wh_brief = plot_single_neuron_event_groups_plotly(
+                spikes,
+                cluster_ids,
+                cluster_acronyms,
+                whisk_sn_cfg,
+                selected_cluster_id_local,
+                [("Whisk Brief", whisk_brief_events, "#ff8c00")],
+                title="Whisking Brief Response",
+                xaxis_event_label="whisking brief onset",
+                legend_title="Event",
+            )
+            st.plotly_chart(fig_wh_brief, width="stretch")
+        else:
+            st.info("No spontaneous brief whisking events available for this PID.")
+
+        col_wh_long_on, col_wh_long_off = st.columns(2)
+        with col_wh_long_on:
+            st.markdown("**Whisking Long Onset**")
+            if whisk_long_events.size > 0:
+                fig_wh_long = plot_single_neuron_event_groups_plotly(
+                    spikes,
+                    cluster_ids,
+                    cluster_acronyms,
+                    whisk_sn_cfg,
+                    selected_cluster_id_local,
+                    [("Whisk Long Onset", whisk_long_events, "#2ca02c")],
+                    title="Whisking Long Onset Response",
+                    xaxis_event_label="whisking long onset",
+                    legend_title="Event",
+                )
+                st.plotly_chart(fig_wh_long, width="stretch")
+            else:
+                st.info("No spontaneous long-whisk onset events available for this PID.")
+
+        with col_wh_long_off:
+            st.markdown("**Whisking Long Offset**")
+            if whisk_long_offset_events.size > 0:
+                fig_wh_long_off = plot_single_neuron_event_groups_plotly(
+                    spikes,
+                    cluster_ids,
+                    cluster_acronyms,
+                    whisk_sn_cfg,
+                    selected_cluster_id_local,
+                    [("Whisk Long Offset", whisk_long_offset_events, "#1f77b4")],
+                    title="Whisking Long Offset Response",
+                    xaxis_event_label="whisking long offset",
+                    legend_title="Event",
+                )
+                st.plotly_chart(fig_wh_long_off, width="stretch")
+            else:
+                st.info("No spontaneous long-whisk offset events available for this PID.")
 
     passive_replay = {
         "visual_by_contrast": {},
@@ -2093,85 +2460,93 @@ else:
         if not isinstance(passive_replay, dict):
             passive_replay = {"visual_by_contrast": {}, "auditory_by_type": {}}
 
-    st.markdown("**Passive Visual (By Contrast)**")
-    passive_visual_events = passive_replay.get("visual_by_contrast", {})
-    if passive_visual_events:
-        fig_passive_visual = plot_single_neuron_passive_visual_plotly(
-            spikes,
-            cluster_ids,
-            cluster_acronyms,
-            plot_config,
-            selected_cluster_id,
-            passive_visual_events,
-            title="Passive Visual Response",
-        )
-        st.plotly_chart(fig_passive_visual, width="stretch")
-    elif task_replay_visual is False:
-        st.info("Passive visual replay is not available for this PID.")
-    else:
-        st.info("Passive visual replay events are unavailable for this PID.")
+    col_passive_visual, col_passive_auditory = st.columns(2)
+    with col_passive_visual:
+        st.markdown("**Passive Visual (By Contrast)**")
+        passive_visual_events = passive_replay.get("visual_by_contrast", {})
+        if passive_visual_events:
+            fig_passive_visual = plot_single_neuron_passive_visual_plotly(
+                spikes,
+                cluster_ids,
+                cluster_acronyms,
+                plot_config,
+                selected_cluster_id_local,
+                passive_visual_events,
+                title="Passive Visual Response",
+            )
+            st.plotly_chart(fig_passive_visual, width="stretch")
+        elif task_replay_visual is False:
+            st.info("Passive visual replay is not available for this PID.")
+        else:
+            st.info("Passive visual replay events are unavailable for this PID.")
 
-    st.markdown("**Passive Auditory (Valve vs Tone vs Noise)**")
-    passive_auditory_events = passive_replay.get("auditory_by_type", {})
-    if passive_auditory_events:
-        fig_passive_auditory = plot_single_neuron_passive_auditory_plotly(
-            spikes,
-            cluster_ids,
-            cluster_acronyms,
-            plot_config,
-            selected_cluster_id,
-            passive_auditory_events,
-            title="Passive Auditory Response (Valve vs Tone vs Noise)",
-        )
-        st.plotly_chart(fig_passive_auditory, width="stretch")
-    elif task_replay_auditory is False:
-        st.info("Passive auditory replay is not available for this PID.")
-    else:
-        st.info("Passive auditory replay events are unavailable for this PID.")
+    with col_passive_auditory:
+        st.markdown("**Passive Auditory (Valve vs Tone vs Noise)**")
+        passive_auditory_events = passive_replay.get("auditory_by_type", {})
+        if passive_auditory_events:
+            fig_passive_auditory = plot_single_neuron_passive_auditory_plotly(
+                spikes,
+                cluster_ids,
+                cluster_acronyms,
+                plot_config,
+                selected_cluster_id_local,
+                passive_auditory_events,
+                title="Passive Auditory Response (Valve vs Tone vs Noise)",
+            )
+            st.plotly_chart(fig_passive_auditory, width="stretch")
+        elif task_replay_auditory is False:
+            st.info("Passive auditory replay is not available for this PID.")
+        else:
+            st.info("Passive auditory replay events are unavailable for this PID.")
 
     col_task, col_spont, col_iti = st.columns(3)
     with col_task:
-        st.markdown("**Task stPR (Odd vs Even Trials)**")
+        st.markdown("**Task Coupling (Odd vs Even Trials)**")
         fig_task_curve = plot_stpr_curve_halves_plotly(
             df_coupling_task_plot,
             config_calc,
-            selected_cluster_id,
-            title="Task stPR Curve (Odd vs Even Trials)",
+            selected_cluster_id_local,
+            title="Task Coupling Curve (Odd vs Even Trials)",
             template=plot_config["PLOTLY_TEMPLATE"],
             split_suffixes=("odd", "even"),
             split_labels=("Odd trials", "Even trials"),
         )
         st.plotly_chart(fig_task_curve, width="stretch")
     with col_spont:
-        st.markdown("**Spont stPR (First vs Second Half)**")
+        st.markdown("**Spont Coupling (First vs Second Half)**")
         fig_spont_curve = plot_stpr_curve_halves_plotly(
             df_coupling_plot,
             config_calc,
-            selected_cluster_id,
-            title="Spont stPR Curve (First vs Second Half)",
+            selected_cluster_id_local,
+            title="Spont Coupling Curve (First vs Second Half)",
             template=plot_config["PLOTLY_TEMPLATE"],
         )
         st.plotly_chart(fig_spont_curve, width="stretch")
     with col_iti:
-        st.markdown("**ITI stPR (Odd vs Even Trials)**")
+        st.markdown("**ITI Coupling (Odd vs Even Trials)**")
         fig_iti_curve = plot_stpr_curve_halves_plotly(
             df_coupling_iti_plot,
             config_calc,
-            selected_cluster_id,
-            title="ITI stPR Curve (Odd vs Even Trials)",
+            selected_cluster_id_local,
+            title="ITI Coupling Curve (Odd vs Even Trials)",
             template=plot_config["PLOTLY_TEMPLATE"],
             split_suffixes=("odd", "even"),
             split_labels=("Odd trials", "Even trials"),
         )
         st.plotly_chart(fig_iti_curve, width="stretch")
 
-    st.markdown("**stPR Mean Curves (Task vs Spont vs ITI)**")
+    st.markdown("**Coupling Mean Curves (Task vs Spont vs ITI)**")
     fig_stpr_mean = _plot_stpr_mean_comparison(
         df_coupling_plot,
         df_coupling_task_plot,
         df_coupling_iti_plot,
         config_calc,
-        selected_cluster_id,
+        selected_cluster_id_local,
         plot_config["PLOTLY_TEMPLATE"],
     )
     st.plotly_chart(fig_stpr_mean, width="stretch")
+
+
+if hasattr(st, "fragment"):
+    _render_single_neuron_section = st.fragment(_render_single_neuron_section)
+_render_single_neuron_section()

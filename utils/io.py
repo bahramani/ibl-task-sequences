@@ -498,3 +498,339 @@ def build_passive_event_times(visual_tr=None, auditory_tr=None):
         events["passive_noise"] = np.asarray(auditory_events["noise"], dtype=float)
 
     return events
+
+
+def _coerce_passive_base_obj(tr_obj):
+    if tr_obj is None:
+        return None
+    base_obj = tr_obj
+    if isinstance(tr_obj, dict) and "table" in tr_obj:
+        base_obj = tr_obj["table"]
+    elif isinstance(tr_obj, (list, tuple)):
+        if len(tr_obj) == 1:
+            base_obj = tr_obj[0]
+        elif len(tr_obj) > 1:
+            preferred = None
+            for item in tr_obj:
+                if isinstance(item, pd.DataFrame) and "start" in item.columns:
+                    preferred = item
+                    break
+                if hasattr(item, "dtype") and getattr(item.dtype, "names", None):
+                    if "start" in set(item.dtype.names):
+                        preferred = item
+                        break
+            base_obj = preferred if preferred is not None else tr_obj[0]
+    return base_obj
+
+
+def extract_passive_visual_times_contrast_side(tr_obj):
+    """
+    Return passive visual event times with absolute contrast and inferred side.
+
+    Output side values are one of: ``left``, ``right``, ``unknown``.
+    """
+    times, contrasts = extract_passive_times_and_contrast(tr_obj)
+    if times is None or contrasts is None:
+        return (
+            np.array([], dtype=float),
+            np.array([], dtype=float),
+            np.array([], dtype=object),
+        )
+
+    times = np.asarray(times, dtype=float).reshape(-1)
+    contrasts = np.asarray(contrasts, dtype=float).reshape(-1)
+    if contrasts.shape[0] != times.shape[0]:
+        if contrasts.size == 1 and times.size > 0:
+            contrasts = np.full(times.shape[0], float(contrasts.ravel()[0]), dtype=float)
+        else:
+            contrasts = np.ones_like(times, dtype=float)
+
+    side = np.full(times.shape[0], "unknown", dtype=object)
+    base_obj = _coerce_passive_base_obj(tr_obj)
+    contrast_left = _extract_tr_field(
+        base_obj,
+        keys=("contrastLeft",),
+        suffixes=(".contrastLeft", "contrastLeft"),
+    )
+    contrast_right = _extract_tr_field(
+        base_obj,
+        keys=("contrastRight",),
+        suffixes=(".contrastRight", "contrastRight"),
+    )
+
+    left_arr = None
+    right_arr = None
+    if contrast_left is not None:
+        left_arr = np.asarray(contrast_left, dtype=float).reshape(-1)
+    if contrast_right is not None:
+        right_arr = np.asarray(contrast_right, dtype=float).reshape(-1)
+
+    if left_arr is not None or right_arr is not None:
+        if left_arr is None and right_arr is not None:
+            left_arr = np.full(right_arr.shape[0], np.nan, dtype=float)
+        if right_arr is None and left_arr is not None:
+            right_arr = np.full(left_arr.shape[0], np.nan, dtype=float)
+        if (
+            left_arr is not None
+            and right_arr is not None
+            and left_arr.shape[0] == times.shape[0]
+        ):
+            left_abs = np.abs(left_arr)
+            right_abs = np.abs(right_arr)
+            left_on = np.isfinite(left_abs) & (left_abs > 0)
+            right_on = np.isfinite(right_abs) & (right_abs > 0)
+            side[left_on & ~right_on] = "left"
+            side[right_on & ~left_on] = "right"
+            both_on = left_on & right_on
+            side[both_on & (left_abs > right_abs)] = "left"
+            side[both_on & (right_abs > left_abs)] = "right"
+
+    if not np.any((side == "left") | (side == "right")):
+        side_hint = _extract_tr_field(
+            base_obj,
+            keys=(
+                "position",
+                "stim_position",
+                "stimPos",
+                "azimuth",
+                "side",
+                "stim_side",
+                "stimSide",
+                "is_right",
+                "isRight",
+            ),
+            suffixes=(
+                ".position",
+                "position",
+                ".azimuth",
+                "azimuth",
+                ".side",
+                "side",
+                ".stim_side",
+                "stim_side",
+            ),
+        )
+        if side_hint is not None:
+            side_hint = np.asarray(side_hint).reshape(-1)
+            if side_hint.shape[0] == times.shape[0]:
+                if np.issubdtype(side_hint.dtype, np.number):
+                    side_hint_num = side_hint.astype(float)
+                    side[side_hint_num < 0] = "left"
+                    side[side_hint_num > 0] = "right"
+                else:
+                    side_hint_str = pd.Series(side_hint).astype(str).str.lower().to_numpy()
+                    right_mask = (
+                        (side_hint_str == "right")
+                        | (side_hint_str == "r")
+                        | (side_hint_str == "1")
+                        | (side_hint_str == "true")
+                    )
+                    left_mask = (
+                        (side_hint_str == "left")
+                        | (side_hint_str == "l")
+                        | (side_hint_str == "-1")
+                        | (side_hint_str == "false")
+                    )
+                    side[left_mask] = "left"
+                    side[right_mask] = "right"
+
+    if not np.any((side == "left") | (side == "right")):
+        signed_mask = np.isfinite(contrasts)
+        if np.any(contrasts[signed_mask] < 0) and np.any(contrasts[signed_mask] > 0):
+            side[contrasts < 0] = "left"
+            side[contrasts > 0] = "right"
+
+    contrast_abs = np.abs(contrasts)
+    finite_mask = np.isfinite(times) & np.isfinite(contrast_abs)
+    return times[finite_mask], contrast_abs[finite_mask], side[finite_mask]
+
+
+def top_nonzero_contrasts(values, top_n=2, round_decimals=6):
+    vals = np.asarray(values, dtype=float).reshape(-1)
+    vals = vals[np.isfinite(vals) & (vals > 0)]
+    if vals.size == 0:
+        return np.array([], dtype=float)
+    vals = np.round(vals, int(round_decimals))
+    unique_vals = np.unique(vals.astype(float))
+    unique_vals = np.sort(unique_vals)[::-1]
+    return unique_vals[: int(top_n)]
+
+
+def select_task_stim_events_by_side(sl, top_n=2, round_decimals=6):
+    """
+    Build task Stim-On subsets used in dashboard heatmaps.
+
+    Returns keys:
+    - ``task_all_right_times`` / ``task_all_left_times``
+    - ``task_top2_right_times`` / ``task_top2_left_times``
+    - ``task_zero_lr_times``
+    and matching ``*_values`` arrays for contrast summaries.
+    """
+    trials = getattr(sl, "trials", None)
+    if trials is None:
+        return {
+            "task_all_right_times": np.array([], dtype=float),
+            "task_all_left_times": np.array([], dtype=float),
+            "task_top2_right_times": np.array([], dtype=float),
+            "task_top2_left_times": np.array([], dtype=float),
+            "task_zero_lr_times": np.array([], dtype=float),
+            "task_all_right_values": np.array([], dtype=float),
+            "task_all_left_values": np.array([], dtype=float),
+            "task_top2_right_values": np.array([], dtype=float),
+            "task_top2_left_values": np.array([], dtype=float),
+        }
+
+    stim_times = np.asarray(trials["stimOn_times"], dtype=float).reshape(-1)
+    contrast_left = np.asarray(trials["contrastLeft"], dtype=float).reshape(-1)
+    contrast_right = np.asarray(trials["contrastRight"], dtype=float).reshape(-1)
+    if (
+        stim_times.shape[0] != contrast_left.shape[0]
+        or stim_times.shape[0] != contrast_right.shape[0]
+    ):
+        return {
+            "task_all_right_times": np.array([], dtype=float),
+            "task_all_left_times": np.array([], dtype=float),
+            "task_top2_right_times": np.array([], dtype=float),
+            "task_top2_left_times": np.array([], dtype=float),
+            "task_zero_lr_times": np.array([], dtype=float),
+            "task_all_right_values": np.array([], dtype=float),
+            "task_all_left_values": np.array([], dtype=float),
+            "task_top2_right_values": np.array([], dtype=float),
+            "task_top2_left_values": np.array([], dtype=float),
+        }
+
+    left_abs = np.abs(contrast_left)
+    right_abs = np.abs(contrast_right)
+    stim_valid = np.isfinite(stim_times)
+    left_pos = np.isfinite(left_abs) & (left_abs > 0)
+    right_pos = np.isfinite(right_abs) & (right_abs > 0)
+    left_only = left_pos & (~right_pos)
+    right_only = right_pos & (~left_pos)
+    both_pos = left_pos & right_pos
+    left_only = left_only | (both_pos & (left_abs > right_abs))
+    right_only = right_only | (both_pos & (right_abs > left_abs))
+
+    tol = 10.0 ** (-int(round_decimals))
+    left_zero = np.isfinite(left_abs) & np.isclose(left_abs, 0.0, atol=tol)
+    right_zero = np.isfinite(right_abs) & np.isclose(right_abs, 0.0, atol=tol)
+    left_missing = ~np.isfinite(contrast_left)
+    right_missing = ~np.isfinite(contrast_right)
+    all_right_mask = right_only & stim_valid
+    all_left_mask = left_only & stim_valid
+    all_right_vals = np.unique(np.round(right_abs[all_right_mask], int(round_decimals)))
+    all_left_vals = np.unique(np.round(left_abs[all_left_mask], int(round_decimals)))
+    all_right_vals = np.sort(all_right_vals)[::-1]
+    all_left_vals = np.sort(all_left_vals)[::-1]
+
+    right_top_vals = top_nonzero_contrasts(
+        right_abs[right_only],
+        top_n=top_n,
+        round_decimals=round_decimals,
+    )
+    left_top_vals = top_nonzero_contrasts(
+        left_abs[left_only],
+        top_n=top_n,
+        round_decimals=round_decimals,
+    )
+
+    right_top_mask = np.zeros_like(stim_valid, dtype=bool)
+    for val in right_top_vals:
+        right_top_mask |= np.isclose(right_abs, float(val), atol=tol)
+    right_top_mask &= right_only & stim_valid
+
+    left_top_mask = np.zeros_like(stim_valid, dtype=bool)
+    for val in left_top_vals:
+        left_top_mask |= np.isclose(left_abs, float(val), atol=tol)
+    left_top_mask &= left_only & stim_valid
+
+    zero_left_trials = left_zero & (right_missing | right_zero)
+    zero_right_trials = right_zero & (left_missing | left_zero)
+    zero_mask = stim_valid & (zero_left_trials | zero_right_trials)
+
+    return {
+        "task_all_right_times": np.sort(stim_times[all_right_mask]),
+        "task_all_left_times": np.sort(stim_times[all_left_mask]),
+        "task_top2_right_times": np.sort(stim_times[right_top_mask]),
+        "task_top2_left_times": np.sort(stim_times[left_top_mask]),
+        "task_zero_lr_times": np.sort(stim_times[zero_mask]),
+        "task_all_right_values": all_right_vals,
+        "task_all_left_values": all_left_vals,
+        "task_top2_right_values": right_top_vals,
+        "task_top2_left_values": left_top_vals,
+    }
+
+
+def select_passive_visual_events_by_side(visual_tr, top_n=2, round_decimals=6):
+    """
+    Select passive visual top-contrast events split by side.
+    """
+    times, contrasts, sides = extract_passive_visual_times_contrast_side(visual_tr)
+    if times.size == 0:
+        return {
+            "passive_top2_right_times": np.array([], dtype=float),
+            "passive_top2_left_times": np.array([], dtype=float),
+            "passive_top2_right_values": np.array([], dtype=float),
+            "passive_top2_left_values": np.array([], dtype=float),
+        }
+
+    finite_nonzero = np.isfinite(times) & np.isfinite(contrasts) & (contrasts > 0)
+    times = times[finite_nonzero]
+    contrasts = contrasts[finite_nonzero]
+    sides = np.asarray(sides, dtype=object)[finite_nonzero]
+
+    right_mask = sides == "right"
+    left_mask = sides == "left"
+    right_top_vals = top_nonzero_contrasts(
+        contrasts[right_mask],
+        top_n=top_n,
+        round_decimals=round_decimals,
+    )
+    left_top_vals = top_nonzero_contrasts(
+        contrasts[left_mask],
+        top_n=top_n,
+        round_decimals=round_decimals,
+    )
+
+    tol = 10.0 ** (-int(round_decimals))
+    right_top_mask = np.zeros_like(right_mask, dtype=bool)
+    for val in right_top_vals:
+        right_top_mask |= np.isclose(contrasts, float(val), atol=tol)
+    right_top_mask &= right_mask
+
+    left_top_mask = np.zeros_like(left_mask, dtype=bool)
+    for val in left_top_vals:
+        left_top_mask |= np.isclose(contrasts, float(val), atol=tol)
+    left_top_mask &= left_mask
+
+    return {
+        "passive_top2_right_times": np.sort(times[right_top_mask]),
+        "passive_top2_left_times": np.sort(times[left_top_mask]),
+        "passive_top2_right_values": right_top_vals,
+        "passive_top2_left_values": left_top_vals,
+    }
+
+
+def build_passive_event_wrappers(visual_tr=None, auditory_tr=None, top_n=2, round_decimals=6):
+    """
+    Return consolidated passive event groups for dashboard calculation/rendering.
+    """
+    visual_top = select_passive_visual_events_by_side(
+        visual_tr,
+        top_n=top_n,
+        round_decimals=round_decimals,
+    )
+    auditory = build_passive_auditory_event_times(auditory_tr)
+    out = {
+        "passive_visual_top2_right_times": np.asarray(
+            visual_top.get("passive_top2_right_times", np.array([])),
+            dtype=float,
+        ),
+        "passive_visual_top2_left_times": np.asarray(
+            visual_top.get("passive_top2_left_times", np.array([])),
+            dtype=float,
+        ),
+        "passive_tone_times": np.asarray(auditory.get("tone", np.array([])), dtype=float),
+        "passive_valve_times": np.asarray(auditory.get("valve", np.array([])), dtype=float),
+        "passive_noise_times": np.asarray(auditory.get("noise", np.array([])), dtype=float),
+    }
+    return out

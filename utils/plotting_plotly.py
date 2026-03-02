@@ -618,21 +618,21 @@ def _merge_metric(
                 df_units,
                 df_coupling,
                 ["coupling_strength", "coupling_strength_h1", "coupling_strength_h2"],
-                "stPR Strength (Spont)",
+                "Coupling Strength (Spont)",
             )
         if "task" in metric_key:
             return _merge_coupling_metric(
                 df_units,
                 df_coupling_task,
                 ["coupling_strength", "coupling_strength_odd", "coupling_strength_even"],
-                "stPR Strength (Task)",
+                "Coupling Strength (Task)",
             )
         if "iti" in metric_key:
             return _merge_coupling_metric(
                 df_units,
                 df_coupling_iti,
                 ["coupling_strength", "coupling_strength_odd", "coupling_strength_even"],
-                "stPR Strength (ITI)",
+                "Coupling Strength (ITI)",
             )
 
     if "max" in metric_key:
@@ -641,25 +641,25 @@ def _merge_metric(
                 df_units,
                 df_coupling,
                 ["coupling_max", "coupling_max_h1", "coupling_max_h2"],
-                "stPR Max (Spont)",
+                "Coupling Max (Spont)",
             )
         if "task" in metric_key:
             return _merge_coupling_metric(
                 df_units,
                 df_coupling_task,
                 ["coupling_max", "coupling_max_odd", "coupling_max_even"],
-                "stPR Max (Task)",
+                "Coupling Max (Task)",
             )
         if "iti" in metric_key:
             return _merge_coupling_metric(
                 df_units,
                 df_coupling_iti,
                 ["coupling_max", "coupling_max_odd", "coupling_max_even"],
-                "stPR Max (ITI)",
+                "Coupling Max (ITI)",
             )
 
     if "spont" in metric_key:
-        sort_label = "stPR Delay (Spont)"
+        sort_label = "Coupling Delay (Spont)"
         if df_coupling is not None:
             if "sorting_number" in df_coupling.columns:
                 df_units = df_units.merge(
@@ -686,7 +686,7 @@ def _merge_metric(
         return df_units, sort_label
 
     if "task" in metric_key:
-        sort_label = "stPR Delay (Task)"
+        sort_label = "Coupling Delay (Task)"
         if df_coupling_task is not None:
             if "sorting_number" in df_coupling_task.columns:
                 df_units = df_units.merge(
@@ -713,7 +713,7 @@ def _merge_metric(
         return df_units, sort_label
 
     if "iti" in metric_key:
-        sort_label = "stPR Delay (ITI)"
+        sort_label = "Coupling Delay (ITI)"
         if df_coupling_iti is not None:
             if "sorting_number" in df_coupling_iti.columns:
                 df_units = df_units.merge(
@@ -1461,8 +1461,8 @@ def plot_single_neuron_plotly(
             col=col_idx,
         )
 
-        fig.add_vline(x=0, line=dict(color="black", dash="dash"), row=1, col=col_idx)
-        fig.add_vline(x=0, line=dict(color="black", dash="dash"), row=2, col=col_idx)
+        fig.add_vline(x=0, line=dict(color="#555555", dash="dot"), row=1, col=col_idx)
+        fig.add_vline(x=0, line=dict(color="#555555", dash="dot"), row=2, col=col_idx)
         fig.update_xaxes(range=[-raster_pre, raster_post], row=1, col=col_idx)
         fig.update_xaxes(range=[-raster_pre, raster_post], row=2, col=col_idx)
         fig.update_yaxes(title_text="Firing Rate (Hz)", row=1, col=col_idx)
@@ -1506,7 +1506,7 @@ def plot_single_neuron_plotly(
 
         fig.add_vline(
             x=0,
-            line=dict(color="blue", dash="dash"),
+            line=dict(color="#555555", dash="dot"),
             row=3,
             col=1,
         )
@@ -1686,8 +1686,8 @@ def plot_single_neuron_conditioned_event_plotly(
         col=1,
     )
 
-    fig.add_vline(x=0, line=dict(color="black", dash="dash"), row=1, col=1)
-    fig.add_vline(x=0, line=dict(color="black", dash="dash"), row=2, col=1)
+    fig.add_vline(x=0, line=dict(color="#555555", dash="dot"), row=1, col=1)
+    fig.add_vline(x=0, line=dict(color="#555555", dash="dot"), row=2, col=1)
     fig.update_xaxes(range=[-raster_pre, raster_post], row=1, col=1)
     fig.update_xaxes(range=[-raster_pre, raster_post], row=2, col=1)
     fig.update_yaxes(title_text="Firing Rate (Hz)", row=1, col=1)
@@ -1748,7 +1748,7 @@ def plot_single_neuron_conditioned_event_plotly(
 
         fig.add_vline(
             x=0,
-            line=dict(color="blue", dash="dash"),
+            line=dict(color="#555555", dash="dot"),
             row=3,
             col=1,
         )
@@ -1950,8 +1950,8 @@ def plot_single_neuron_event_groups_plotly(
         col=1,
     )
 
-    fig.add_vline(x=0, line=dict(color="black", dash="dash"), row=1, col=1)
-    fig.add_vline(x=0, line=dict(color="black", dash="dash"), row=2, col=1)
+    fig.add_vline(x=0, line=dict(color="#555555", dash="dot"), row=1, col=1)
+    fig.add_vline(x=0, line=dict(color="#555555", dash="dot"), row=2, col=1)
     fig.update_xaxes(range=[-raster_pre, raster_post], row=1, col=1)
     fig.update_xaxes(range=[-raster_pre, raster_post], row=2, col=1)
     fig.update_xaxes(range=[-raster_pre, raster_post], row=3, col=1)
@@ -1977,7 +1977,7 @@ def plot_single_neuron_event_groups_plotly(
         )
         fig.add_vline(
             x=0,
-            line=dict(color="blue", dash="dash"),
+            line=dict(color="#555555", dash="dot"),
             row=3,
             col=1,
         )
@@ -2142,7 +2142,7 @@ def plot_stpr_curve_halves_plotly(
     split_suffixes=None,
     split_labels=None,
 ):
-    """Plot stPR curves for two splits (defaults to first/second half)."""
+    """Plot Coupling curves for two splits (defaults to first/second half)."""
     fig = go.Figure()
     if template is None:
         template, base_color = _white_theme()
@@ -2152,7 +2152,7 @@ def plot_stpr_curve_halves_plotly(
     if df_coupling is None or len(df_coupling) == 0:
         fig.add_annotation(text="No coupling data available", showarrow=False)
         fig.update_layout(
-            title=title or "stPR Curves (First vs Second Half)",
+            title=title or "Coupling Curves (First vs Second Half)",
             template=template,
             font=dict(color=base_color, size=13),
             width=900,
@@ -2166,7 +2166,7 @@ def plot_stpr_curve_halves_plotly(
     if match.empty:
         fig.add_annotation(text="Selected neuron not found in coupling data", showarrow=False)
         fig.update_layout(
-            title=title or "stPR Curves (First vs Second Half)",
+            title=title or "Coupling Curves (First vs Second Half)",
             template=template,
             font=dict(color=base_color, size=13),
             width=900,
@@ -2188,9 +2188,9 @@ def plot_stpr_curve_halves_plotly(
         label_b = ""
 
     if curve_a.size == 0 and curve_b.size == 0:
-        fig.add_annotation(text="No stPR curve data available", showarrow=False)
+        fig.add_annotation(text="No Coupling curve data available", showarrow=False)
         fig.update_layout(
-            title=title or "stPR Curves (First vs Second Half)",
+            title=title or "Coupling Curves (First vs Second Half)",
             template=template,
             font=dict(color=base_color, size=13),
             width=900,
@@ -2234,9 +2234,9 @@ def plot_stpr_curve_halves_plotly(
     fig.add_vline(x=0, line=dict(color="gray", dash="dot"))
 
     fig.update_layout(
-        title=title or "stPR Curves (First vs Second Half)",
+        title=title or "Coupling Curves (First vs Second Half)",
         xaxis_title="Lag (ms)",
-        yaxis_title="stPR (z)",
+        yaxis_title="Coupling (z)",
         template=template,
         font=dict(color=base_color, size=13),
         width=900,
@@ -2887,6 +2887,7 @@ def plot_population_sorted_plotly(
         and pop_zmax is not None
         and pop_zmax > pop_zmin
     )
+    show_heatmap_colorbar = bool(config_plot.get("HEATMAP_SHOW_COLORBAR", True))
 
     trials = _get_session_field(sl, "trials")
     if trials is None:
@@ -3067,7 +3068,7 @@ def plot_population_sorted_plotly(
                 df_region,
                 df_coupling,
                 ["coupling_strength", "coupling_strength_h1", "coupling_strength_h2"],
-                "stPR Strength (Spont)",
+                "Coupling Strength (Spont)",
                 ascending=sort_ascending,
             )
             if sorted_result is None:
@@ -3082,7 +3083,7 @@ def plot_population_sorted_plotly(
                 df_region,
                 df_coupling,
                 ["coupling_max", "coupling_max_h1", "coupling_max_h2"],
-                "stPR Max (Spont)",
+                "Coupling Max (Spont)",
                 ascending=sort_ascending,
             )
             if sorted_result is None:
@@ -3097,7 +3098,7 @@ def plot_population_sorted_plotly(
                 df_region,
                 df_coupling_task,
                 ["coupling_strength", "coupling_strength_odd", "coupling_strength_even"],
-                "stPR Strength (Task)",
+                "Coupling Strength (Task)",
                 ascending=sort_ascending,
             )
             if sorted_result is None:
@@ -3112,7 +3113,7 @@ def plot_population_sorted_plotly(
                 df_region,
                 df_coupling_task,
                 ["coupling_max", "coupling_max_odd", "coupling_max_even"],
-                "stPR Max (Task)",
+                "Coupling Max (Task)",
                 ascending=sort_ascending,
             )
             if sorted_result is None:
@@ -3127,7 +3128,7 @@ def plot_population_sorted_plotly(
                 df_region,
                 df_coupling_iti,
                 ["coupling_strength", "coupling_strength_odd", "coupling_strength_even"],
-                "stPR Strength (ITI)",
+                "Coupling Strength (ITI)",
                 ascending=sort_ascending,
             )
             if sorted_result is None:
@@ -3142,7 +3143,7 @@ def plot_population_sorted_plotly(
                 df_region,
                 df_coupling_iti,
                 ["coupling_max", "coupling_max_odd", "coupling_max_even"],
-                "stPR Max (ITI)",
+                "Coupling Max (ITI)",
                 ascending=sort_ascending,
             )
             if sorted_result is None:
@@ -3182,8 +3183,12 @@ def plot_population_sorted_plotly(
             )
             sort_label = delay_sort_label
 
-        should_split_groups = split_arousal_whisk and (
+        should_split_groups = (
+            split_arousal_whisk
+            and str(sort_mode).strip().lower() != "depth"
+            and (
             str(align_event).startswith("wh_") or split_group_any_event
+            )
         )
         if should_split_groups:
             df_sorted = df_sorted.copy()
@@ -3334,11 +3339,16 @@ def plot_population_sorted_plotly(
             else:
                 row_cluster_ids.append(str(cid))
 
-        show_scale = row_idx == 1
+        show_scale = show_heatmap_colorbar and row_idx == 1
+        customdata_matrix = np.asarray(row_cluster_ids, dtype=object).reshape(-1, 1)
+        if n_bins > 1:
+            customdata_matrix = np.repeat(customdata_matrix, n_bins, axis=1)
         heatmap_kwargs = dict(
             z=psth_matrix,
             x=bin_centers,
             y=np.arange(n_neurons),
+            customdata=customdata_matrix,
+            hovertemplate="Cluster ID: %{customdata}<extra></extra>",
             colorscale=cmap_name,
             meta=dict(
                 row_cluster_ids=row_cluster_ids,
@@ -3445,6 +3455,677 @@ def plot_population_sorted_plotly(
     )
 
     return fig
+
+
+def _extract_event_times_from_session(event_session, event_name):
+    if not isinstance(event_session, dict):
+        return np.array([], dtype=float)
+    trials_obj = event_session.get("trials", {})
+    if isinstance(trials_obj, dict):
+        arr = np.asarray(trials_obj.get(event_name, np.array([])), dtype=float).reshape(-1)
+    else:
+        try:
+            arr = np.asarray(trials_obj[event_name], dtype=float).reshape(-1)
+        except Exception:
+            arr = np.array([], dtype=float)
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return np.array([], dtype=float)
+    return np.sort(arr)
+
+
+def _compute_event_locked_whisk_mean(whisk_df, event_times, x_axis):
+    x_axis = np.asarray(x_axis, dtype=float).reshape(-1)
+    if x_axis.size == 0:
+        return np.array([], dtype=float)
+    out = np.full(x_axis.shape, np.nan, dtype=float)
+    if whisk_df is None or not isinstance(whisk_df, pd.DataFrame):
+        return out
+    if "bin_center_s" not in whisk_df.columns or "wh_norm" not in whisk_df.columns:
+        return out
+
+    t_wh = np.asarray(whisk_df["bin_center_s"], dtype=float).reshape(-1)
+    v_wh = np.asarray(whisk_df["wh_norm"], dtype=float).reshape(-1)
+    keep = np.isfinite(t_wh) & np.isfinite(v_wh)
+    t_wh = t_wh[keep]
+    v_wh = v_wh[keep]
+    if t_wh.size < 2:
+        return out
+    order = np.argsort(t_wh)
+    t_wh = t_wh[order]
+    v_wh = v_wh[order]
+
+    event_times = np.asarray(event_times, dtype=float).reshape(-1)
+    event_times = event_times[np.isfinite(event_times)]
+    if event_times.size == 0:
+        return out
+
+    aligned = []
+    for t_ev in event_times:
+        x_query = x_axis + float(t_ev)
+        vals = np.interp(x_query, t_wh, v_wh, left=np.nan, right=np.nan)
+        aligned.append(vals)
+    if len(aligned) == 0:
+        return out
+    return np.nanmean(np.vstack(aligned), axis=0)
+
+
+def plot_whisking_overview_plotly(
+    df_wh,
+    wh_detect=None,
+    wh_event_base=None,
+    config_calc=None,
+    t_start=None,
+    t_end=None,
+    template=None,
+    view_curves=None,
+):
+    """
+    Plot whisking overview (11-style) from precomputed whisk artifacts.
+    """
+    wh_detect = wh_detect or {}
+    wh_event_base = wh_event_base or {}
+    config_calc = config_calc or {}
+    template = template or DEFAULT_TEMPLATE
+
+    fig = go.Figure()
+    if not isinstance(df_wh, pd.DataFrame) or df_wh.empty:
+        fig.add_annotation(text="Whisking trace unavailable", showarrow=False)
+        fig.update_layout(
+            title="Whisking",
+            xaxis_title="Time in session (s)",
+            yaxis_title="Normalized whisk signal",
+            template=template,
+            height=380,
+        )
+        return fig
+
+    mean_x = np.asarray(df_wh.get("bin_center_s", np.array([])), dtype=float)
+    mean_y = np.asarray(df_wh.get("wh_norm", np.array([])), dtype=float)
+    finite = np.isfinite(mean_x) & np.isfinite(mean_y)
+    mean_x = mean_x[finite]
+    mean_y = mean_y[finite]
+    if mean_x.size == 0:
+        fig.add_annotation(text="Whisking trace unavailable", showarrow=False)
+        fig.update_layout(template=template, height=380)
+        return fig
+
+    x_min = float(np.nanmin(mean_x))
+    x_max = float(np.nanmax(mean_x))
+    if t_start is None:
+        t_start = x_min
+    if t_end is None:
+        t_end = x_max
+    t_start = float(np.clip(float(t_start), x_min, x_max))
+    t_end = float(np.clip(float(t_end), x_min, x_max))
+    if t_end <= t_start:
+        t_start, t_end = x_min, x_max
+
+    if isinstance(view_curves, dict):
+        for view_name, vals in view_curves.items():
+            if not isinstance(vals, (list, tuple)) or len(vals) != 2:
+                continue
+            x_vals = np.asarray(vals[0], dtype=float)
+            y_vals = np.asarray(vals[1], dtype=float)
+            mask = (
+                np.isfinite(x_vals)
+                & np.isfinite(y_vals)
+                & (x_vals >= t_start)
+                & (x_vals <= t_end)
+            )
+            if not np.any(mask):
+                continue
+            fig.add_trace(
+                go.Scatter(
+                    x=x_vals[mask],
+                    y=y_vals[mask],
+                    mode="lines",
+                    line=dict(width=1.0, dash="dash"),
+                    opacity=0.7,
+                    name=str(view_name),
+                )
+            )
+
+    mask = (mean_x >= t_start) & (mean_x <= t_end)
+    fig.add_trace(
+        go.Scatter(
+            x=mean_x[mask],
+            y=mean_y[mask],
+            mode="lines",
+            line=dict(color="#ff7f0e", width=2.2),
+            name="Mean whisk",
+        )
+    )
+
+    for x0, x1 in np.asarray(wh_detect.get("brief_bouts", np.empty((0, 2))), dtype=float):
+        x0 = float(x0)
+        x1 = float(x1)
+        if x1 < t_start or x0 > t_end:
+            continue
+        fig.add_vrect(
+            x0=max(x0, t_start),
+            x1=min(x1, t_end),
+            fillcolor="rgba(23,190,207,0.20)",
+            line_width=0,
+            layer="below",
+        )
+    for x0, x1 in np.asarray(wh_detect.get("long_bouts", np.empty((0, 2))), dtype=float):
+        x0 = float(x0)
+        x1 = float(x1)
+        if x1 < t_start or x0 > t_end:
+            continue
+        fig.add_vrect(
+            x0=max(x0, t_start),
+            x1=min(x1, t_end),
+            fillcolor="rgba(214,39,40,0.17)",
+            line_width=0,
+            layer="below",
+        )
+    for t_on in np.asarray(wh_event_base.get("wh_brief_times", np.array([])), dtype=float):
+        t_on = float(t_on)
+        if t_start <= t_on <= t_end:
+            fig.add_vline(x=t_on, line=dict(color="#17becf", dash="dot", width=1.1))
+    for t_on in np.asarray(wh_event_base.get("wh_long_times", np.array([])), dtype=float):
+        t_on = float(t_on)
+        if t_start <= t_on <= t_end:
+            fig.add_vline(x=t_on, line=dict(color="#d62728", dash="dash", width=1.1))
+    for t_on in np.asarray(wh_event_base.get("wh_all_times_loco", np.array([])), dtype=float):
+        t_on = float(t_on)
+        if t_start <= t_on <= t_end:
+            fig.add_vline(x=t_on, line=dict(color="#9467bd", dash="dashdot", width=1.2))
+
+    start_thr = float(config_calc.get("WH_START_THR", 0.10))
+    end_thr = float(config_calc.get("WH_END_THR", 0.04))
+    fig.add_trace(
+        go.Scatter(
+            x=[t_start, t_end],
+            y=[start_thr, start_thr],
+            mode="lines",
+            line=dict(color="#2ca02c", dash="dot", width=1.5),
+            name=f"Start threshold ({start_thr:.2f})",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=[t_start, t_end],
+            y=[end_thr, end_thr],
+            mode="lines",
+            line=dict(color="#1f77b4", dash="dash", width=1.5),
+            name=f"End threshold ({end_thr:.2f})",
+        )
+    )
+
+    fig.update_layout(
+        title="Whisking (normalized trace; mean across cameras + brief/long bouts)",
+        xaxis_title="Time in session (s)",
+        yaxis_title="Normalized whisk signal",
+        template=template,
+        height=420,
+        margin=dict(l=70, r=40, t=70, b=120),
+        legend=dict(orientation="h", yanchor="top", y=-0.22, xanchor="left", x=0.0),
+    )
+    fig.update_xaxes(range=[t_start, t_end])
+    fig.update_yaxes(range=[-0.02, 1.05])
+    return fig
+
+
+def plot_multi_event_population_panel_plotly(
+    event_specs,
+    event_sessions,
+    spikes,
+    clusters,
+    plot_cluster_ids,
+    plot_cluster_acronyms,
+    df_res,
+    plot_config,
+    sort_mode,
+    region_name,
+    df_coupling=None,
+    df_coupling_task=None,
+    df_coupling_iti=None,
+    df_firing_rate=None,
+    whisk_df=None,
+):
+    """
+    Render a multi-event response panel (4-column layout with whisk auxiliary rows).
+    """
+    n_events = len(event_specs)
+    n_cols = int(plot_config.get("HEATMAP_PANEL_COLS", 4))
+    n_cols = max(1, n_cols)
+    n_event_rows = int(np.ceil(n_events / n_cols))
+    heatmap_row_weight = float(plot_config.get("HEATMAP_MAIN_ROW_WEIGHT", 0.74))
+    fr_row_weight = float(plot_config.get("HEATMAP_FR_ROW_WEIGHT", 0.16))
+    whisk_row_weight = float(plot_config.get("HEATMAP_WHISK_ROW_WEIGHT", 0.10))
+    panel_vertical_spacing = float(plot_config.get("HEATMAP_VERTICAL_SPACING", 0.07))
+    title_yshift = float(plot_config.get("HEATMAP_TITLE_YSHIFT", 2))
+    no_aux_events = {
+        "stimOn_times",
+        "stimOn_times_task_zero_lr",
+        "firstMovement_times",
+        "feedback_times",
+        "passive_tone_times",
+        "passive_valve_times",
+        "passive_noise_times",
+        "passive_visual_times",
+        "passive_visual_top2_left_times",
+    }
+
+    def _spec_to_tuple(spec):
+        if isinstance(spec, dict):
+            return (
+                str(spec.get("label", "")),
+                spec.get("event_name", None),
+                str(spec.get("summary_type", "")),
+            )
+        if isinstance(spec, (list, tuple)):
+            if len(spec) == 3:
+                return str(spec[0]), spec[1], str(spec[2] or "")
+            if len(spec) >= 2:
+                return str(spec[0]), spec[1], ""
+        return str(spec), None, ""
+
+    parsed_specs = [_spec_to_tuple(spec) for spec in event_specs]
+    panel_row_has_aux = []
+    for panel_row in range(n_event_rows):
+        i0 = panel_row * n_cols
+        i1 = min((panel_row + 1) * n_cols, n_events)
+        has_aux = any(
+            bool(parsed_specs[i][1]) and (str(parsed_specs[i][1]) not in no_aux_events)
+            for i in range(i0, i1)
+        )
+        panel_row_has_aux.append(has_aux)
+
+    row_heights = []
+    panel_row_to_rows = []
+    next_row = 1
+    for panel_row in range(n_event_rows):
+        has_aux = panel_row_has_aux[panel_row]
+        row_heat = next_row
+        next_row += 1
+        if has_aux:
+            row_heights.extend([heatmap_row_weight, fr_row_weight, whisk_row_weight])
+            row_fr = next_row
+            next_row += 1
+            row_wh = next_row
+            next_row += 1
+        else:
+            row_heights.append(heatmap_row_weight)
+            row_fr = None
+            row_wh = None
+        panel_row_to_rows.append((row_heat, row_fr, row_wh))
+    n_rows = next_row - 1
+
+    subplot_titles = [""] * (n_rows * n_cols)
+    for idx, (label, _event_name, _summary_type) in enumerate(parsed_specs):
+        panel_row = idx // n_cols
+        col = idx % n_cols
+        row_heat, _row_fr, _row_wh = panel_row_to_rows[panel_row]
+        title_idx = (row_heat - 1) * n_cols + col
+        if 0 <= title_idx < len(subplot_titles):
+            subplot_titles[title_idx] = str(label)
+
+    subplot_specs = [[{"secondary_y": True} for _ in range(n_cols)] for _ in range(n_rows)]
+    fig_panel = make_subplots(
+        rows=n_rows,
+        cols=n_cols,
+        subplot_titles=subplot_titles,
+        horizontal_spacing=0.06,
+        vertical_spacing=panel_vertical_spacing,
+        row_heights=row_heights,
+        specs=subplot_specs,
+    )
+    if fig_panel.layout.annotations:
+        for ann in fig_panel.layout.annotations:
+            ann.yshift = title_yshift
+            ann.xanchor = "center"
+
+    region_cluster_ids = np.asarray(
+        [
+            cid
+            for cid, reg in zip(plot_cluster_ids, plot_cluster_acronyms)
+            if str(reg) == str(region_name)
+        ]
+    )
+
+    fr_values_region = np.array([], dtype=float)
+    if (
+        df_firing_rate is not None
+        and isinstance(df_firing_rate, pd.DataFrame)
+        and "cluster_id" in df_firing_rate.columns
+    ):
+        fr_col = None
+        for c in ("firing_rate", "firing_rate_h1", "firing_rate_h2"):
+            if c in df_firing_rate.columns:
+                fr_col = c
+                break
+        if fr_col is not None:
+            fr_values_region = (
+                df_firing_rate[df_firing_rate["cluster_id"].isin(region_cluster_ids)][fr_col]
+                .to_numpy(dtype=float)
+            )
+            fr_values_region = fr_values_region[np.isfinite(fr_values_region)]
+
+    arousal_counts = {"arousal_plus": 0, "arousal_minus": 0, "neutral": 0}
+    if (
+        isinstance(df_res, pd.DataFrame)
+        and "cluster_id" in df_res.columns
+        and "arousal_group" in df_res.columns
+    ):
+        df_region_arousal = (
+            df_res.loc[
+                df_res["cluster_id"].isin(region_cluster_ids),
+                ["cluster_id", "arousal_group"],
+            ]
+            .drop_duplicates(subset=["cluster_id"], keep="first")
+            .copy()
+        )
+        if not df_region_arousal.empty:
+            vals = df_region_arousal["arousal_group"].astype(str).str.strip().str.lower()
+            arousal_counts["arousal_plus"] = int((vals == "arousal_plus").sum())
+            arousal_counts["arousal_minus"] = int((vals == "arousal_minus").sum())
+            arousal_counts["neutral"] = int((vals == "neutral").sum())
+
+    whisk_brief_n = 0
+    whisk_long_n = 0
+    for key in ("wh_brief_times_spont", "wh_brief_times"):
+        if key in event_sessions:
+            whisk_brief_n = int(_extract_event_times_from_session(event_sessions[key], key).size)
+            if whisk_brief_n > 0:
+                break
+    for key in ("wh_long_times_spont", "wh_long_times"):
+        if key in event_sessions:
+            whisk_long_n = int(_extract_event_times_from_session(event_sessions[key], key).size)
+            if whisk_long_n > 0:
+                break
+
+    show_heatmap_colorbar = bool(plot_config.get("HEATMAP_SHOW_COLORBAR", True))
+    heatmap_colorbar_added = False
+    event_window_overrides = plot_config.get("POP_WINDOWS_BY_EVENT", {})
+    fr_axis_meta = {}
+
+    def _xaxis_name(row, col):
+        axis_idx = (row - 1) * n_cols + col
+        return "x" if axis_idx == 1 else f"x{axis_idx}"
+
+    for idx, (_event_label, event_name, summary_type) in enumerate(parsed_specs):
+        panel_row = idx // n_cols
+        col = idx % n_cols + 1
+        row_heat, row_fr, row_wh = panel_row_to_rows[panel_row]
+
+        if summary_type:
+            if summary_type == "firing_hist":
+                if fr_values_region.size > 0:
+                    fig_panel.add_trace(
+                        go.Histogram(
+                            x=fr_values_region,
+                            nbinsx=30,
+                            marker=dict(color="#555555", opacity=0.75),
+                            showlegend=False,
+                            hovertemplate="FR=%{x:.3f}<br>Count=%{y}<extra></extra>",
+                        ),
+                        row=row_heat,
+                        col=col,
+                        secondary_y=False,
+                    )
+                else:
+                    fig_panel.add_annotation(
+                        text="No firing-rate data",
+                        showarrow=False,
+                        row=row_heat,
+                        col=col,
+                    )
+            elif summary_type == "arousal_bar":
+                x_vals = ["Arousal+", "Arousal-", "Neutral"]
+                y_vals = [
+                    arousal_counts["arousal_plus"],
+                    arousal_counts["arousal_minus"],
+                    arousal_counts["neutral"],
+                ]
+                fig_panel.add_trace(
+                    go.Bar(
+                        x=x_vals,
+                        y=y_vals,
+                        marker=dict(color=["#8b0000", "#00008b", "#7f7f7f"]),
+                        text=y_vals,
+                        textposition="outside",
+                        showlegend=False,
+                        hovertemplate="%{x}: %{y}<extra></extra>",
+                    ),
+                    row=row_heat,
+                    col=col,
+                    secondary_y=False,
+                )
+            elif summary_type == "whisk_count_bar":
+                x_vals = ["Wh Brief", "Wh Long"]
+                y_vals = [whisk_brief_n, whisk_long_n]
+                fig_panel.add_trace(
+                    go.Bar(
+                        x=x_vals,
+                        y=y_vals,
+                        marker=dict(color=["#ff8c00", "#2ca02c"]),
+                        text=y_vals,
+                        textposition="outside",
+                        showlegend=False,
+                        hovertemplate="%{x}: %{y}<extra></extra>",
+                    ),
+                    row=row_heat,
+                    col=col,
+                    secondary_y=False,
+                )
+            else:
+                fig_panel.add_annotation(
+                    text="Summary unavailable",
+                    showarrow=False,
+                    row=row_heat,
+                    col=col,
+                )
+            fig_panel.update_xaxes(tickangle=-20, row=row_heat, col=col)
+            continue
+
+        if not event_name:
+            continue
+        event_session = event_sessions.get(event_name)
+        if event_session is None:
+            fig_panel.add_annotation(text="No events", showarrow=False, row=row_heat, col=col)
+            continue
+
+        cfg = dict(plot_config)
+        cfg["PLOT_EVENT"] = event_name
+        pop_window_pre = float(cfg.get("POP_WINDOW_PRE", 0.1))
+        pop_window_post = float(cfg.get("POP_WINDOW_POST", 0.2))
+        event_window = event_window_overrides.get(event_name)
+        if event_window is not None and len(event_window) == 2:
+            pop_window_pre = float(event_window[0])
+            pop_window_post = float(event_window[1])
+        cfg["POP_WINDOW_PRE"] = pop_window_pre
+        cfg["POP_WINDOW_POST"] = pop_window_post
+        fig_event = plot_population_sorted_plotly(
+            event_session,
+            spikes,
+            clusters,
+            plot_cluster_ids,
+            plot_cluster_acronyms,
+            df_res,
+            cfg,
+            df_coupling=df_coupling,
+            df_coupling_task=df_coupling_task,
+            df_coupling_iti=df_coupling_iti,
+            df_firing_rate=df_firing_rate,
+            region_acronyms=[region_name],
+            sort_mode=sort_mode,
+        )
+        if fig_event is None or len(fig_event.data) == 0:
+            fig_panel.add_annotation(text="No data", showarrow=False, row=row_heat, col=col)
+            continue
+
+        heatmap_trace = None
+        for trace in fig_event.data:
+            if isinstance(trace, go.Heatmap):
+                heatmap_trace = go.Figure(data=[trace]).data[0]
+                break
+        if heatmap_trace is None:
+            continue
+
+        x_vals = np.asarray(heatmap_trace.x, dtype=float).reshape(-1)
+        z_vals = np.asarray(heatmap_trace.z, dtype=float)
+        if z_vals.ndim == 1:
+            z_vals = z_vals.reshape(1, -1)
+        if x_vals.size == 0 and z_vals.ndim == 2 and z_vals.shape[1] > 0:
+            x_vals = np.linspace(-pop_window_pre, pop_window_post, z_vals.shape[1])
+        heatmap_trace.z = z_vals
+
+        show_scale = show_heatmap_colorbar and (not heatmap_colorbar_added)
+        heatmap_trace.showscale = show_scale
+        if show_scale:
+            heatmap_colorbar_added = True
+        fig_panel.add_trace(heatmap_trace, row=row_heat, col=col)
+
+        for trace in fig_event.data:
+            if not isinstance(trace, go.Scatter):
+                continue
+            tr_name = str(getattr(trace, "name", ""))
+            if tr_name not in {"Delay", "Odd delay", "Even delay"}:
+                continue
+            trace_copy = go.Figure(data=[trace]).data[0]
+            trace_copy.showlegend = False
+            fig_panel.add_trace(trace_copy, row=row_heat, col=col)
+
+        keep_aux = (event_name not in no_aux_events) and (row_fr is not None) and (row_wh is not None)
+        if keep_aux:
+            fr_mean_plus = np.full(x_vals.shape, np.nan, dtype=float)
+            fr_mean_minus = np.full(x_vals.shape, np.nan, dtype=float)
+            if z_vals.ndim == 2 and z_vals.shape[1] == x_vals.size and z_vals.shape[0] > 0:
+                row_groups = None
+                heatmap_meta = getattr(heatmap_trace, "meta", None)
+                if isinstance(heatmap_meta, dict):
+                    row_groups = heatmap_meta.get("row_group_values")
+                if row_groups is not None and len(row_groups) == z_vals.shape[0]:
+                    group_vals = pd.Series(row_groups).astype(str).str.strip().str.lower().to_numpy()
+                    plus_mask = np.isin(group_vals, ["arousal_plus", "exc", "excitatory", "increase"])
+                    minus_mask = np.isin(group_vals, ["arousal_minus", "inh", "inhibitory", "decrease"])
+                    if np.any(plus_mask):
+                        fr_mean_plus = np.nanmean(z_vals[plus_mask, :], axis=0)
+                    if np.any(minus_mask):
+                        fr_mean_minus = np.nanmean(z_vals[minus_mask, :], axis=0)
+                else:
+                    fr_mean_plus = np.nanmean(z_vals, axis=0)
+                    fr_mean_minus = np.nanmean(z_vals, axis=0)
+
+            fig_panel.add_trace(
+                go.Scatter(
+                    x=x_vals,
+                    y=fr_mean_plus,
+                    mode="lines",
+                    line=dict(color="#8b0000", width=2),
+                    showlegend=False,
+                    hovertemplate="Time: %{x:.3f}s<br>Arousal+ mean: %{y:.3f}<extra></extra>",
+                ),
+                row=row_fr,
+                col=col,
+            )
+            fig_panel.add_trace(
+                go.Scatter(
+                    x=x_vals,
+                    y=fr_mean_minus,
+                    mode="lines",
+                    line=dict(color="#00008b", width=2),
+                    showlegend=False,
+                    hovertemplate="Time: %{x:.3f}s<br>Arousal- mean: %{y:.3f}<extra></extra>",
+                ),
+                row=row_fr,
+                col=col,
+            )
+
+            whisk_mean = _compute_event_locked_whisk_mean(
+                whisk_df,
+                _extract_event_times_from_session(event_session, event_name),
+                x_vals,
+            )
+            fig_panel.add_trace(
+                go.Scatter(
+                    x=x_vals,
+                    y=whisk_mean,
+                    mode="lines",
+                    line=dict(color="#c77c2e", width=2),
+                    showlegend=False,
+                    hovertemplate="Time: %{x:.3f}s<br>Mean whisk: %{y:.3f}<extra></extra>",
+                ),
+                row=row_wh,
+                col=col,
+            )
+            fr_finite = np.concatenate(
+                [
+                    np.asarray(fr_mean_plus, dtype=float).reshape(-1),
+                    np.asarray(fr_mean_minus, dtype=float).reshape(-1),
+                ]
+            )
+            fr_finite = fr_finite[np.isfinite(fr_finite)]
+            if fr_finite.size > 0:
+                fr_axis_meta[event_name] = {
+                    "row": row_fr,
+                    "col": col,
+                    "ymin": float(np.nanmin(fr_finite)),
+                    "ymax": float(np.nanmax(fr_finite)),
+                }
+
+        target_rows = [row_heat]
+        if keep_aux:
+            target_rows.extend([row_fr, row_wh])
+        for target_row in target_rows:
+            fig_panel.add_vline(
+                x=0,
+                row=target_row,
+                col=col,
+                line=dict(color="#555555", dash="dot"),
+            )
+            fig_panel.update_xaxes(range=[-pop_window_pre, pop_window_post], row=target_row, col=col)
+
+        if keep_aux:
+            x_axis_ref = _xaxis_name(row_heat, col)
+            fig_panel.update_xaxes(matches=x_axis_ref, row=row_fr, col=col)
+            fig_panel.update_xaxes(matches=x_axis_ref, row=row_wh, col=col)
+
+        fig_panel.update_yaxes(autorange="reversed", row=row_heat, col=col)
+        fig_panel.update_yaxes(showticklabels=False, row=row_heat, col=col)
+        if panel_row == n_event_rows - 1 and keep_aux:
+            fig_panel.update_xaxes(title_text="Time from event (s)", row=row_wh, col=col)
+        elif panel_row == n_event_rows - 1:
+            fig_panel.update_xaxes(title_text="Time from event (s)", row=row_heat, col=col)
+
+        if col == 1:
+            fig_panel.update_yaxes(title_text="Neurons", title_standoff=28, row=row_heat, col=col)
+            if keep_aux:
+                fig_panel.update_yaxes(title_text="Mean z-score", row=row_fr, col=col)
+                fig_panel.update_yaxes(title_text="Whisk", row=row_wh, col=col)
+
+    fr_ref = fr_axis_meta.get("wh_long_times_spont")
+    fr_target = fr_axis_meta.get("wh_long_offset_times_spont")
+    if fr_ref is not None and fr_target is not None:
+        y_min = min(float(fr_ref["ymin"]), float(fr_target["ymin"]))
+        y_max = max(float(fr_ref["ymax"]), float(fr_target["ymax"]))
+        if np.isfinite(y_min) and np.isfinite(y_max):
+            if y_max <= y_min:
+                pad = max(abs(y_min) * 0.05, 1e-6)
+                y_min -= pad
+                y_max += pad
+            y_range = [y_min, y_max]
+            fig_panel.update_yaxes(range=y_range, row=int(fr_ref["row"]), col=int(fr_ref["col"]))
+            fig_panel.update_yaxes(
+                range=y_range,
+                row=int(fr_target["row"]),
+                col=int(fr_target["col"]),
+            )
+
+    fig_panel.update_layout(
+        title=f"Response Analysis (Region {region_name})",
+        width=max(1200, 360 * n_cols + 120),
+        height=max(640, int(340 * float(sum(row_heights))) + 220),
+        template=plot_config.get("PLOTLY_TEMPLATE", "plotly_white"),
+        margin=dict(l=80, r=40, t=90, b=70),
+    )
+    fig_panel.update_xaxes(showgrid=False)
+    fig_panel.update_yaxes(showgrid=False)
+    return fig_panel
 
 
 def plot_population_coupling_heatmap_plotly(
@@ -3572,7 +4253,7 @@ def plot_population_coupling_heatmap_plotly(
         elif colorbar_mode == "single":
             show_scale = row_idx == 1
 
-        colorbar_title = "stPR (z-score)" if zscore_by_region else "stPR"
+        colorbar_title = "Coupling (z-score)" if zscore_by_region else "Coupling"
         colorbar = dict(
             title=colorbar_title,
             len=0.7,
@@ -3673,7 +4354,7 @@ def plot_population_coupling_heatmap_plotly(
         ann.update(font=dict(size=12))
 
     fig.update_layout(
-        title="Spike-triggered Population Coupling (stPR)",
+        title="Spike-triggered Population Coupling",
         height=max(450, 280 * n_rows + 140),
         width=1000,
         margin=dict(
@@ -3812,8 +4493,8 @@ def plot_coupling_strength_summary_plotly(
         df_strength,
         "coupling_strength_task",
         "coupling_strength_spont",
-        "Task stPR (coupling strength)",
-        "Spont stPR (coupling strength)",
+        "Task Coupling (strength)",
+        "Spont Coupling (strength)",
         title,
         region_order,
         region_colors,

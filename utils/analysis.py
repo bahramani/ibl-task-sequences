@@ -1,6 +1,8 @@
 import numpy as np
 import utils.io as io_utils
 import pandas as pd
+import os
+import concurrent.futures
 from scipy.ndimage import gaussian_filter1d
 try:
     from scipy.signal import butter, filtfilt
@@ -153,11 +155,14 @@ def event_label(event_name):
     """Human-readable labels for event names."""
     label_map = {
         "stimOn_times": "Stim On",
+        "stimOn_times_task_zero_lr": "Stim On (Zero Contrast)",
         "firstMovement_times": "First Move",
         "response_times": "Response",
         "feedback_times": "Feedback",
         "feedback_correct_times": "Feedback (Correct)",
         "feedback_incorrect_times": "Feedback (Incorrect)",
+        "passive_visual_times": "Passive Visual (Top 2 Right)",
+        "passive_visual_top2_left_times": "Passive Visual (Top 2 Left)",
         "passive_tone_times": "Passive Tone",
         "passive_noise_times": "Passive Noise",
         "passive_valve_times": "Passive Valve",
@@ -165,6 +170,7 @@ def event_label(event_name):
         "wh_brief_times": "Whisking Brief",
         "wh_long_times": "Whisking Long",
         "wh_all_times": "Whisking All",
+        "wh_long_offset_times_spont": "Whisking Long Offset (Spont)",
         "wh_brief_times_spont": "Whisking Brief (Spont)",
         "wh_brief_times_task": "Whisking Brief (Task)",
         "wh_brief_times_iti": "Whisking Brief (ITI)",
@@ -1222,6 +1228,520 @@ def split_wh_events_by_period(wh_event_times, spont_intervals, task_windows, iti
     return split_events
 
 
+def build_whisk_trace(df_trace, config):
+    """
+    Build the final whisk trace table used by dashboard calculations.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``bin_idx``, ``bin_start_s``, ``bin_center_s``, ``bin_end_s``,
+        ``wh_norm``, ``n_views``.
+    """
+    columns = [
+        "bin_idx",
+        "bin_start_s",
+        "bin_center_s",
+        "bin_end_s",
+        "wh_norm",
+        "n_views",
+    ]
+    if df_trace is None or len(df_trace) == 0:
+        return pd.DataFrame(columns=columns)
+
+    target_wh_mean = config.get("WH_TARGET_MEAN", None)
+    wh_signal_scale = 1.0
+    use_binning = bool(config.get("WH_BIN_SIGNAL", True))
+    if use_binning:
+        out = bin_normalize_whisk_trace(
+            df_trace,
+            bin_s=config.get("WH_BIN_S", 0.3),
+            norm_pctl=config.get("WH_NORM_PCTL", 1.0),
+            norm_top_pctl=config.get("WH_NORM_TOP_PCTL", 100.0),
+            bin_reduce=config.get("WH_BIN_REDUCE", "mean"),
+            normalize_after_bin=config.get("WH_NORMALIZE_AFTER_BIN", False),
+        )
+        if target_wh_mean is not None and not out.empty:
+            wh_vals = out["wh_norm"].to_numpy(dtype=float)
+            curr_mean = float(np.nanmean(wh_vals))
+            if np.isfinite(curr_mean) and not np.isclose(curr_mean, 0.0):
+                wh_signal_scale = float(target_wh_mean) / curr_mean
+                out = out.copy()
+                out["wh_norm"] = wh_vals * wh_signal_scale
+        if isinstance(config, dict):
+            config["WH_SIGNAL_SCALE"] = wh_signal_scale
+        return out
+
+    # No-binning path: normalize per camera raw samples then average.
+    df = df_trace.copy()
+    if not {"times", "view", "value"}.issubset(df.columns):
+        return pd.DataFrame(columns=columns)
+    df = df.dropna(subset=["times", "value"]).copy()
+    if df.empty:
+        return pd.DataFrame(columns=columns)
+    df["times"] = df["times"].astype(float)
+    df["value"] = df["value"].astype(float)
+    df["view"] = df["view"].astype(str)
+
+    norm_pctl = float(config.get("WH_NORM_PCTL", 1.0))
+    norm_top_pctl = float(config.get("WH_NORM_TOP_PCTL", 100.0))
+
+    def _normalize_values(vals_fin):
+        lo = float(np.nanpercentile(vals_fin, norm_pctl))
+        hi = float(np.nanpercentile(vals_fin, norm_top_pctl))
+        if not np.isfinite(lo):
+            lo = float(np.nanmin(vals_fin))
+        if not np.isfinite(hi):
+            hi = float(np.nanmax(vals_fin))
+        if hi <= lo:
+            hi = float(np.nanmax(vals_fin))
+        if hi <= lo:
+            return np.zeros_like(vals_fin, dtype=float)
+        return np.clip((vals_fin - lo) / (hi - lo), 0.0, 1.0)
+
+    by_view = {}
+    for view, grp_view in df.groupby("view", sort=False):
+        vals = grp_view["value"].to_numpy(dtype=float)
+        times = grp_view["times"].to_numpy(dtype=float)
+        finite = np.isfinite(times) & np.isfinite(vals)
+        if not np.any(finite):
+            continue
+        vals_fin = vals[finite]
+        t_fin = times[finite]
+        norm = _normalize_values(vals_fin)
+        tmp = pd.DataFrame({"times": t_fin, "value_norm": norm})
+        tmp = (
+            tmp.groupby("times", as_index=False)["value_norm"]
+            .mean()
+            .sort_values("times")
+            .reset_index(drop=True)
+        )
+        t_view = tmp["times"].to_numpy(dtype=float)
+        y_view = tmp["value_norm"].to_numpy(dtype=float)
+        if t_view.size == 0:
+            continue
+        by_view[str(view)] = (t_view, y_view)
+    if not by_view:
+        return pd.DataFrame(columns=columns)
+
+    t_ref = np.concatenate([vals[0] for vals in by_view.values()])
+    t_ref = np.sort(np.unique(t_ref[np.isfinite(t_ref)]))
+    if t_ref.size == 0:
+        return pd.DataFrame(columns=columns)
+
+    wh_mat = np.full((len(by_view), t_ref.size), np.nan, dtype=float)
+    for row_idx, (_view, (t_view, y_view)) in enumerate(by_view.items()):
+        if t_view.size == 1:
+            exact = np.isclose(t_ref, t_view[0], rtol=0.0, atol=1e-12)
+            wh_mat[row_idx, exact] = y_view[0]
+            continue
+        interp_vals = np.interp(t_ref, t_view, y_view)
+        in_range = (t_ref >= t_view[0]) & (t_ref <= t_view[-1])
+        interp_vals[~in_range] = np.nan
+        wh_mat[row_idx, :] = interp_vals
+
+    n_views = np.sum(np.isfinite(wh_mat), axis=0).astype(int)
+    wh_sum = np.nansum(wh_mat, axis=0)
+    wh_norm = np.divide(
+        wh_sum,
+        n_views,
+        out=np.full(t_ref.shape, np.nan, dtype=float),
+        where=n_views > 0,
+    )
+    keep = np.isfinite(wh_norm) & (n_views > 0)
+    if not np.any(keep):
+        return pd.DataFrame(columns=columns)
+
+    t_out = t_ref[keep]
+    wh_out = wh_norm[keep]
+    if target_wh_mean is not None:
+        curr_mean = float(np.nanmean(wh_out))
+        if np.isfinite(curr_mean) and not np.isclose(curr_mean, 0.0):
+            wh_signal_scale = float(target_wh_mean) / curr_mean
+            wh_out = wh_out * wh_signal_scale
+    if isinstance(config, dict):
+        config["WH_SIGNAL_SCALE"] = wh_signal_scale
+
+    out = pd.DataFrame(
+        {
+            "bin_idx": np.arange(t_out.size, dtype=int),
+            "bin_start_s": t_out,
+            "bin_center_s": t_out,
+            "bin_end_s": t_out,
+            "wh_norm": wh_out,
+            "n_views": n_views[keep],
+        }
+    )
+    return out[columns]
+
+
+def _get_wheel_field(wheel, key):
+    if wheel is None:
+        return None
+    try:
+        if hasattr(wheel, "keys") and key in wheel.keys():
+            return np.asarray(wheel[key], dtype=float).reshape(-1)
+    except Exception:
+        pass
+    if isinstance(wheel, dict) and key in wheel:
+        try:
+            return np.asarray(wheel.get(key), dtype=float).reshape(-1)
+        except Exception:
+            return None
+    if hasattr(wheel, key):
+        try:
+            return np.asarray(getattr(wheel, key), dtype=float).reshape(-1)
+        except Exception:
+            return None
+    return None
+
+
+def extract_wheel_speed_cm_s(wheel, wheel_radius_cm=3.1):
+    """
+    Return wheel speed in cm/s from wheel velocity or position.
+    """
+    times = _get_wheel_field(wheel, "times")
+    if times is None:
+        return np.array([], dtype=float), np.array([], dtype=float)
+
+    vel = _get_wheel_field(wheel, "velocity")
+    if vel is not None and vel.shape[0] == times.shape[0]:
+        mask = np.isfinite(times) & np.isfinite(vel)
+        if not np.any(mask):
+            return np.array([], dtype=float), np.array([], dtype=float)
+        t = np.asarray(times[mask], dtype=float)
+        speed_cm_s = np.abs(np.asarray(vel[mask], dtype=float)) * float(wheel_radius_cm)
+        order = np.argsort(t)
+        return t[order], speed_cm_s[order]
+
+    pos = _get_wheel_field(wheel, "position")
+    if pos is None or pos.shape[0] != times.shape[0]:
+        return np.array([], dtype=float), np.array([], dtype=float)
+
+    mask = np.isfinite(times) & np.isfinite(pos)
+    if int(mask.sum()) < 2:
+        return np.array([], dtype=float), np.array([], dtype=float)
+    t = np.asarray(times[mask], dtype=float)
+    p = np.asarray(pos[mask], dtype=float)
+    order = np.argsort(t)
+    t = t[order]
+    p = p[order]
+    uniq_t, uniq_idx = np.unique(t, return_index=True)
+    p = p[uniq_idx]
+    t = uniq_t
+    if t.size < 2:
+        return np.array([], dtype=float), np.array([], dtype=float)
+    vel_rad_s = np.gradient(p, t)
+    speed_cm_s = np.abs(vel_rad_s) * float(wheel_radius_cm)
+    keep = np.isfinite(t) & np.isfinite(speed_cm_s)
+    return t[keep], speed_cm_s[keep]
+
+
+def classify_whisk_onsets_by_locomotion(
+    onsets_s,
+    wheel,
+    lookahead_s=6.0,
+    speed_thr_cm_s=1.0,
+    wheel_radius_cm=3.1,
+):
+    onsets = np.asarray(onsets_s, dtype=float).reshape(-1)
+    onsets = onsets[np.isfinite(onsets)]
+    if onsets.size == 0:
+        return {
+            "all_onsets": np.array([], dtype=float),
+            "loco_flags": np.array([], dtype=bool),
+            "loco_onsets": np.array([], dtype=float),
+            "non_loco_onsets": np.array([], dtype=float),
+            "wheel_times": np.array([], dtype=float),
+            "wheel_speed_cm_s": np.array([], dtype=float),
+        }
+
+    wheel_t, wheel_speed = extract_wheel_speed_cm_s(wheel, wheel_radius_cm=wheel_radius_cm)
+    flags = np.zeros(onsets.size, dtype=bool)
+    if wheel_t.size > 0 and wheel_speed.size > 0:
+        for idx, t0 in enumerate(onsets):
+            i0 = int(np.searchsorted(wheel_t, t0, side="left"))
+            i1 = int(np.searchsorted(wheel_t, t0 + float(lookahead_s), side="right"))
+            if i1 > i0:
+                max_speed = float(np.nanmax(wheel_speed[i0:i1]))
+                flags[idx] = np.isfinite(max_speed) and (max_speed > float(speed_thr_cm_s))
+
+    return {
+        "all_onsets": onsets,
+        "loco_flags": flags,
+        "loco_onsets": onsets[flags],
+        "non_loco_onsets": onsets[~flags],
+        "wheel_times": wheel_t,
+        "wheel_speed_cm_s": wheel_speed,
+    }
+
+
+def build_whisk_events(
+    df_wh,
+    config,
+    spont_intervals=None,
+    task_windows=None,
+    iti_windows=None,
+    wheel=None,
+):
+    """
+    Detect whisk bouts and build period-split event dictionaries.
+    """
+    empty_detect = {
+        "all_bouts": np.empty((0, 2), dtype=float),
+        "brief_bouts": np.empty((0, 2), dtype=float),
+        "long_bouts": np.empty((0, 2), dtype=float),
+        "all_onsets": np.array([], dtype=float),
+        "brief_onsets": np.array([], dtype=float),
+        "long_onsets": np.array([], dtype=float),
+        "all_durations": np.array([], dtype=float),
+        "brief_durations": np.array([], dtype=float),
+        "long_durations": np.array([], dtype=float),
+    }
+    if df_wh is None or len(df_wh) == 0:
+        return {
+            "wh_detect": empty_detect,
+            "wh_event_base": {
+                "wh_brief_times": np.array([], dtype=float),
+                "wh_long_times": np.array([], dtype=float),
+                "wh_all_times": np.array([], dtype=float),
+                "wh_all_times_loco": np.array([], dtype=float),
+                "wh_all_times_non_loco": np.array([], dtype=float),
+            },
+            "wh_events_by_period": {},
+            "wh_long_offset_times_spont": np.array([], dtype=float),
+            "wh_loco": {
+                "all_onsets": np.array([], dtype=float),
+                "loco_flags": np.array([], dtype=bool),
+                "loco_onsets": np.array([], dtype=float),
+                "non_loco_onsets": np.array([], dtype=float),
+                "wheel_times": np.array([], dtype=float),
+                "wheel_speed_cm_s": np.array([], dtype=float),
+            },
+        }
+
+    wh_detect = detect_wh_bouts(
+        df_wh["bin_center_s"].to_numpy(dtype=float),
+        df_wh["wh_norm"].to_numpy(dtype=float),
+        start_thr=config.get("WH_START_THR", 0.1),
+        end_thr=config.get("WH_END_THR", 0.04),
+        merge_gap_s=config.get("WH_MERGE_GAP_S", 0.3),
+        end_quiet_window_s=config.get("WH_END_QUIET_WINDOW_S", 0.5),
+        brief_range_s=config.get("WH_BRIEF_RANGE_S", (0.25, 2.0)),
+        long_min_s=config.get("WH_LONG_MIN_S", 2.0),
+    )
+
+    # Keep only categorized bouts in all_* fields.
+    brief_bouts = np.asarray(
+        wh_detect.get("brief_bouts", np.empty((0, 2))),
+        dtype=float,
+    ).reshape(-1, 2)
+    long_bouts = np.asarray(
+        wh_detect.get("long_bouts", np.empty((0, 2))),
+        dtype=float,
+    ).reshape(-1, 2)
+    categorized_bouts = (
+        np.vstack([brief_bouts, long_bouts])
+        if (brief_bouts.size + long_bouts.size) > 0
+        else np.empty((0, 2), dtype=float)
+    )
+    if categorized_bouts.size:
+        finite_mask = (
+            np.isfinite(categorized_bouts[:, 0])
+            & np.isfinite(categorized_bouts[:, 1])
+            & (categorized_bouts[:, 1] > categorized_bouts[:, 0])
+        )
+        categorized_bouts = categorized_bouts[finite_mask]
+        if categorized_bouts.shape[0] > 1:
+            categorized_bouts = np.unique(categorized_bouts, axis=0)
+        categorized_bouts = categorized_bouts[np.argsort(categorized_bouts[:, 0])]
+    categorized_onsets = (
+        categorized_bouts[:, 0].copy() if categorized_bouts.size else np.array([], dtype=float)
+    )
+    categorized_durations = (
+        categorized_bouts[:, 1] - categorized_bouts[:, 0]
+        if categorized_bouts.size
+        else np.array([], dtype=float)
+    )
+    wh_detect["all_bouts"] = categorized_bouts
+    wh_detect["all_onsets"] = categorized_onsets
+    wh_detect["all_durations"] = categorized_durations
+
+    wh_event_base = {
+        "wh_brief_times": np.asarray(
+            wh_detect.get("brief_onsets", np.array([])),
+            dtype=float,
+        ),
+        "wh_long_times": np.asarray(
+            wh_detect.get("long_onsets", np.array([])),
+            dtype=float,
+        ),
+        "wh_all_times": np.asarray(
+            wh_detect.get("all_onsets", np.array([])),
+            dtype=float,
+        ),
+    }
+
+    wh_loco = classify_whisk_onsets_by_locomotion(
+        wh_event_base["wh_all_times"],
+        wheel,
+        lookahead_s=config.get("WH_LOCO_LOOKAHEAD_S", 6.0),
+        speed_thr_cm_s=config.get("WH_LOCO_SPEED_THR_CM_S", 1.0),
+        wheel_radius_cm=config.get("WH_WHEEL_RADIUS_CM", 3.1),
+    )
+    wh_event_base["wh_all_times_loco"] = np.asarray(wh_loco["loco_onsets"], dtype=float)
+    wh_event_base["wh_all_times_non_loco"] = np.asarray(wh_loco["non_loco_onsets"], dtype=float)
+
+    wh_events_by_period = split_wh_events_by_period(
+        wh_event_base,
+        spont_intervals=spont_intervals,
+        task_windows=task_windows,
+        iti_windows=iti_windows,
+    )
+
+    long_bouts_for_offsets = np.asarray(
+        wh_detect.get("long_bouts", np.empty((0, 2))),
+        dtype=float,
+    ).reshape(-1, 2)
+    if long_bouts_for_offsets.size > 0:
+        valid_long_offset = (
+            np.isfinite(long_bouts_for_offsets[:, 0])
+            & np.isfinite(long_bouts_for_offsets[:, 1])
+            & (long_bouts_for_offsets[:, 1] > long_bouts_for_offsets[:, 0])
+        )
+        long_bouts_for_offsets = long_bouts_for_offsets[valid_long_offset]
+        if long_bouts_for_offsets.size > 0:
+            spont_arr = _coerce_interval_array(spont_intervals)
+            long_onsets = long_bouts_for_offsets[:, 0]
+            onset_spont_mask = np.zeros(long_onsets.shape[0], dtype=bool)
+            for t0, t1 in spont_arr:
+                if not np.isfinite(t0) or not np.isfinite(t1) or (t1 <= t0):
+                    continue
+                onset_spont_mask |= (long_onsets >= float(t0)) & (long_onsets <= float(t1))
+            long_bouts_for_offsets = long_bouts_for_offsets[onset_spont_mask]
+        wh_long_offset_times_spont = (
+            np.sort(long_bouts_for_offsets[:, 1])
+            if long_bouts_for_offsets.size > 0
+            else np.array([], dtype=float)
+        )
+    else:
+        wh_long_offset_times_spont = np.array([], dtype=float)
+
+    wh_events_by_period["wh_long_offset_times_spont"] = np.asarray(
+        wh_long_offset_times_spont,
+        dtype=float,
+    )
+    return {
+        "wh_detect": wh_detect,
+        "wh_event_base": wh_event_base,
+        "wh_events_by_period": wh_events_by_period,
+        "wh_long_offset_times_spont": wh_long_offset_times_spont,
+        "wh_loco": wh_loco,
+    }
+
+
+def build_dashboard_delay_event_inputs(
+    sl,
+    task_stim_subsets=None,
+    passive_events=None,
+    whisk_events=None,
+):
+    """
+    Build event dictionaries for dashboard delay calculations.
+
+    Event definitions:
+    - ``stimOn_times``: task non-zero contrast only
+    - ``stimOn_times_task_zero_lr``: task zero-contrast
+    - ``passive_visual_times``: passive visual top-2 right
+    - ``passive_visual_top2_left_times``: passive visual top-2 left
+    - passive auditory + whisk event streams as available
+    """
+    trials = getattr(sl, "trials", None)
+    events_by_name = {}
+    contrasts_by_name = {}
+    trial_idx_by_name = {}
+    if trials is None:
+        return events_by_name, contrasts_by_name, trial_idx_by_name
+
+    trial_contrasts = get_trial_contrasts(sl)
+    task_stim_subsets = task_stim_subsets or io_utils.select_task_stim_events_by_side(sl)
+    passive_events = passive_events or {}
+    whisk_events = whisk_events or {}
+
+    # Task stim non-zero only.
+    stim_all = np.asarray(trials["stimOn_times"], dtype=float).reshape(-1)
+    stim_nonzero_mask = np.isfinite(stim_all) & np.isfinite(trial_contrasts) & (trial_contrasts > 0)
+    stim_nonzero_idx = np.nonzero(stim_nonzero_mask)[0]
+    events_by_name["stimOn_times"] = np.asarray(stim_all[stim_nonzero_mask], dtype=float)
+    contrasts_by_name["stimOn_times"] = np.asarray(trial_contrasts[stim_nonzero_idx], dtype=float)
+    trial_idx_by_name["stimOn_times"] = stim_nonzero_idx.astype(int)
+
+    # Task first move + feedback.
+    for event_name in ("firstMovement_times", "feedback_times"):
+        if event_name not in trials.keys():
+            events_by_name[event_name] = np.array([], dtype=float)
+            contrasts_by_name[event_name] = np.array([], dtype=float)
+            trial_idx_by_name[event_name] = np.array([], dtype=int)
+            continue
+        ev_all = np.asarray(trials[event_name], dtype=float).reshape(-1)
+        valid = np.isfinite(ev_all)
+        idx = np.nonzero(valid)[0]
+        events_by_name[event_name] = np.asarray(ev_all[valid], dtype=float)
+        contrasts_by_name[event_name] = np.asarray(trial_contrasts[idx], dtype=float)
+        trial_idx_by_name[event_name] = idx.astype(int)
+
+    # Task zero contrast subset.
+    stim_zero = np.asarray(task_stim_subsets.get("task_zero_lr_times", np.array([])), dtype=float)
+    stim_zero = np.sort(stim_zero[np.isfinite(stim_zero)])
+    events_by_name["stimOn_times_task_zero_lr"] = stim_zero
+    contrasts_by_name["stimOn_times_task_zero_lr"] = np.zeros(stim_zero.shape[0], dtype=float)
+    trial_idx_by_name["stimOn_times_task_zero_lr"] = np.arange(stim_zero.shape[0], dtype=int)
+
+    # Passive canonical delay variable: top-2 right only.
+    passive_right = np.asarray(
+        passive_events.get("passive_visual_top2_right_times", np.array([])),
+        dtype=float,
+    )
+    passive_right = np.sort(passive_right[np.isfinite(passive_right)])
+    events_by_name["passive_visual_times"] = passive_right
+    contrasts_by_name["passive_visual_times"] = np.ones(passive_right.shape[0], dtype=float)
+    trial_idx_by_name["passive_visual_times"] = np.arange(passive_right.shape[0], dtype=int)
+
+    # Passive top-2 left for plotting.
+    passive_left = np.asarray(
+        passive_events.get("passive_visual_top2_left_times", np.array([])),
+        dtype=float,
+    )
+    passive_left = np.sort(passive_left[np.isfinite(passive_left)])
+    events_by_name["passive_visual_top2_left_times"] = passive_left
+    contrasts_by_name["passive_visual_top2_left_times"] = np.ones(passive_left.shape[0], dtype=float)
+    trial_idx_by_name["passive_visual_top2_left_times"] = np.arange(passive_left.shape[0], dtype=int)
+
+    for event_name in ("passive_tone_times", "passive_valve_times", "passive_noise_times"):
+        ev = np.asarray(passive_events.get(event_name, np.array([])), dtype=float)
+        ev = np.sort(ev[np.isfinite(ev)])
+        events_by_name[event_name] = ev
+        contrasts_by_name[event_name] = np.ones(ev.shape[0], dtype=float)
+        trial_idx_by_name[event_name] = np.arange(ev.shape[0], dtype=int)
+
+    for event_name in (
+        "wh_all_times",
+        "wh_brief_times",
+        "wh_long_times",
+        "wh_all_times_spont",
+        "wh_brief_times_spont",
+        "wh_long_times_spont",
+        "wh_long_offset_times_spont",
+    ):
+        ev = np.asarray(whisk_events.get(event_name, np.array([])), dtype=float)
+        ev = np.sort(ev[np.isfinite(ev)])
+        events_by_name[event_name] = ev
+        contrasts_by_name[event_name] = np.ones(ev.shape[0], dtype=float)
+        trial_idx_by_name[event_name] = np.arange(ev.shape[0], dtype=int)
+
+    return events_by_name, contrasts_by_name, trial_idx_by_name
+
+
 def _cluster_firing_rate_lookup(clusters):
     if clusters is None:
         return {}
@@ -1650,6 +2170,7 @@ def calculate_delays(
     label_min = config.get("CALC_LABEL_MIN", None)
     if label_min is None and config.get("CALC_ONLY_GOOD_UNITS", False):
         label_min = 1.0
+    strict_gt = bool(config.get("CALC_LABEL_STRICT_GT", False))
 
     def _label_ok(label_val):
         if label_min is None:
@@ -1657,6 +2178,8 @@ def calculate_delays(
         if label_val is None:
             return False
         try:
+            if strict_gt:
+                return float(label_val) > float(label_min)
             return float(label_val) >= float(label_min)
         except (TypeError, ValueError):
             return False
@@ -1871,6 +2394,7 @@ def calculate_event_delays(
     contrasts_by_name=None,
     trial_idx_by_name=None,
     include_splits=False,
+    include_splits_events=None,
     output_path=None,
 ):
     """
@@ -1890,6 +2414,11 @@ def calculate_event_delays(
         config.get("MIN_TRIALS_SPLIT", max(5, int(np.ceil(max(min_trials, 1) / 2))))
     )
     contrasts_by_name = contrasts_by_name or {}
+    include_splits_default = bool(include_splits)
+    include_splits_event_set = None
+    if include_splits_events is not None:
+        include_splits_event_set = {str(name) for name in include_splits_events}
+        include_splits_default = False
 
     cluster_ids = np.unique(spikes.clusters)
     cluster_ids = [cid for cid in cluster_ids if cid in cid_to_idx]
@@ -1898,6 +2427,7 @@ def calculate_event_delays(
     label_min = config.get("CALC_LABEL_MIN", None)
     if label_min is None and config.get("CALC_ONLY_GOOD_UNITS", False):
         label_min = 1.0
+    strict_gt = bool(config.get("CALC_LABEL_STRICT_GT", False))
 
     def _label_ok(label_val):
         if label_min is None:
@@ -1905,6 +2435,8 @@ def calculate_event_delays(
         if label_val is None:
             return False
         try:
+            if strict_gt:
+                return float(label_val) > float(label_min)
             return float(label_val) >= float(label_min)
         except (TypeError, ValueError):
             return False
@@ -1974,13 +2506,17 @@ def calculate_event_delays(
 
     delay_columns = []
     for event_name in event_names:
+        event_name = str(event_name)
         events, contrasts, trial_idx = _prepare_event_arrays(event_name)
+        event_include_splits = include_splits_default
+        if include_splits_event_set is not None:
+            event_include_splits = event_name in include_splits_event_set
 
         delay_col = delay_column_name(event_name)
         resp_col = responsive_column_name(event_name)
         sign_col = response_sign_column_name(event_name)
         delay_columns.append(delay_col)
-        if include_splits:
+        if event_include_splits:
             delay_odd_col = delay_split_column_name(event_name, "odd")
             delay_even_col = delay_split_column_name(event_name, "even")
             sign_odd_col = response_sign_split_column_name(event_name, "odd")
@@ -1991,7 +2527,7 @@ def calculate_event_delays(
             df_res[delay_col] = np.nan
             df_res[resp_col] = False
             df_res[sign_col] = "none"
-            if include_splits:
+            if event_include_splits:
                 df_res[delay_odd_col] = np.nan
                 df_res[delay_even_col] = np.nan
                 df_res[sign_odd_col] = "none"
@@ -2027,7 +2563,7 @@ def calculate_event_delays(
         events_even = np.array([])
         contrasts_odd = np.array([])
         contrasts_even = np.array([])
-        if include_splits:
+        if event_include_splits:
             odd_mask = (trial_idx % 2) == 1
             even_mask = ~odd_mask
             events_odd = events[odd_mask]
@@ -2089,7 +2625,7 @@ def calculate_event_delays(
             responsive_flags.append(bool(is_responsive))
             response_signs.append(response_sign)
 
-            if include_splits:
+            if event_include_splits:
                 delay_odd = np.nan
                 delay_even = np.nan
                 response_sign_odd = "none"
@@ -2138,7 +2674,7 @@ def calculate_event_delays(
         df_res[delay_col] = delays
         df_res[resp_col] = responsive_flags
         df_res[sign_col] = response_signs
-        if include_splits:
+        if event_include_splits:
             df_res[delay_odd_col] = delays_odd
             df_res[delay_even_col] = delays_even
             df_res[sign_odd_col] = response_signs_odd
@@ -2308,6 +2844,88 @@ def calculate_delay_reliability(
         f"Found {len(df_reliability)} responsive neurons (both halves). Saved to {output_path}."
     )
     return df_reliability
+
+
+def _compute_population_coupling_job(job):
+    """Worker wrapper for one population-coupling job."""
+    key = str(job.get("key", ""))
+    try:
+        df_out = compute_population_coupling(
+            job.get("spikes"),
+            job.get("clusters"),
+            job.get("cluster_acronyms"),
+            job.get("config"),
+            cluster_ids=job.get("cluster_ids"),
+            split_halves=bool(job.get("split_halves", False)),
+            by_region=bool(job.get("by_region", True)),
+            intervals=job.get("intervals"),
+            context_label=job.get("context_label"),
+        )
+        return key, df_out, None
+    except Exception as exc:  # pragma: no cover
+        return key, None, str(exc)
+
+
+def run_population_coupling_jobs(jobs, max_workers=0, prefer_processes=True):
+    """
+    Run population-coupling jobs in parallel (processes by default) with fallback.
+
+    Parameters
+    ----------
+    jobs : list[dict]
+        Each job dict must contain keys accepted by ``_compute_population_coupling_job``.
+    max_workers : int
+        If <= 0, a default based on CPU count and job count is used.
+    prefer_processes : bool
+        If True, use ``ProcessPoolExecutor``; otherwise use threads.
+    """
+    jobs = [job for job in list(jobs or []) if isinstance(job, dict) and job.get("spikes") is not None]
+    if len(jobs) == 0:
+        return {}
+
+    def _run_sequential(job_list):
+        out = {}
+        for job in job_list:
+            key, df_out, err = _compute_population_coupling_job(job)
+            if err is not None:
+                print(f"Warning: coupling job '{key}' failed: {err}")
+                out[key] = None
+            else:
+                out[key] = df_out
+        return out
+
+    try:
+        max_workers = int(max_workers)
+    except Exception:
+        max_workers = 0
+    if max_workers <= 0:
+        cpu_count = int(os.cpu_count() or 1)
+        suggested = cpu_count - 1 if cpu_count > 1 else 1
+        max_workers = max(1, min(len(jobs), suggested))
+    max_workers = max(1, min(int(max_workers), len(jobs)))
+
+    if len(jobs) <= 1 or max_workers <= 1:
+        return _run_sequential(jobs)
+
+    executor_cls = (
+        concurrent.futures.ProcessPoolExecutor
+        if bool(prefer_processes)
+        else concurrent.futures.ThreadPoolExecutor
+    )
+    try:
+        out = {}
+        with executor_cls(max_workers=max_workers) as executor:
+            futures = [executor.submit(_compute_population_coupling_job, job) for job in jobs]
+            for future in concurrent.futures.as_completed(futures):
+                key, df_out, err = future.result()
+                if err is not None:
+                    raise RuntimeError(f"Coupling job '{key}' failed: {err}")
+                out[key] = df_out
+        return out
+    except Exception as exc:
+        print(f"Warning: parallel coupling execution failed ({exc}); falling back to sequential.")
+        return _run_sequential(jobs)
+
 
 def compute_population_coupling(
     spikes,

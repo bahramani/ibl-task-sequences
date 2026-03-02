@@ -24,88 +24,124 @@ DEFAULT_LABEL_MIN = 0.5
 
 CORR_VARIABLES = [
     {
-        "name": "Delay (Stim On)",
+        "name": "Depth",
+        "df": "df_depth",
+        "v1": "depth_h1",
+        "v2": "depth_h2",
+    },
+    {
+        "name": "Firing Rate",
+        "df": "df_firing_rate",
+        "v1": "firing_rate_h1",
+        "v2": "firing_rate_h2",
+    },
+    {
+        "name": "Correlation to Whisking",
+        "df": "df_arousal_corr",
+        "v1": "arousal_corr_abs_h1",
+        "v2": "arousal_corr_abs_h2",
+    },
+    {
+        "name": "Delay to Stim On",
         "df": "df_res",
         "v1": "delay_stimOn_times_odd",
         "v2": "delay_stimOn_times_even",
     },
     {
-        "name": "Delay (First Move)",
+        "name": "Delay to First Move",
         "df": "df_res",
         "v1": "delay_firstMovement_times_odd",
         "v2": "delay_firstMovement_times_even",
     },
     {
-        "name": "Delay (Response)",
-        "df": "df_res",
-        "v1": "delay_response_times_odd",
-        "v2": "delay_response_times_even",
-    },
-    {
-        "name": "Delay (Feedback)",
+        "name": "Delay to Feedback",
         "df": "df_res",
         "v1": "delay_feedback_times_odd",
         "v2": "delay_feedback_times_even",
     },
     {
-        "name": "stPR Delay (Spont)",
+        "name": "Delay to Whisking Events",
+        "df": "df_res",
+        "v1": "delay_wh_brief_times_spont_odd",
+        "v2": "delay_wh_brief_times_spont_even",
+    },
+    {
+        "name": "Delay to Passive Visual",
+        "df": "df_res",
+        "v1": "delay_passive_visual_times_odd",
+        "v2": "delay_passive_visual_times_even",
+    },
+    {
+        "name": "Delay to Passive Tone",
+        "df": "df_res",
+        "v1": "delay_passive_tone_times_odd",
+        "v2": "delay_passive_tone_times_even",
+    },
+    {
+        "name": "Delay to Passive Valve",
+        "df": "df_res",
+        "v1": "delay_passive_valve_times_odd",
+        "v2": "delay_passive_valve_times_even",
+    },
+    {
+        "name": "Delay to Passive Noise",
+        "df": "df_res",
+        "v1": "delay_passive_noise_times_odd",
+        "v2": "delay_passive_noise_times_even",
+    },
+    {
+        "name": "Coupling Delay (Spont)",
         "df": "df_coupling",
         "v1": "coupling_delay_ms_h1",
         "v2": "coupling_delay_ms_h2",
     },
     {
-        "name": "stPR Delay (Task)",
-        "df": "df_coupling_task",
-        "v1": "coupling_delay_ms_odd",
-        "v2": "coupling_delay_ms_even",
-    },
-    {
-        "name": "stPR Delay (ITI)",
+        "name": "Coupling Delay (ITI)",
         "df": "df_coupling_iti",
         "v1": "coupling_delay_ms_odd",
         "v2": "coupling_delay_ms_even",
     },
     {
-        "name": "stPR Strength (Spont)",
+        "name": "Coupling Delay (Task)",
+        "df": "df_coupling_task",
+        "v1": "coupling_delay_ms_odd",
+        "v2": "coupling_delay_ms_even",
+    },
+    {
+        "name": "Coupling Strength (Spont)",
         "df": "df_coupling",
         "v1": "coupling_strength_h1",
         "v2": "coupling_strength_h2",
     },
     {
-        "name": "stPR Strength (Task)",
-        "df": "df_coupling_task",
-        "v1": "coupling_strength_odd",
-        "v2": "coupling_strength_even",
-    },
-    {
-        "name": "stPR Strength (ITI)",
+        "name": "Coupling Strength (ITI)",
         "df": "df_coupling_iti",
         "v1": "coupling_strength_odd",
         "v2": "coupling_strength_even",
     },
     {
-        "name": "stPR Max (Spont)",
+        "name": "Coupling Strength (Task)",
+        "df": "df_coupling_task",
+        "v1": "coupling_strength_odd",
+        "v2": "coupling_strength_even",
+    },
+    {
+        "name": "Coupling Max (Spont)",
         "df": "df_coupling",
         "v1": "coupling_max_h1",
         "v2": "coupling_max_h2",
     },
     {
-        "name": "stPR Max (Task)",
-        "df": "df_coupling_task",
-        "v1": "coupling_max_odd",
-        "v2": "coupling_max_even",
-    },
-    {
-        "name": "stPR Max (ITI)",
+        "name": "Coupling Max (ITI)",
         "df": "df_coupling_iti",
         "v1": "coupling_max_odd",
         "v2": "coupling_max_even",
     },
     {
-        "name": "Firing rate",
-        "df": "df_firing_rate",
-        "v1": "firing_rate_h1",
-        "v2": "firing_rate_h2",
+        "name": "Coupling Max (Task)",
+        "df": "df_coupling_task",
+        "v1": "coupling_max_odd",
+        "v2": "coupling_max_even",
     },
 ]
 
@@ -194,7 +230,7 @@ def _build_label_lookup(df_res):
 
 
 def _is_firing_rate_spec(spec):
-    return spec.get("df") == "df_firing_rate"
+    return spec.get("df") in {"df_firing_rate", "df_depth", "df_arousal_corr"}
 
 
 def _is_spont_spec(spec):
@@ -241,6 +277,132 @@ def _mean_with_count(values):
     return float(np.nanmean(vals[finite])), int(np.sum(finite))
 
 
+def _is_nonempty_arraylike(value):
+    if value is None:
+        return False
+    if isinstance(value, pd.DataFrame):
+        return not value.empty
+    if isinstance(value, dict):
+        return len(value) > 0
+    try:
+        return len(value) > 0
+    except TypeError:
+        return True
+
+
+def _has_whisk_signal(cache):
+    df_wh = cache.get("df_wh")
+    return isinstance(df_wh, pd.DataFrame) and (not df_wh.empty)
+
+
+def _has_passive_stimuli(cache):
+    passive = cache.get("passive_events")
+    if not isinstance(passive, dict):
+        return False
+    keys = (
+        "passive_visual_top2_right_times",
+        "passive_visual_top2_left_times",
+        "passive_tone_times",
+        "passive_valve_times",
+        "passive_noise_times",
+    )
+    for key in keys:
+        val = passive.get(key)
+        if not _is_nonempty_arraylike(val):
+            continue
+        try:
+            arr = np.asarray(val).reshape(-1)
+        except Exception:
+            continue
+        if arr.size > 0:
+            return True
+    return False
+
+
+def _extract_cluster_depths(cache, cluster_ids):
+    if cluster_ids is None:
+        return None
+    try:
+        cluster_ids_arr = np.asarray(cluster_ids)
+    except Exception:
+        return None
+    n_clusters = int(cluster_ids_arr.size)
+    if n_clusters == 0:
+        return None
+
+    def _to_depth_array(values):
+        if values is None:
+            return None
+        try:
+            arr = np.asarray(values, dtype=float).reshape(-1)
+        except Exception:
+            return None
+        if arr.size != n_clusters:
+            return None
+        return arr
+
+    for key in ("cluster_depths", "cluster_depth", "depths", "cluster_depth_um", "depth_um"):
+        arr = _to_depth_array(cache.get(key))
+        if arr is not None:
+            return arr
+
+    clusters = cache.get("clusters")
+    if clusters is not None:
+        if isinstance(clusters, dict):
+            for key in ("depths", "depth", "axial_um", "depth_um"):
+                arr = _to_depth_array(clusters.get(key))
+                if arr is not None:
+                    return arr
+        else:
+            for attr in ("depths", "depth", "axial_um", "depth_um"):
+                arr = _to_depth_array(getattr(clusters, attr, None))
+                if arr is not None:
+                    return arr
+    return None
+
+
+def _build_arousal_lookup(df_res, region_lookup):
+    if (
+        df_res is None
+        or df_res.empty
+        or "pid" not in df_res.columns
+        or "cluster_id" not in df_res.columns
+        or "arousal_group" not in df_res.columns
+    ):
+        return None
+    if region_lookup is None or region_lookup.empty:
+        return None
+
+    df_arousal = df_res[["pid", "cluster_id", "arousal_group"]].copy()
+    df_arousal["cluster_id"] = pd.to_numeric(df_arousal["cluster_id"], errors="coerce")
+    df_arousal = df_arousal[np.isfinite(df_arousal["cluster_id"])].copy()
+    if df_arousal.empty:
+        return None
+    df_arousal["cluster_id"] = df_arousal["cluster_id"].astype(int)
+
+    plus_labels = {"arousal_plus", "plus", "+", "arousal +", "arousal+"}
+    minus_labels = {"arousal_minus", "minus", "-", "arousal -", "arousal-"}
+    groups_raw = df_arousal["arousal_group"].astype(str).str.strip().str.lower()
+    groups_norm = pd.Series(np.nan, index=df_arousal.index, dtype=object)
+    groups_norm[groups_raw.isin(plus_labels)] = "arousal_plus"
+    groups_norm[groups_raw.isin(minus_labels)] = "arousal_minus"
+    df_arousal["arousal_group"] = groups_norm
+    df_arousal = df_arousal[df_arousal["arousal_group"].isin(["arousal_plus", "arousal_minus"])]
+    if df_arousal.empty:
+        return None
+    df_arousal = (
+        df_arousal.groupby(["pid", "cluster_id"])["arousal_group"]
+        .agg(lambda s: s.mode().iloc[0] if not s.mode().empty else s.iloc[0])
+        .reset_index()
+    )
+
+    region_lookup_all = region_lookup[["pid", "cluster_id", "region"]].drop_duplicates()
+    df_arousal = df_arousal.merge(region_lookup_all, on=["pid", "cluster_id"], how="inner")
+    if df_arousal.empty:
+        return None
+    return df_arousal
+
+
 @st.cache_data(show_spinner=False)
 def _load_cache_tables(cache_dir):
     cache_paths = sorted(Path(cache_dir).glob("*.pkl"))
@@ -258,6 +420,8 @@ def _load_cache_tables(cache_dir):
         "df_coupling_task_good": [],
         "df_coupling_iti_good": [],
         "df_firing_rate": [],
+        "df_depth": [],
+        "df_arousal_corr": [],
     }
 
     for path in cache_paths:
@@ -267,6 +431,8 @@ def _load_cache_tables(cache_dir):
         pid = cache.get("pid", path.stem)
         meta = cache.get("meta") or {}
         has_spont = _has_spont_interval(meta)
+        has_whisk = _has_whisk_signal(cache)
+        has_passive = _has_passive_stimuli(cache)
         if has_spont:
             spont_pids.add(pid)
         config_calc = cache.get("config_calc") or {}
@@ -285,6 +451,8 @@ def _load_cache_tables(cache_dir):
                     "n_neurons": 0,
                     "label_min": label_min,
                     "has_spont_interval": has_spont,
+                    "has_whisk_signal": has_whisk,
+                    "has_passive_stimuli": has_passive,
                 }
             )
             continue
@@ -299,6 +467,8 @@ def _load_cache_tables(cache_dir):
                     "n_neurons": 0,
                     "label_min": label_min,
                     "has_spont_interval": has_spont,
+                    "has_whisk_signal": has_whisk,
+                    "has_passive_stimuli": has_passive,
                 }
             )
             continue
@@ -314,6 +484,8 @@ def _load_cache_tables(cache_dir):
                     "n_neurons": 0,
                     "label_min": label_min,
                     "has_spont_interval": has_spont,
+                    "has_whisk_signal": has_whisk,
+                    "has_passive_stimuli": has_passive,
                 }
             )
             continue
@@ -328,6 +500,8 @@ def _load_cache_tables(cache_dir):
                     "n_neurons": 0,
                     "label_min": label_min,
                     "has_spont_interval": has_spont,
+                    "has_whisk_signal": has_whisk,
+                    "has_passive_stimuli": has_passive,
                 }
             )
             continue
@@ -343,6 +517,8 @@ def _load_cache_tables(cache_dir):
                 "n_neurons": int(len(df_units)),
                 "label_min": label_min,
                 "has_spont_interval": has_spont,
+                "has_whisk_signal": has_whisk,
+                "has_passive_stimuli": has_passive,
             }
         )
 
@@ -355,6 +531,14 @@ def _load_cache_tables(cache_dir):
         if not df_res_copy.empty:
             df_res_copy["cluster_id"] = df_res_copy["cluster_id"].astype(int)
             data_tables["df_res"].append(df_res_copy)
+            if "arousal_corr_abs" in df_res_copy.columns:
+                df_ar = df_res_copy[["pid", "cluster_id", "arousal_corr_abs"]].copy()
+                df_ar["arousal_corr_abs_h1"] = pd.to_numeric(
+                    df_ar["arousal_corr_abs"], errors="coerce"
+                )
+                df_ar["arousal_corr_abs_h2"] = df_ar["arousal_corr_abs_h1"]
+                df_ar = df_ar[["pid", "cluster_id", "arousal_corr_abs_h1", "arousal_corr_abs_h2"]]
+                data_tables["df_arousal_corr"].append(df_ar)
 
         for key in (
             "df_coupling",
@@ -394,6 +578,25 @@ def _load_cache_tables(cache_dir):
                 if not df_rate.empty:
                     df_rate["cluster_id"] = df_rate["cluster_id"].astype(int)
                     data_tables["df_firing_rate"].append(df_rate)
+
+        cluster_ids_for_depth = cache.get("cluster_ids")
+        cluster_depths = _extract_cluster_depths(cache, cluster_ids_for_depth)
+        if cluster_ids_for_depth is not None and cluster_depths is not None:
+            cluster_ids_depth = pd.to_numeric(np.asarray(cluster_ids_for_depth), errors="coerce")
+            cluster_depths = np.asarray(cluster_depths, dtype=float)
+            if len(cluster_ids_depth) == len(cluster_depths):
+                df_depth = pd.DataFrame(
+                    {
+                        "pid": pid,
+                        "cluster_id": cluster_ids_depth,
+                        "depth_h1": cluster_depths,
+                        "depth_h2": cluster_depths,
+                    }
+                )
+                df_depth = df_depth[np.isfinite(df_depth["cluster_id"])].copy()
+                if not df_depth.empty:
+                    df_depth["cluster_id"] = df_depth["cluster_id"].astype(int)
+                    data_tables["df_depth"].append(df_depth)
 
     if rows:
         neurons_df = pd.concat(rows, ignore_index=True)
@@ -495,7 +698,7 @@ region_counts_calc = region_counts_calc.merge(
 label_filter_text = "label=1 only" if good_only_toggle else f"label>= {label_min_text}"
 
 use_good_stpr = st.toggle(
-    "Use stPR computed from good neuron population",
+    "Use Coupling computed from good neuron population",
     value=False,
 )
 avg_by_pid_toggle = st.toggle(
@@ -513,12 +716,12 @@ if use_good_stpr:
         missing.append("ITI")
     if len(missing) == 3:
         st.warning(
-            "Good-neuron stPR not available in cache; using all neurons for stPR metrics."
+            "Good-neuron Coupling not available in cache; using all neurons for Coupling metrics."
         )
         use_good_stpr = False
     elif missing:
         st.warning(
-            "Good-neuron stPR missing for: "
+            "Good-neuron Coupling missing for: "
             + ", ".join(missing)
             + ". Using all neurons for those contexts."
         )
@@ -1132,109 +1335,751 @@ else:
         else:
             st.plotly_chart(fig_s, width="stretch")
 
-st.subheader("Δ stPR Strength (Task - Spont): Mean vs Variance")
-spec_spont_strength = next(
-    (spec for spec in CORR_VARIABLES if spec["name"] == "stPR Strength (Spont)"),
-    None,
-)
-spec_task_strength = next(
-    (spec for spec in CORR_VARIABLES if spec["name"] == "stPR Strength (Task)"),
-    None,
-)
-if spec_spont_strength is None or spec_task_strength is None:
-    st.warning("stPR strength specs missing.")
+st.subheader("Arousal-Split Correlation Analysis")
+region_lookup_all = neurons_df_calc[["pid", "cluster_id", "region"]].drop_duplicates()
+df_arousal_split = _build_arousal_lookup(data_for_corr.get("df_res"), region_lookup_all)
+
+if df_arousal_split is None or df_arousal_split.empty:
+    st.info("Arousal-group data is unavailable for split correlation analysis.")
 else:
-    df_spont_src = data_for_corr.get(spec_spont_strength["df"])
-    df_task_src = data_for_corr.get(spec_task_strength["df"])
-    if df_spont_src is None or df_task_src is None:
-        st.warning("stPR strength tables missing.")
+    available_specs_split = []
+    for spec in CORR_VARIABLES:
+        df_src = data_for_corr.get(spec["df"])
+        if df_src is None:
+            continue
+        if spec["v1"] not in df_src.columns or spec["v2"] not in df_src.columns:
+            continue
+        available_specs_split.append(spec)
+
+    if not available_specs_split:
+        st.info("No variables available for split correlation analysis.")
     else:
-        region_lookup_all = neurons_df_calc[["pid", "cluster_id", "region"]]
-        region_lookup_spont = _filter_region_lookup_for_spec(
-            region_lookup_all, spec_spont_strength, spont_pids
+        arousal_groups = [
+            ("arousal_plus", "Arousal +"),
+            ("arousal_minus", "Arousal -"),
+        ]
+
+        st.markdown("**Correlation Matrices by Region (Arousal Split)**")
+        region_counts_split = (
+            df_arousal_split.groupby("region")["cluster_id"]
+            .nunique()
+            .rename("n_neurons")
+            .reset_index()
+            .sort_values("region")
+            .reset_index(drop=True)
         )
-        df_spont = _build_variable_table(
-            df_spont_src, spec_spont_strength, region_lookup_spont
-        )
-        df_task = _build_variable_table(df_task_src, spec_task_strength, region_lookup_all)
-        if df_spont is None or df_task is None or df_spont.empty or df_task.empty:
-            st.warning("stPR strength data not available after filtering.")
+        if region_counts_split.empty:
+            st.info("No regions available for arousal-split matrices.")
         else:
-            df_merge = df_task.merge(
-                df_spont,
-                on=["pid", "cluster_id", "region"],
-                suffixes=("_task", "_spont"),
+            split_region_labels = [
+                f"{row['region']} (n={row['n_neurons']})"
+                for _, row in region_counts_split.iterrows()
+            ]
+            split_label_to_region = dict(zip(split_region_labels, region_counts_split["region"]))
+            selected_split_label = st.selectbox(
+                "Select region for arousal-split matrices",
+                split_region_labels,
+                key="arousal_split_region_matrix",
             )
-            if df_merge.empty:
-                st.warning("No overlapping neurons between task and spont stPR tables.")
-            else:
-                df_merge["diff"] = df_merge["mean_task"] - df_merge["mean_spont"]
+            selected_region_split = split_label_to_region.get(selected_split_label)
+
+            def _build_split_matrices(region_lookup_split, group_title):
+                n_total_units_split = int(len(region_lookup_split))
+                if n_total_units_split == 0:
+                    return None, None
+
+                var_tables_all = {}
+                for spec in available_specs_split:
+                    region_lookup_spec = _filter_region_lookup_for_spec(
+                        region_lookup_split, spec, spont_pids
+                    )
+                    df_var = _build_variable_table(
+                        data_for_corr.get(spec["df"]), spec, region_lookup_spec
+                    )
+                    if df_var is None or df_var.empty:
+                        continue
+                    var_tables_all[spec["name"]] = df_var
+
+                names = [
+                    spec["name"] for spec in available_specs_split if spec["name"] in var_tables_all
+                ]
+                n_vars = len(names)
+                if n_vars == 0:
+                    return None, None
+
+                n_pids_split = int(region_lookup_split["pid"].nunique())
                 if avg_by_pid_toggle:
-                    df_pid = (
-                        df_merge.groupby(["region", "pid"])["diff"]
-                        .agg(mean="mean", var="var", n="count")
-                        .reset_index()
-                    )
-                    region_stats = (
-                        df_pid.groupby("region")
-                        .agg(
-                            mean_diff=("mean", "mean"),
-                            var_diff=("var", "mean"),
-                            n_pids=("pid", "nunique"),
-                            n_neurons=("n", "sum"),
-                        )
-                        .reset_index()
-                    )
-                else:
-                    region_stats = (
-                        df_merge.groupby("region")["diff"]
-                        .agg(mean_diff="mean", var_diff="var", n_neurons="count")
-                        .reset_index()
-                    )
-                    region_stats["n_pids"] = (
-                        df_merge.groupby("region")["pid"].nunique().to_numpy()
-                    )
+                    pid_list = sorted(region_lookup_split["pid"].unique().tolist())
+                    rel_vals = {name: [] for name in names}
+                    rel_s_vals = {name: [] for name in names}
+                    corr_vals = {(a, b): [] for a in names for b in names if a != b}
+                    corr_s_vals = {(a, b): [] for a in names for b in names if a != b}
 
-                region_stats = region_stats.replace([np.inf, -np.inf], np.nan)
-                region_stats = region_stats.dropna(subset=["mean_diff", "var_diff"])
-                if region_stats.empty:
-                    st.info("No finite region statistics available.")
-                else:
-                    region_colors = _build_region_colors(region_stats["region"])
-                    fig = go.Figure()
-                    for _, row in region_stats.sort_values("region").iterrows():
-                        region = row["region"]
-                        color = region_colors.get(region)
-                        marker = dict(size=8, color=color) if color else dict(size=8)
-                        fig.add_trace(
-                            go.Scatter(
-                                x=[row["mean_diff"]],
-                                y=[row["var_diff"]],
-                                mode="markers",
-                                name=region,
-                                marker=marker,
-                                hovertemplate=(
-                                    f"Region: {region}<br>"
-                                    f"mean Δ={row['mean_diff']:.3f}<br>"
-                                    f"var Δ={row['var_diff']:.3f}<br>"
-                                    f"n_neurons={int(row['n_neurons'])}<br>"
-                                    f"n_pids={int(row['n_pids'])}<extra></extra>"
-                                ),
-                                showlegend=False,
+                    for pid in pid_list:
+                        region_pid = region_lookup_split.loc[region_lookup_split["pid"] == pid]
+                        if region_pid.empty:
+                            continue
+
+                        var_tables_pid = {}
+                        for spec in available_specs_split:
+                            name = spec["name"]
+                            if name not in names:
+                                continue
+                            region_pid_spec = _filter_region_lookup_for_spec(
+                                region_pid, spec, spont_pids
                             )
+                            df_var = _build_variable_table(
+                                data_for_corr.get(spec["df"]), spec, region_pid_spec
+                            )
+                            if df_var is None or df_var.empty:
+                                continue
+                            var_tables_pid[name] = df_var
+
+                        if not var_tables_pid:
+                            continue
+
+                        for spec in available_specs_split:
+                            name = spec["name"]
+                            if name not in names:
+                                continue
+                            if _is_firing_rate_spec(spec):
+                                rel_vals[name].append(np.nan)
+                                rel_s_vals[name].append(np.nan)
+                                continue
+                            df_var = var_tables_pid.get(name)
+                            if df_var is None:
+                                rel_vals[name].append(np.nan)
+                                rel_s_vals[name].append(np.nan)
+                                continue
+                            r_val, _ = _pearsonr_with_n(df_var[spec["v1"]], df_var[spec["v2"]])
+                            r_s, _ = _spearmanr_with_n(df_var[spec["v1"]], df_var[spec["v2"]])
+                            rel_vals[name].append(r_val)
+                            rel_s_vals[name].append(r_s)
+
+                        mean_wide = region_pid[["pid", "cluster_id"]].drop_duplicates()
+                        for spec in available_specs_split:
+                            name = spec["name"]
+                            df_var = var_tables_pid.get(name)
+                            if df_var is None:
+                                mean_wide[name] = np.nan
+                                continue
+                            mean_wide = mean_wide.merge(
+                                df_var[["pid", "cluster_id", "mean"]],
+                                on=["pid", "cluster_id"],
+                                how="left",
+                            ).rename(columns={"mean": name})
+
+                        for name_i in names:
+                            for name_j in names:
+                                if name_i == name_j:
+                                    continue
+                                r_val, _ = _pearsonr_with_n(mean_wide[name_i], mean_wide[name_j])
+                                r_s, _ = _spearmanr_with_n(mean_wide[name_i], mean_wide[name_j])
+                                corr_vals[(name_i, name_j)].append(r_val)
+                                corr_s_vals[(name_i, name_j)].append(r_s)
+
+                    corr_mat = np.full((n_vars, n_vars), np.nan, dtype=float)
+                    text_mat = np.empty((n_vars, n_vars), dtype=object)
+                    for i, name_i in enumerate(names):
+                        for j, name_j in enumerate(names):
+                            if i == j:
+                                r_val, n_val = _mean_with_count(rel_vals.get(name_i, []))
+                                corr_mat[i, j] = r_val
+                                text_mat[i, j] = (
+                                    f"rel={r_val:.2f}<br>(pids={n_val})"
+                                    if np.isfinite(r_val)
+                                    else f"rel=nan<br>(pids={n_val})"
+                                )
+                            else:
+                                r_val, n_val = _mean_with_count(corr_vals.get((name_i, name_j), []))
+                                corr_mat[i, j] = r_val
+                                text_mat[i, j] = (
+                                    f"r={r_val:.2f}<br>(pids={n_val})"
+                                    if np.isfinite(r_val)
+                                    else f"r=nan<br>(pids={n_val})"
+                                )
+
+                    spearman_mat = np.full((n_vars, n_vars), np.nan, dtype=float)
+                    spearman_text = np.empty((n_vars, n_vars), dtype=object)
+                    for i, name_i in enumerate(names):
+                        for j, name_j in enumerate(names):
+                            if i == j:
+                                r_val, n_val = _mean_with_count(rel_s_vals.get(name_i, []))
+                                spearman_mat[i, j] = r_val
+                                spearman_text[i, j] = (
+                                    f"rel={r_val:.2f}<br>(pids={n_val})"
+                                    if np.isfinite(r_val)
+                                    else f"rel=nan<br>(pids={n_val})"
+                                )
+                            else:
+                                r_val, n_val = _mean_with_count(
+                                    corr_s_vals.get((name_i, name_j), [])
+                                )
+                                spearman_mat[i, j] = r_val
+                                spearman_text[i, j] = (
+                                    f"rho={r_val:.2f}<br>(pids={n_val})"
+                                    if np.isfinite(r_val)
+                                    else f"rho=nan<br>(pids={n_val})"
+                                )
+                else:
+                    reliability = {}
+                    reliability_n = {}
+                    for spec in available_specs_split:
+                        name = spec["name"]
+                        df_var = var_tables_all.get(name)
+                        if df_var is None:
+                            reliability[name] = np.nan
+                            reliability_n[name] = 0
+                            continue
+                        if _is_firing_rate_spec(spec):
+                            reliability[name] = np.nan
+                            reliability_n[name] = 0
+                            continue
+                        r_val, n_val = _pearsonr_with_n(df_var[spec["v1"]], df_var[spec["v2"]])
+                        reliability[name] = r_val
+                        reliability_n[name] = n_val
+
+                    mean_wide = region_lookup_split[["pid", "cluster_id"]].drop_duplicates()
+                    for spec in available_specs_split:
+                        name = spec["name"]
+                        df_var = var_tables_all.get(name)
+                        if df_var is None:
+                            mean_wide[name] = np.nan
+                            continue
+                        mean_wide = mean_wide.merge(
+                            df_var[["pid", "cluster_id", "mean"]],
+                            on=["pid", "cluster_id"],
+                            how="left",
+                        ).rename(columns={"mean": name})
+
+                    corr_mat = np.full((n_vars, n_vars), np.nan, dtype=float)
+                    text_mat = np.empty((n_vars, n_vars), dtype=object)
+                    for i, name_i in enumerate(names):
+                        for j, name_j in enumerate(names):
+                            if i == j:
+                                r_val = reliability.get(name_i, np.nan)
+                                n_val = reliability_n.get(name_i, 0)
+                                corr_mat[i, j] = r_val
+                                text_mat[i, j] = (
+                                    f"rel={r_val:.2f}<br>(n={n_val})"
+                                    if np.isfinite(r_val)
+                                    else f"rel=nan<br>(n={n_val})"
+                                )
+                            else:
+                                r_val, n_val = _pearsonr_with_n(mean_wide[name_i], mean_wide[name_j])
+                                corr_mat[i, j] = r_val
+                                text_mat[i, j] = (
+                                    f"r={r_val:.2f}<br>(n={n_val})"
+                                    if np.isfinite(r_val)
+                                    else f"r=nan<br>(n={n_val})"
+                                )
+
+                    spearman_mat = np.full((n_vars, n_vars), np.nan, dtype=float)
+                    spearman_text = np.empty((n_vars, n_vars), dtype=object)
+                    for i, name_i in enumerate(names):
+                        for j, name_j in enumerate(names):
+                            if i == j:
+                                spec = next(
+                                    (s for s in available_specs_split if s["name"] == name_i), None
+                                )
+                                if spec is None or name_i not in var_tables_all:
+                                    r_val, n_val = np.nan, 0
+                                elif _is_firing_rate_spec(spec):
+                                    r_val, n_val = np.nan, 0
+                                else:
+                                    r_val, n_val = _spearmanr_with_n(
+                                        var_tables_all[name_i][spec["v1"]],
+                                        var_tables_all[name_i][spec["v2"]],
+                                    )
+                                spearman_mat[i, j] = r_val
+                                spearman_text[i, j] = (
+                                    f"rel={r_val:.2f}<br>(n={n_val})"
+                                    if np.isfinite(r_val)
+                                    else f"rel=nan<br>(n={n_val})"
+                                )
+                            else:
+                                r_val, n_val = _spearmanr_with_n(mean_wide[name_i], mean_wide[name_j])
+                                spearman_mat[i, j] = r_val
+                                spearman_text[i, j] = (
+                                    f"rho={r_val:.2f}<br>(n={n_val})"
+                                    if np.isfinite(r_val)
+                                    else f"rho=nan<br>(n={n_val})"
+                                )
+
+                avg_text = (
+                    f" | avg across PIDs (n_pids={n_pids_split})" if avg_by_pid_toggle else ""
+                )
+                fig_pearson = go.Figure(
+                    data=go.Heatmap(
+                        z=corr_mat,
+                        x=names,
+                        y=names,
+                        zmin=-1,
+                        zmax=1,
+                        colorscale="RdBu",
+                        reversescale=True,
+                        text=text_mat,
+                        texttemplate="%{text}",
+                        hovertemplate="X=%{x}<br>Y=%{y}<br>%{text}<extra></extra>",
+                    )
+                )
+                fig_pearson.update_layout(
+                    title=(
+                        "Reliability (diag) + Pairwise Pearson (off-diag) | "
+                        f"{group_title} | Region {selected_region_split} | "
+                        f"N total ({label_filter_text}): {n_total_units_split}{avg_text}"
+                    ),
+                    height=min(1000, max(500, 40 * n_vars + 200)),
+                    margin=dict(l=90, r=30, t=90, b=90),
+                    template=PLOTLY_TEMPLATE,
+                )
+                fig_pearson.update_xaxes(tickangle=45)
+
+                fig_spearman = go.Figure(
+                    data=go.Heatmap(
+                        z=spearman_mat,
+                        x=names,
+                        y=names,
+                        zmin=-1,
+                        zmax=1,
+                        colorscale="RdBu",
+                        reversescale=True,
+                        text=spearman_text,
+                        texttemplate="%{text}",
+                        hovertemplate="X=%{x}<br>Y=%{y}<br>%{text}<extra></extra>",
+                    )
+                )
+                fig_spearman.update_layout(
+                    title=(
+                        "Reliability (diag) + Pairwise Spearman (off-diag) | "
+                        f"{group_title} | Region {selected_region_split} | "
+                        f"N total ({label_filter_text}): {n_total_units_split}{avg_text}"
+                    ),
+                    height=min(1000, max(500, 40 * n_vars + 200)),
+                    margin=dict(l=90, r=30, t=90, b=90),
+                    template=PLOTLY_TEMPLATE,
+                )
+                fig_spearman.update_xaxes(tickangle=45)
+                return fig_pearson, fig_spearman
+
+            if selected_region_split is None:
+                st.info("No region selected for arousal-split matrices.")
+            else:
+                for group_key, group_title in arousal_groups:
+                    st.markdown(f"**{group_title}**")
+                    region_lookup_split = df_arousal_split.loc[
+                        (df_arousal_split["region"] == selected_region_split)
+                        & (df_arousal_split["arousal_group"] == group_key),
+                        ["pid", "cluster_id", "region"],
+                    ].drop_duplicates()
+                    fig_p_split, fig_s_split = _build_split_matrices(
+                        region_lookup_split, group_title
+                    )
+                    col_a, col_b = st.columns(2)
+                    with col_a:
+                        st.markdown("**Pearson**")
+                        if fig_p_split is None:
+                            st.info("No data for Pearson matrix.")
+                        else:
+                            st.plotly_chart(fig_p_split, width="stretch")
+                    with col_b:
+                        st.markdown("**Spearman**")
+                        if fig_s_split is None:
+                            st.info("No data for Spearman matrix.")
+                        else:
+                            st.plotly_chart(fig_s_split, width="stretch")
+
+        st.markdown("**Correlation vs Reliability by Region (Arousal Split)**")
+        var_names_split = [spec["name"] for spec in available_specs_split]
+        min_neurons_split = int(
+            st.number_input(
+                "Min neurons per region (Arousal split)",
+                min_value=0,
+                value=100,
+                step=10,
+                key="arousal_split_min_neurons",
+            )
+        )
+        var_x_split = st.selectbox(
+            "Variable 1 (Arousal split)",
+            var_names_split,
+            index=0,
+            key="arousal_split_var_x",
+        )
+        default_idx_split = 1 if len(var_names_split) > 1 else 0
+        var_y_split = st.selectbox(
+            "Variable 2 (Arousal split)",
+            var_names_split,
+            index=default_idx_split,
+            key="arousal_split_var_y",
+        )
+
+        spec_by_name_split = {spec["name"]: spec for spec in available_specs_split}
+        spec_x_split = spec_by_name_split[var_x_split]
+        spec_y_split = spec_by_name_split[var_y_split]
+
+        def _build_scatter_split(method_name, neurons_df_source, group_title):
+            region_counts_source = (
+                neurons_df_source.groupby("region")["cluster_id"]
+                .nunique()
+                .rename("n_neurons")
+                .reset_index()
+            )
+            eligible_regions_split = region_counts_source.loc[
+                region_counts_source["n_neurons"] >= min_neurons_split, "region"
+            ].tolist()
+            if not eligible_regions_split:
+                return None
+            region_colors_split = _build_region_colors(eligible_regions_split)
+
+            records = []
+            x_is_fr = _is_firing_rate_spec(spec_x_split)
+            y_is_fr = _is_firing_rate_spec(spec_y_split)
+            for region in sorted(eligible_regions_split):
+                region_ids = neurons_df_source.loc[
+                    neurons_df_source["region"] == region, ["pid", "cluster_id", "region"]
+                ]
+                if region_ids.empty:
+                    continue
+
+                if avg_by_pid_toggle:
+                    pid_list = sorted(region_ids["pid"].unique().tolist())
+                    rel_x_vals = []
+                    rel_y_vals = []
+                    corr_vals = []
+                    for pid in pid_list:
+                        region_pid = region_ids.loc[region_ids["pid"] == pid]
+                        if region_pid.empty:
+                            continue
+                        region_pid_x = _filter_region_lookup_for_spec(
+                            region_pid, spec_x_split, spont_pids
+                        )
+                        region_pid_y = _filter_region_lookup_for_spec(
+                            region_pid, spec_y_split, spont_pids
+                        )
+                        df_var_x = _build_variable_table(
+                            data_for_corr.get(spec_x_split["df"]), spec_x_split, region_pid_x
+                        )
+                        df_var_y = _build_variable_table(
+                            data_for_corr.get(spec_y_split["df"]), spec_y_split, region_pid_y
+                        )
+                        if df_var_x is None or df_var_y is None:
+                            continue
+
+                        if method_name == "spearman":
+                            rel_x_pid, _ = _spearmanr_with_n(
+                                df_var_x[spec_x_split["v1"]], df_var_x[spec_x_split["v2"]]
+                            )
+                            rel_y_pid, _ = _spearmanr_with_n(
+                                df_var_y[spec_y_split["v1"]], df_var_y[spec_y_split["v2"]]
+                            )
+                        else:
+                            rel_x_pid, _ = _pearsonr_with_n(
+                                df_var_x[spec_x_split["v1"]], df_var_x[spec_x_split["v2"]]
+                            )
+                            rel_y_pid, _ = _pearsonr_with_n(
+                                df_var_y[spec_y_split["v1"]], df_var_y[spec_y_split["v2"]]
+                            )
+
+                        if x_is_fr:
+                            rel_x_pid = np.nan
+                        if y_is_fr:
+                            rel_y_pid = np.nan
+
+                        merged = df_var_x[["pid", "cluster_id", "mean"]].merge(
+                            df_var_y[["pid", "cluster_id", "mean"]],
+                            on=["pid", "cluster_id"],
+                            how="inner",
+                            suffixes=("_x", "_y"),
+                        )
+                        if merged.empty:
+                            continue
+                        if method_name == "spearman":
+                            corr_pid, _ = _spearmanr_with_n(merged["mean_x"], merged["mean_y"])
+                        else:
+                            corr_pid, _ = _pearsonr_with_n(merged["mean_x"], merged["mean_y"])
+
+                        rel_x_vals.append(rel_x_pid)
+                        rel_y_vals.append(rel_y_pid)
+                        corr_vals.append(corr_pid)
+
+                    rel_x, n_rel_x = _mean_with_count(rel_x_vals)
+                    rel_y, n_rel_y = _mean_with_count(rel_y_vals)
+                    corr_val, n_corr = _mean_with_count(corr_vals)
+                else:
+                    region_ids_x = _filter_region_lookup_for_spec(
+                        region_ids, spec_x_split, spont_pids
+                    )
+                    region_ids_y = _filter_region_lookup_for_spec(
+                        region_ids, spec_y_split, spont_pids
+                    )
+                    df_var_x = _build_variable_table(
+                        data_for_corr.get(spec_x_split["df"]), spec_x_split, region_ids_x
+                    )
+                    df_var_y = _build_variable_table(
+                        data_for_corr.get(spec_y_split["df"]), spec_y_split, region_ids_y
+                    )
+                    if df_var_x is None or df_var_y is None:
+                        continue
+
+                    if method_name == "spearman":
+                        rel_x, n_rel_x = _spearmanr_with_n(
+                            df_var_x[spec_x_split["v1"]], df_var_x[spec_x_split["v2"]]
+                        )
+                        rel_y, n_rel_y = _spearmanr_with_n(
+                            df_var_y[spec_y_split["v1"]], df_var_y[spec_y_split["v2"]]
+                        )
+                    else:
+                        rel_x, n_rel_x = _pearsonr_with_n(
+                            df_var_x[spec_x_split["v1"]], df_var_x[spec_x_split["v2"]]
+                        )
+                        rel_y, n_rel_y = _pearsonr_with_n(
+                            df_var_y[spec_y_split["v1"]], df_var_y[spec_y_split["v2"]]
                         )
 
-                    avg_text = " (avg across PIDs)" if avg_by_pid_toggle else ""
-                    fig.update_layout(
-                        title=(
-                            "Region-wise Δ stPR strength (Task - Spont) "
-                            f"{avg_text} | {label_filter_text}"
-                        ),
-                        xaxis_title="Mean Δ stPR strength (Task - Spont)",
-                        yaxis_title="Variance of Δ stPR strength",
-                        template=PLOTLY_TEMPLATE,
-                        margin=dict(l=70, r=40, t=80, b=60),
-                        height=520,
-                        width=900,
+                    if x_is_fr:
+                        rel_x, n_rel_x = np.nan, 0
+                    if y_is_fr:
+                        rel_y, n_rel_y = np.nan, 0
+
+                    merged = df_var_x[["pid", "cluster_id", "mean"]].merge(
+                        df_var_y[["pid", "cluster_id", "mean"]],
+                        on=["pid", "cluster_id"],
+                        how="inner",
+                        suffixes=("_x", "_y"),
                     )
-                    st.plotly_chart(fig, width="stretch")
+                    if merged.empty:
+                        continue
+
+                    if method_name == "spearman":
+                        corr_val, n_corr = _spearmanr_with_n(merged["mean_x"], merged["mean_y"])
+                    else:
+                        corr_val, n_corr = _pearsonr_with_n(merged["mean_x"], merged["mean_y"])
+
+                if x_is_fr and y_is_fr:
+                    rel_total = np.nan
+                elif x_is_fr:
+                    rel_total = rel_y
+                elif y_is_fr:
+                    rel_total = rel_x
+                else:
+                    rel_prod = (
+                        rel_x * rel_y if np.isfinite(rel_x) and np.isfinite(rel_y) else np.nan
+                    )
+                    if rel_prod is not None and np.isfinite(rel_prod) and rel_prod >= 0:
+                        rel_total = float(np.sqrt(rel_prod))
+                    else:
+                        rel_total = np.nan
+
+                n_neurons = int(
+                    region_counts_source.loc[
+                        region_counts_source["region"] == region, "n_neurons"
+                    ].values[0]
+                )
+                records.append(
+                    {
+                        "region": region,
+                        "corr": corr_val,
+                        "reliability": rel_total,
+                        "n_neurons": n_neurons,
+                        "n_corr": n_corr,
+                        "n_rel_x": n_rel_x,
+                        "n_rel_y": n_rel_y,
+                    }
+                )
+
+            df_plot = pd.DataFrame(records)
+            if df_plot.empty or "corr" not in df_plot.columns or "reliability" not in df_plot.columns:
+                return None
+            df_plot = df_plot[np.isfinite(df_plot["corr"]) & np.isfinite(df_plot["reliability"])]
+            if df_plot.empty:
+                return None
+
+            highlight_regions = {
+                "VISp",
+                "MOs",
+                "CP",
+                "CA1",
+                "SCm",
+                "ZI",
+                "AUDp",
+                "GRN",
+            }
+
+            fig = go.Figure()
+            for _, row in df_plot.sort_values("region").iterrows():
+                region = row["region"]
+                color = region_colors_split.get(region)
+                marker = dict(size=8, color=color) if color else dict(size=8)
+                if region in highlight_regions:
+                    marker["line"] = dict(color="black", width=1)
+                fig.add_trace(
+                    go.Scatter(
+                        x=[row["reliability"]],
+                        y=[row["corr"]],
+                        mode="markers",
+                        name=region,
+                        marker=marker,
+                        showlegend=region in highlight_regions,
+                        hovertemplate=(
+                            f"Region: {region}<br>"
+                            f"corr={row['corr']:.2f}<br>"
+                            f"rel={row['reliability']:.2f}<br>"
+                            f"n={row['n_neurons']}<extra></extra>"
+                        ),
+                    )
+                )
+
+            avg_text = " (avg across PIDs)" if avg_by_pid_toggle else ""
+            fig.update_layout(
+                title=(
+                    f"{method_name.title()} correlation vs total reliability | {group_title} | "
+                    f"{var_x_split} vs {var_y_split} | "
+                    f"regions with >= {min_neurons_split} neurons ({label_filter_text}){avg_text}"
+                ),
+                xaxis_title="Total reliability (sqrt(rel1 * rel2))",
+                yaxis_title="Correlation between variables",
+                template=PLOTLY_TEMPLATE,
+                legend=dict(x=1.02, y=1, yanchor="top"),
+                margin=dict(l=80, r=200, t=90, b=70),
+                height=600,
+                width=900,
+            )
+            x_vals = df_plot["reliability"].to_numpy(dtype=float)
+            y_vals = df_plot["corr"].to_numpy(dtype=float)
+            min_val = float(np.nanmin([np.nanmin(x_vals), np.nanmin(y_vals)]))
+            max_val = float(np.nanmax([np.nanmax(x_vals), np.nanmax(y_vals)]))
+            if np.isfinite(min_val) and np.isfinite(max_val) and min_val < max_val:
+                fig.add_shape(
+                    type="line",
+                    x0=min_val,
+                    y0=min_val,
+                    x1=max_val,
+                    y1=max_val,
+                    line=dict(color="red", dash="dash"),
+                )
+            return fig
+
+        for group_key, group_title in arousal_groups:
+            st.markdown(f"**{group_title}**")
+            neurons_group = df_arousal_split.loc[
+                df_arousal_split["arousal_group"] == group_key, ["pid", "cluster_id", "region"]
+            ].drop_duplicates()
+            fig_p_split = _build_scatter_split("pearson", neurons_group, group_title)
+            fig_s_split = _build_scatter_split("spearman", neurons_group, group_title)
+
+            col_p, col_s = st.columns(2)
+            with col_p:
+                st.markdown("**Pearson**")
+                if fig_p_split is None:
+                    st.info("No data for Pearson plot.")
+                else:
+                    st.plotly_chart(fig_p_split, width="stretch")
+            with col_s:
+                st.markdown("**Spearman**")
+                if fig_s_split is None:
+                    st.info("No data for Spearman plot.")
+                else:
+                    st.plotly_chart(fig_s_split, width="stretch")
+
+st.subheader("Arousal + vs Arousal - Fractions by Region")
+df_res_arousal = data_for_corr.get("df_res")
+region_lookup_all = neurons_df_calc[["pid", "cluster_id", "region"]].drop_duplicates()
+df_arousal = _build_arousal_lookup(df_res_arousal, region_lookup_all)
+if df_arousal is None or df_arousal.empty:
+    st.info("Arousal-group data is unavailable.")
+else:
+    if avg_by_pid_toggle:
+        df_pid = (
+            df_arousal.groupby(["region", "pid"])["arousal_group"]
+            .agg(
+                n_total="count",
+                n_plus=lambda s: int((s == "arousal_plus").sum()),
+                n_minus=lambda s: int((s == "arousal_minus").sum()),
+            )
+            .reset_index()
+        )
+        df_pid = df_pid[df_pid["n_total"] > 0].copy()
+        if df_pid.empty:
+            df_plot = pd.DataFrame()
+        else:
+            df_pid["frac_plus_pct"] = 100.0 * df_pid["n_plus"] / df_pid["n_total"]
+            df_pid["frac_minus_pct"] = 100.0 * df_pid["n_minus"] / df_pid["n_total"]
+            df_plot = (
+                df_pid.groupby("region")
+                .agg(
+                    frac_plus_pct=("frac_plus_pct", "mean"),
+                    frac_minus_pct=("frac_minus_pct", "mean"),
+                    n_pids=("pid", "nunique"),
+                    n_neurons=("n_total", "sum"),
+                )
+                .reset_index()
+            )
+    else:
+        df_plot = (
+            df_arousal.groupby("region")["arousal_group"]
+            .agg(
+                n_total="count",
+                n_plus=lambda s: int((s == "arousal_plus").sum()),
+                n_minus=lambda s: int((s == "arousal_minus").sum()),
+            )
+            .reset_index()
+        )
+        df_plot = df_plot[df_plot["n_total"] > 0].copy()
+        if not df_plot.empty:
+            df_plot["frac_plus_pct"] = 100.0 * df_plot["n_plus"] / df_plot["n_total"]
+            df_plot["frac_minus_pct"] = 100.0 * df_plot["n_minus"] / df_plot["n_total"]
+            df_plot["n_neurons"] = df_plot["n_total"].astype(int)
+            df_plot["n_pids"] = (
+                df_arousal.groupby("region")["pid"].nunique().reindex(df_plot["region"]).to_numpy()
+            )
+
+    if df_plot.empty:
+        st.info("No finite region statistics available.")
+    else:
+        df_plot = df_plot.replace([np.inf, -np.inf], np.nan)
+        df_plot = df_plot.dropna(subset=["frac_plus_pct", "frac_minus_pct"])
+        if df_plot.empty:
+            st.info("No finite region statistics available.")
+        else:
+            region_colors = _build_region_colors(df_plot["region"])
+            fig_arousal = go.Figure()
+            for _, row in df_plot.sort_values("region").iterrows():
+                region = str(row["region"])
+                color = region_colors.get(region)
+                marker = dict(size=9, color=color) if color else dict(size=9)
+                fig_arousal.add_trace(
+                    go.Scatter(
+                        x=[float(row["frac_minus_pct"])],
+                        y=[float(row["frac_plus_pct"])],
+                        mode="markers",
+                        marker=marker,
+                        showlegend=False,
+                        hovertemplate=(
+                            f"Region: {region}<br>"
+                            f"Arousal-: {float(row['frac_minus_pct']):.1f}%<br>"
+                            f"Arousal+: {float(row['frac_plus_pct']):.1f}%<br>"
+                            f"n_neurons={int(row['n_neurons'])}<br>"
+                            f"n_pids={int(row['n_pids'])}<extra></extra>"
+                        ),
+                    )
+                )
+            avg_text = " (avg across PIDs)" if avg_by_pid_toggle else ""
+            fig_arousal.update_layout(
+                title=f"Arousal + vs Arousal - Fractions by Region{avg_text}",
+                xaxis_title="Fraction of Arousal- neurons (%)",
+                yaxis_title="Fraction of Arousal+ neurons (%)",
+                template=PLOTLY_TEMPLATE,
+                margin=dict(l=80, r=40, t=80, b=70),
+                height=620,
+                width=850,
+            )
+            fig_arousal.update_xaxes(
+                title_font=dict(color="blue"),
+                tickfont=dict(color="blue"),
+            )
+            fig_arousal.update_yaxes(
+                title_font=dict(color="red"),
+                tickfont=dict(color="red"),
+            )
+            st.plotly_chart(fig_arousal, width="stretch")
