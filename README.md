@@ -1,17 +1,14 @@
 # SeqProject2026
 
-Sequence analysis for IBL Neuropixels sessions, with a cache-first workflow for fast dashboards.
+Brain-wide sequence analysis for IBL Neuropixels sessions, with a cache-first pipeline for interactive dashboards.
 
-## What this does
-- Computes per-neuron delay and coupling metrics from IBL task/passive/whisking data.
-- Saves per-PID cache files in `data/dashboard_cache/*.pkl`.
-- Uses those cache files to drive interactive dashboards.
+## Overview
+This repository computes neuron-level timing and coupling metrics from task, passive, and whisking-aligned data, then serves those results through dashboards for exploration.
 
-Main flow: **run `03_calc_dashboard.py` first, then open dashboards**.
+Recommended workflow: **run `03_calc_dashboard.py` first, then launch dashboards**.
 
 ## Required packages
-This repo includes an `environment.yml` with core analysis dependencies.  
-For the full `03 calc -> dashboards` flow, make sure these are available:
+`environment.yml` provides most dependencies. For the full analysis + dashboard workflow, ensure these are installed:
 
 - `numpy`
 - `pandas`
@@ -26,8 +23,8 @@ For the full `03 calc -> dashboards` flow, make sure these are available:
 - `plotly-resampler`
 - `streamlit`
 
-## Setup
-From the repo root:
+## Quick start
+From repository root:
 
 ```bash
 conda env create -f environment.yml
@@ -35,36 +32,51 @@ conda activate Seq2026
 pip install streamlit plotly plotly-resampler rastermap
 ```
 
-## Run order
-### 1) Compute cache (`03 calc`)
-Edit options in `notebooks/03_calc_dashboard.py` (`COMPUTE_ALL`, `PIDS`, `SUBJECT`, `REGIONS`, `TAG`), then run:
+## Pipeline
+### 1) Run 03 calc (build/update cache)
+Set processing scope in `notebooks/03_calc_dashboard.py` (`COMPUTE_ALL`, `PIDS`, `SUBJECT`, `REGIONS`, `TAG`) and run:
 
 ```bash
 python notebooks/03_calc_dashboard.py
 ```
 
-This creates/updates:
+Primary outputs:
+
 - `data/dashboard_cache/<pid>.pkl`
 - `data/processed/<pid>_delay_results_dashboard.csv`
 
-### 2) Open dashboard(s)
-Option A (full Streamlit dashboard):
+### 2) Launch dashboards
+Full Streamlit dashboard:
 
 ```bash
 streamlit run notebooks/04_dashboard.py
 ```
 
-Option B (lightweight local web dashboard):
+Lightweight local web dashboard:
 
 ```bash
 python web_dashboard/server.py
 ```
 
-Then open: `http://127.0.0.1:8000`
+Open `http://127.0.0.1:8000` for the lightweight dashboard.
 
-## Repository layout
-- `notebooks/03_calc_dashboard.py`: cache builder
-- `notebooks/04_dashboard.py`: Streamlit dashboard
-- `web_dashboard/server.py`: lightweight local dashboard server
-- `utils/`: analysis/plotting/io helpers
-- `data/`: cache, raw, and processed outputs
+## Data and outputs
+- Input data are fetched through ONE/IBL and cached under `data/raw`.
+- Analysis caches for dashboard use are written to `data/dashboard_cache`.
+- Processed tables are written to `data/processed`.
+- Figures and exports are stored under `results`.
+
+## Scientific note
+- The coupling analysis in this project is based on spike-triggered population coupling with split-half reliability estimates across behavioral contexts (spontaneous, task, ITI).
+- Coupling method reference (as requested): https://www.biorxiv.org/content/10.64898/2025.12.20.695676v2
+
+## Project structure
+- `notebooks/03_calc_dashboard.py`: main cache computation pipeline
+- `notebooks/04_dashboard.py`: full Streamlit dashboard
+- `web_dashboard/server.py`: lightweight HTTP dashboard
+- `utils/`: IO, analysis, and plotting utilities
+- `data/`: raw cache, processed outputs, dashboard cache
+- `results/`: figures and derived outputs
+
+## License
+Released under the MIT License. See `LICENSE`.
