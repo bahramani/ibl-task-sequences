@@ -133,7 +133,7 @@ def load_session_data(
 
     if load_pupil:
         try:
-            sl.load_pupil()
+            sl.load_pupil(snr_thresh=4.5)
             pupil_cols = None
             if isinstance(sl.pupil, pd.DataFrame):
                 pupil_cols = list(sl.pupil.columns)

@@ -196,7 +196,7 @@ def _get_one(mode):
 
 
 @st.cache_resource(show_spinner=False)
-def _load_raw_session(pid, load_wheel, load_pose, load_motion_energy, mode):
+def _load_raw_session(pid, load_wheel, load_pose, load_motion_energy, load_pupil, mode):
     one = _get_one(mode)
     ssl, spikes, clusters, sl = load_session_data(
         pid,
@@ -204,6 +204,7 @@ def _load_raw_session(pid, load_wheel, load_pose, load_motion_energy, mode):
         load_wheel=load_wheel,
         load_pose=load_pose,
         load_motion_energy=load_motion_energy,
+        load_pupil=load_pupil,
     )
     return spikes, clusters, sl, ssl
 
@@ -1104,6 +1105,15 @@ st.sidebar.subheader("Raw data")
 load_wheel = st.sidebar.toggle("Load wheel data", value=False)
 load_pose = st.sidebar.toggle("Load pose data", value=False)
 load_motion_energy = st.sidebar.toggle("Load motion energy data", value=False)
+load_pupil = st.sidebar.toggle("Load pupil data", value=True)
+pupil_signal_mode = st.sidebar.selectbox(
+    "Pupil signal",
+    ("Smooth", "Raw"),
+    index=0,
+)
+pupil_value_col = (
+    "pupilDiameter_smooth" if pupil_signal_mode == "Smooth" else "pupilDiameter_raw"
+)
 allow_remote = st.sidebar.toggle("Allow Alyx lookup (online)", value=True)
 
 with st.spinner("Loading session cache..."):
@@ -1122,6 +1132,7 @@ with st.spinner("Loading raw session data (data/raw)..."):
             load_wheel=load_wheel,
             load_pose=load_pose,
             load_motion_energy=load_motion_energy,
+            load_pupil=load_pupil,
             mode="local",
         )
         raw_source = "local"
@@ -1134,6 +1145,7 @@ with st.spinner("Loading raw session data (data/raw)..."):
                     load_wheel=load_wheel,
                     load_pose=load_pose,
                     load_motion_energy=load_motion_energy,
+                    load_pupil=load_pupil,
                     mode="remote",
                 )
                 raw_source = "remote"
@@ -1525,6 +1537,7 @@ else:
         df_firing_rate=df_firing_rate,
         pupil_features=data.get("pupil_features"),
         pupil_times=data.get("pupil_times"),
+        pupil_value_col=pupil_value_col,
         region_colors=region_colors,
         extra_event_times=passive_event_times if show_passive_events else None,
         extra_event_styles=passive_event_styles,
@@ -1563,6 +1576,9 @@ fig_trial = plot_trial_raster_plotly(
     df_coupling_task=df_coupling_task_plot,
     df_coupling_iti=df_coupling_iti_plot,
     df_firing_rate=df_firing_rate,
+    pupil_features=data.get("pupil_features"),
+    pupil_times=data.get("pupil_times"),
+    pupil_value_col=pupil_value_col,
     region_colors=region_colors,
 )
 st.plotly_chart(fig_trial, width="stretch")

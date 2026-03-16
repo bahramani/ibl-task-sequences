@@ -218,6 +218,126 @@ def _extract_precomputed_motion_mean_series(
     return t_vals[order], y_vals[order]
 
 
+def _extract_pupil_series_from_df(
+    pupil_df,
+    t_start,
+    t_end,
+    t_offset=0.0,
+    value_col="pupilDiameter_smooth",
+):
+    if pupil_df is None or not isinstance(pupil_df, pd.DataFrame) or pupil_df.empty:
+        return np.array([]), np.array([])
+    if value_col not in pupil_df.columns:
+        return np.array([]), np.array([])
+
+    if "times" in pupil_df.columns:
+        t_vals = np.asarray(pupil_df["times"], dtype=float)
+    elif "time" in pupil_df.columns:
+        t_vals = np.asarray(pupil_df["time"], dtype=float)
+    else:
+        try:
+            t_vals = np.asarray(pupil_df.index, dtype=float)
+        except Exception:
+            return np.array([]), np.array([])
+    y_vals = np.asarray(pupil_df[value_col], dtype=float)
+
+    n = int(min(t_vals.size, y_vals.size))
+    if n <= 0:
+        return np.array([]), np.array([])
+    t_vals = t_vals[:n]
+    y_vals = y_vals[:n]
+
+    mask = (
+        np.isfinite(t_vals)
+        & np.isfinite(y_vals)
+        & (t_vals >= float(t_start))
+        & (t_vals <= float(t_end))
+    )
+    if not np.any(mask):
+        return np.array([]), np.array([])
+    t_vals = t_vals[mask] - float(t_offset)
+    y_vals = y_vals[mask]
+    order = np.argsort(t_vals)
+    return t_vals[order], y_vals[order]
+
+
+def _extract_mean_pupil_series(
+    pupil,
+    pupil_features,
+    pupil_times,
+    t_start,
+    t_end,
+    t_offset=0.0,
+    camera_keys=("leftCamera", "rightCamera"),
+    value_col="pupilDiameter_smooth",
+):
+    traces = []
+    if isinstance(pupil, dict):
+        for key in camera_keys:
+            t_arr, v_arr = _extract_pupil_series_from_df(
+                pupil.get(key),
+                t_start,
+                t_end,
+                t_offset=t_offset,
+                value_col=value_col,
+            )
+            if t_arr.size > 0 and v_arr.size > 0:
+                traces.append((t_arr, v_arr))
+    elif isinstance(pupil, pd.DataFrame):
+        t_arr, v_arr = _extract_pupil_series_from_df(
+            pupil,
+            t_start,
+            t_end,
+            t_offset=t_offset,
+            value_col=value_col,
+        )
+        if t_arr.size > 0 and v_arr.size > 0:
+            traces.append((t_arr, v_arr))
+
+    if not traces and isinstance(pupil_features, pd.DataFrame) and pupil_times is not None:
+        if value_col in pupil_features.columns:
+            t_vals = np.asarray(pupil_times, dtype=float).reshape(-1)
+            y_vals = np.asarray(pupil_features[value_col], dtype=float).reshape(-1)
+            n = int(min(t_vals.size, y_vals.size))
+            if n > 0:
+                t_vals = t_vals[:n]
+                y_vals = y_vals[:n]
+                mask = (
+                    np.isfinite(t_vals)
+                    & np.isfinite(y_vals)
+                    & (t_vals >= float(t_start))
+                    & (t_vals <= float(t_end))
+                )
+                if np.any(mask):
+                    t_vals = t_vals[mask] - float(t_offset)
+                    y_vals = y_vals[mask]
+                    order = np.argsort(t_vals)
+                    traces.append((t_vals[order], y_vals[order]))
+
+    if not traces:
+        return np.array([]), np.array([])
+    if len(traces) == 1:
+        return traces[0]
+
+    t_union = np.unique(np.concatenate([arr[0] for arr in traces]))
+    if t_union.size == 0:
+        return np.array([]), np.array([])
+
+    interp_vals = []
+    for t_arr, v_arr in traces:
+        vals = np.interp(t_union, t_arr, v_arr, left=np.nan, right=np.nan)
+        interp_vals.append(vals)
+    stack = np.vstack(interp_vals)
+    valid_count = np.sum(np.isfinite(stack), axis=0)
+    sum_vals = np.nansum(stack, axis=0)
+    mean_vals = np.full(t_union.shape, np.nan, dtype=float)
+    keep = valid_count > 0
+    mean_vals[keep] = sum_vals[keep] / valid_count[keep]
+    if not np.any(keep):
+        return np.array([]), np.array([])
+    return t_union[keep], mean_vals[keep]
+
+
 def _get_trials_array_field(trials, key):
     if trials is None:
         return None
@@ -806,6 +926,7 @@ def plot_trial_raster_plotly(
     df_firing_rate=None,
     pupil_features=None,
     pupil_times=None,
+    pupil_value_col="pupilDiameter_smooth",
     region_colors=None,
     extra_event_times=None,
     extra_event_styles=None,
@@ -818,11 +939,22 @@ def plot_trial_raster_plotly(
     wheel = _get_session_field(sl, "wheel")
     pose = _get_session_field(sl, "pose")
     motion_energy = _get_session_field(sl, "motion_energy")
+    pupil = _get_session_field(sl, "pupil")
     if trials is None:
         return go.Figure()
 
     template = config_plot.get("PLOTLY_TEMPLATE", DEFAULT_TEMPLATE)
     base_color = _template_base_color(template)
+    pupil_col_norm = str(pupil_value_col or "").strip().lower()
+    if "raw" in pupil_col_norm:
+        pupil_axis_label = "Pupil (raw)"
+        pupil_subplot_title = "Pupil diameter (raw)"
+    elif "smooth" in pupil_col_norm:
+        pupil_axis_label = "Pupil (smooth)"
+        pupil_subplot_title = "Pupil diameter (smooth)"
+    else:
+        pupil_axis_label = "Pupil"
+        pupil_subplot_title = "Pupil diameter"
 
     t_stim_on = _get_trial_event(trials, "stimOn_times", trial_idx)
     t_first_move = _get_trial_event(trials, "firstMovement_times", trial_idx)
@@ -931,17 +1063,18 @@ def plot_trial_raster_plotly(
 
     fig = FigureResampler(
         make_subplots(
-            rows=5,
+            rows=6,
             cols=1,
             shared_xaxes=True,
             vertical_spacing=0.02,
-            row_heights=[0.56, 0.14, 0.12, 0.09, 0.09],
+            row_heights=[0.52, 0.14, 0.11, 0.08, 0.08, 0.07],
             subplot_titles=(
                 "",
                 "Avg PSTH",
                 "Wheel",
                 "Paw Speed",
                 "Motion energy (mean)",
+                pupil_subplot_title,
             ),
         )
     )
@@ -1158,13 +1291,47 @@ def plot_trial_raster_plotly(
             col=1,
         )
 
+    pupil_t, pupil_diam = _extract_mean_pupil_series(
+        pupil,
+        pupil_features,
+        pupil_times,
+        t_start,
+        t_end,
+        t_offset=t_offset,
+        value_col=pupil_value_col,
+    )
+    if pupil_t.size > 0:
+        fig.add_trace(
+            go.Scatter(
+                x=pupil_t,
+                y=pupil_diam,
+                mode="lines",
+                line=dict(color="black"),
+                name="Pupil",
+                showlegend=True,
+            ),
+            row=6,
+            col=1,
+        )
+    else:
+        fig.add_annotation(
+            x=0.5,
+            y=0.5,
+            xref="paper",
+            yref="y6",
+            text="Pupil data not available",
+            showarrow=False,
+            row=6,
+            col=1,
+        )
+
     event_lines = [
         ("Stim On", t_stim_on, "blue"),
         ("First Move", t_first_move, "green"),
         ("Feedback", t_feedback, "red"),
     ]
     for name, time_val, color in event_lines:
-        for row in range(1, 6):
+        for row in range(1, 7):
             fig.add_vline(x=time_val - t_offset, line=dict(color=color, width=2), row=row, col=1)
         fig.add_trace(
             go.Scatter(
@@ -1214,7 +1381,7 @@ def plot_trial_raster_plotly(
                 color,
                 x_start,
                 x_end,
-                n_rows=5,
+                n_rows=6,
                 dash=dash,
             )
 
@@ -1276,14 +1443,15 @@ def plot_trial_raster_plotly(
     fig.update_yaxes(title_text="Wheel (rad)", row=3, col=1)
     fig.update_yaxes(title_text="Paw (px/s)", row=4, col=1)
     fig.update_yaxes(title_text="Motion energy", row=5, col=1)
+    fig.update_yaxes(title_text=pupil_axis_label, row=6, col=1)
     fig.update_xaxes(showgrid=False, row=1, col=1)
     fig.update_yaxes(showgrid=False, row=1, col=1)
-    fig.update_xaxes(title_text=xlabel_text, row=5, col=1)
+    fig.update_xaxes(title_text=xlabel_text, row=6, col=1)
     fig.update_xaxes(range=[t_start - t_offset, t_end - t_offset])
 
     fig.update_layout(
         title=f"{plot_title} | Sort: {sort_label}",
-        height=1120,
+        height=1240,
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
         hovermode="closest",
         margin=dict(l=70, r=40, t=80, b=60),
@@ -2404,6 +2572,7 @@ def plot_time_window_raster_plotly(
     df_firing_rate=None,
     pupil_features=None,
     pupil_times=None,
+    pupil_value_col="pupilDiameter_smooth",
     region_colors=None,
     extra_event_times=None,
     extra_event_styles=None,
@@ -2419,11 +2588,22 @@ def plot_time_window_raster_plotly(
     wheel = _get_session_field(sl, "wheel")
     pose = _get_session_field(sl, "pose")
     motion_energy = _get_session_field(sl, "motion_energy")
+    pupil = _get_session_field(sl, "pupil")
     if trials is None:
         return go.Figure()
 
     template = config_plot.get("PLOTLY_TEMPLATE", DEFAULT_TEMPLATE)
     base_color = _template_base_color(template)
+    pupil_col_norm = str(pupil_value_col or "").strip().lower()
+    if "raw" in pupil_col_norm:
+        pupil_axis_label = "Pupil (raw)"
+        pupil_subplot_title = "Pupil diameter (raw)"
+    elif "smooth" in pupil_col_norm:
+        pupil_axis_label = "Pupil (smooth)"
+        pupil_subplot_title = "Pupil diameter (smooth)"
+    else:
+        pupil_axis_label = "Pupil"
+        pupil_subplot_title = "Pupil diameter"
 
     df_units, _ = _prepare_units_df(
         cluster_ids,
@@ -2489,17 +2669,18 @@ def plot_time_window_raster_plotly(
 
     fig = FigureResampler(
         make_subplots(
-            rows=5,
+            rows=6,
             cols=1,
             shared_xaxes=True,
             vertical_spacing=0.02,
-            row_heights=[0.56, 0.14, 0.12, 0.09, 0.09],
+            row_heights=[0.52, 0.14, 0.11, 0.08, 0.08, 0.07],
             subplot_titles=(
                 "",
                 "Avg PSTH",
                 "Wheel",
                 "Paw Speed",
                 "Motion energy (mean)",
+                pupil_subplot_title,
             ),
         )
     )
@@ -2708,6 +2889,40 @@ def plot_time_window_raster_plotly(
             col=1,
         )
 
+    pupil_t, pupil_diam = _extract_mean_pupil_series(
+        pupil,
+        pupil_features,
+        pupil_times,
+        t_start,
+        t_end,
+        t_offset=0.0,
+        value_col=pupil_value_col,
+    )
+    if pupil_t.size > 0:
+        fig.add_trace(
+            go.Scatter(
+                x=pupil_t,
+                y=pupil_diam,
+                mode="lines",
+                line=dict(color="black"),
+                name="Pupil",
+                showlegend=True,
+            ),
+            row=6,
+            col=1,
+        )
+    else:
+        fig.add_annotation(
+            x=0.5,
+            y=0.5,
+            xref="paper",
+            yref="y6",
+            text="Pupil data not available",
+            showarrow=False,
+            row=6,
+            col=1,
+        )
+
     event_style_map = {
         "stimOn_times": ("Stim On", "blue", None),
         "firstMovement_times": ("First Move", "green", None),
@@ -2725,7 +2940,7 @@ def plot_time_window_raster_plotly(
             color,
             t_start,
             t_end,
-            n_rows=5,
+            n_rows=6,
             dash=dash,
         )
 
@@ -2758,7 +2973,7 @@ def plot_time_window_raster_plotly(
                 color,
                 t_start,
                 t_end,
-                n_rows=5,
+                n_rows=6,
                 dash=dash,
             )
 
@@ -2813,13 +3028,14 @@ def plot_time_window_raster_plotly(
     fig.update_yaxes(title_text="Wheel (rad)", row=3, col=1)
     fig.update_yaxes(title_text="Paw (px/s)", row=4, col=1)
     fig.update_yaxes(title_text="Motion energy", row=5, col=1)
+    fig.update_yaxes(title_text=pupil_axis_label, row=6, col=1)
     fig.update_xaxes(showgrid=False, row=1, col=1)
     fig.update_yaxes(showgrid=False, row=1, col=1)
-    fig.update_xaxes(title_text="Time in session (s)", row=5, col=1)
+    fig.update_xaxes(title_text="Time in session (s)", row=6, col=1)
 
     fig.update_layout(
         title=f"Window {t_start:.2f}-{t_end:.2f}s | Sort: {sort_label}",
-        height=1120,
+        height=1240,
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
         margin=dict(l=70, r=40, t=80, b=60),
     )
@@ -2829,6 +3045,7 @@ def plot_time_window_raster_plotly(
     fig.update_xaxes(range=[t_start, t_end], row=3, col=1)
     fig.update_xaxes(range=[t_start, t_end], row=4, col=1)
     fig.update_xaxes(range=[t_start, t_end], row=5, col=1)
+    fig.update_xaxes(range=[t_start, t_end], row=6, col=1)
 
     return fig
 
