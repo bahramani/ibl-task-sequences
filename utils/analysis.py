@@ -1,5 +1,4 @@
 import numpy as np
-import utils.io as io_utils
 import pandas as pd
 import os
 import concurrent.futures
@@ -14,8 +13,6 @@ try:
 except ImportError:  # Graceful fallback if tqdm is unavailable.
     def tqdm(iterable, **kwargs):
         return iterable
-
-from rastermap import Rastermap, utils
 
 _LATENZY_FN = None
 _LATENZY_IMPORT_ATTEMPTED = False
@@ -100,6 +97,113 @@ def _parse_latenzy_output(output):
     else:
         latency = _first_finite_scalar(output)
     return latency, score
+
+
+def _get_cluster_label(clusters, idx):
+    """Fetch a unit quality label using a safe cluster index."""
+    if hasattr(clusters, "metrics") and "label" in clusters.metrics.columns:
+        return clusters.metrics.label[idx]
+    if hasattr(clusters, "label"):
+        return clusters.label[idx]
+    return 1
+
+
+def _top_nonzero_contrasts(values, top_n=2, round_decimals=6):
+    vals = np.asarray(values, dtype=float).reshape(-1)
+    vals = vals[np.isfinite(vals) & (vals > 0)]
+    if vals.size == 0:
+        return np.array([], dtype=float)
+    vals = np.round(vals, int(round_decimals))
+    unique_vals = np.unique(vals.astype(float))
+    unique_vals = np.sort(unique_vals)[::-1]
+    return unique_vals[: int(top_n)]
+
+
+def _select_task_stim_events_by_side(sl, top_n=2, round_decimals=6):
+    """Build task Stim-On subsets used in dashboard heatmaps."""
+    trials = getattr(sl, "trials", None)
+    empty = {
+        "task_all_right_times": np.array([], dtype=float),
+        "task_all_left_times": np.array([], dtype=float),
+        "task_top2_right_times": np.array([], dtype=float),
+        "task_top2_left_times": np.array([], dtype=float),
+        "task_zero_lr_times": np.array([], dtype=float),
+        "task_all_right_values": np.array([], dtype=float),
+        "task_all_left_values": np.array([], dtype=float),
+        "task_top2_right_values": np.array([], dtype=float),
+        "task_top2_left_values": np.array([], dtype=float),
+    }
+    if trials is None:
+        return empty
+
+    try:
+        stim_times = np.asarray(trials["stimOn_times"], dtype=float).reshape(-1)
+        contrast_left = np.asarray(trials["contrastLeft"], dtype=float).reshape(-1)
+        contrast_right = np.asarray(trials["contrastRight"], dtype=float).reshape(-1)
+    except Exception:
+        return empty
+
+    if (
+        stim_times.shape[0] != contrast_left.shape[0]
+        or stim_times.shape[0] != contrast_right.shape[0]
+    ):
+        return empty
+
+    left_abs = np.abs(contrast_left)
+    right_abs = np.abs(contrast_right)
+    stim_valid = np.isfinite(stim_times)
+    left_pos = np.isfinite(left_abs) & (left_abs > 0)
+    right_pos = np.isfinite(right_abs) & (right_abs > 0)
+    left_only = left_pos & (~right_pos)
+    right_only = right_pos & (~left_pos)
+    both_pos = left_pos & right_pos
+    left_only = left_only | (both_pos & (left_abs > right_abs))
+    right_only = right_only | (both_pos & (right_abs > left_abs))
+
+    tol = 10.0 ** (-int(round_decimals))
+    left_zero = np.isfinite(left_abs) & np.isclose(left_abs, 0.0, atol=tol)
+    right_zero = np.isfinite(right_abs) & np.isclose(right_abs, 0.0, atol=tol)
+    left_missing = ~np.isfinite(contrast_left)
+    right_missing = ~np.isfinite(contrast_right)
+    all_right_mask = right_only & stim_valid
+    all_left_mask = left_only & stim_valid
+    all_right_vals = np.unique(np.round(right_abs[all_right_mask], int(round_decimals)))
+    all_left_vals = np.unique(np.round(left_abs[all_left_mask], int(round_decimals)))
+    all_right_vals = np.sort(all_right_vals)[::-1]
+    all_left_vals = np.sort(all_left_vals)[::-1]
+
+    right_top_vals = _top_nonzero_contrasts(
+        right_abs[right_only], top_n=top_n, round_decimals=round_decimals
+    )
+    left_top_vals = _top_nonzero_contrasts(
+        left_abs[left_only], top_n=top_n, round_decimals=round_decimals
+    )
+
+    right_top_mask = np.zeros_like(stim_valid, dtype=bool)
+    for val in right_top_vals:
+        right_top_mask |= np.isclose(right_abs, float(val), atol=tol)
+    right_top_mask &= right_only & stim_valid
+
+    left_top_mask = np.zeros_like(stim_valid, dtype=bool)
+    for val in left_top_vals:
+        left_top_mask |= np.isclose(left_abs, float(val), atol=tol)
+    left_top_mask &= left_only & stim_valid
+
+    zero_left_trials = left_zero & (right_missing | right_zero)
+    zero_right_trials = right_zero & (left_missing | left_zero)
+    zero_mask = stim_valid & (zero_left_trials | zero_right_trials)
+
+    return {
+        "task_all_right_times": np.sort(stim_times[all_right_mask]),
+        "task_all_left_times": np.sort(stim_times[all_left_mask]),
+        "task_top2_right_times": np.sort(stim_times[right_top_mask]),
+        "task_top2_left_times": np.sort(stim_times[left_top_mask]),
+        "task_zero_lr_times": np.sort(stim_times[zero_mask]),
+        "task_all_right_values": all_right_vals,
+        "task_all_left_values": all_left_vals,
+        "task_top2_right_values": right_top_vals,
+        "task_top2_left_values": left_top_vals,
+    }
 
 
 def get_trial_contrasts(sl):
@@ -726,6 +830,124 @@ def _mean_stpr_curve(curve_a, curve_b):
     return (curve_a + curve_b) / 2.0
 
 
+COUPLING_DELAY_SUFFIXES = ("", "_h1", "_h2", "_odd", "_even", "_true", "_false")
+
+
+def build_stpr_lags(config, curve_len=None):
+    config = config or {}
+    bin_size_ms = float(config.get("STPR_BIN_SIZE", 0.001)) * 1000.0
+    if bin_size_ms <= 0:
+        bin_size_ms = 1.0
+    window_ms = float(config.get("STPR_WINDOW_MS", 80))
+    window_bins = int(round(window_ms / bin_size_ms)) if bin_size_ms > 0 else 0
+    if curve_len is None:
+        return np.arange(-window_bins, window_bins + 1, dtype=float) * bin_size_ms
+    expected_len = window_bins * 2 + 1
+    if int(curve_len) == expected_len:
+        return np.arange(-window_bins, window_bins + 1, dtype=float) * bin_size_ms
+    half = (int(curve_len) - 1) / 2.0
+    return (np.arange(int(curve_len), dtype=float) - half) * bin_size_ms
+
+
+def stpr_peak_delay_from_curve(curve, config=None, lags_ms=None, window_ms=None):
+    curve = np.asarray(curve, dtype=float)
+    if curve.size == 0:
+        return np.nan
+    finite_mask = np.isfinite(curve)
+    if not finite_mask.any():
+        return np.nan
+    curve_safe = np.where(finite_mask, curve, -np.inf)
+    peak_idx = int(np.argmax(curve_safe))
+    peak_val = curve_safe[peak_idx]
+    if not np.isfinite(peak_val):
+        return np.nan
+
+    if lags_ms is None:
+        lags_ms = build_stpr_lags(config or {}, curve_len=curve.size)
+    else:
+        lags_ms = np.asarray(lags_ms, dtype=float)
+    if lags_ms.size == 0:
+        return np.nan
+    if peak_idx >= lags_ms.size:
+        return np.nan
+
+    delay_ms = float(lags_ms[peak_idx])
+    if window_ms is None:
+        cfg = config or {}
+        window_ms = float(cfg.get("STPR_WINDOW_MS", 80))
+    if np.isfinite(window_ms) and (not np.isfinite(delay_ms) or abs(delay_ms) > float(window_ms)):
+        return np.nan
+    return delay_ms
+
+
+def _recompute_coupling_sorting_number(df):
+    if df is None or not isinstance(df, pd.DataFrame):
+        return df
+    if df.empty:
+        return df
+
+    sort_col = None
+    for candidate in (
+        "coupling_delay_ms_h1",
+        "coupling_delay_ms_odd",
+        "coupling_delay_ms_true",
+        "coupling_delay_ms",
+    ):
+        if candidate in df.columns:
+            sort_col = candidate
+            break
+    if sort_col is None:
+        return df
+
+    out = df.copy()
+    vals = pd.to_numeric(out[sort_col], errors="coerce")
+    sorting = pd.Series(pd.array([pd.NA] * len(out), dtype="Int64"), index=out.index)
+    valid_idx = vals[vals.notna()].sort_values().index
+    if len(valid_idx) > 0:
+        sorting.loc[valid_idx] = np.arange(len(valid_idx), dtype=int)
+    out["sorting_number"] = sorting
+    return out
+
+
+def ensure_coupling_peak_delay_columns(df, config, recompute_sorting=False):
+    """
+    Ensure ``coupling_delay_peak_ms*`` columns exist for a coupling DataFrame.
+
+    Returns
+    -------
+    tuple[pd.DataFrame | Any, bool]
+        Updated object and whether any new peak-delay columns were added.
+    """
+    if df is None or not isinstance(df, pd.DataFrame):
+        return df, False
+    if df.empty:
+        return df, False
+
+    out = df.copy()
+    changed = False
+    for suffix in COUPLING_DELAY_SUFFIXES:
+        peak_col = f"coupling_delay_peak_ms{suffix}"
+        curve_col = f"stpr_curve{suffix}"
+        com_col = f"coupling_delay_ms{suffix}"
+
+        if peak_col in out.columns:
+            continue
+        if curve_col not in out.columns and com_col not in out.columns:
+            continue
+
+        if curve_col in out.columns:
+            out[peak_col] = out[curve_col].apply(
+                lambda curve: stpr_peak_delay_from_curve(curve, config=config)
+            )
+        else:
+            out[peak_col] = np.nan
+        changed = True
+
+    if changed and recompute_sorting:
+        out = _recompute_coupling_sorting_number(out)
+    return out, changed
+
+
 def _stpr_metrics_from_curve(curve, lags_ms):
     """Return (delay_ms, strength_at_zero, peak) for a stPR curve."""
     curve = np.asarray(curve, dtype=float)
@@ -761,6 +983,47 @@ def _lowpass_filter(signal, fs_hz, cutoff_hz, order=3):
         return filtfilt(b, a, signal)
     except Exception:
         return signal
+
+
+def _gaussian_half_width_to_sigma_bins(half_width_ms, bin_size_s):
+    """Convert Gaussian half-width-at-half-maximum in ms to filter sigma in bins."""
+    try:
+        half_width_ms = float(half_width_ms)
+        bin_size_s = float(bin_size_s)
+    except (TypeError, ValueError):
+        return 0.0
+    if half_width_ms <= 0 or bin_size_s <= 0:
+        return 0.0
+    sigma_ms = half_width_ms / np.sqrt(2.0 * np.log(2.0))
+    return float(sigma_ms / (bin_size_s * 1000.0))
+
+
+def _gaussian_smooth_masked(values, sigma_bins, valid_mask=None):
+    """Gaussian-smooth a 1D trace while ignoring invalid bins."""
+    arr = np.asarray(values, dtype=float)
+    if arr.size == 0:
+        return arr.copy()
+    try:
+        sigma_bins = float(sigma_bins)
+    except (TypeError, ValueError):
+        sigma_bins = 0.0
+    if sigma_bins <= 0:
+        return arr.copy()
+    if valid_mask is None:
+        return gaussian_filter1d(arr, sigma=sigma_bins, mode="constant", cval=0.0)
+
+    valid = np.asarray(valid_mask, dtype=bool)
+    if valid.shape != arr.shape:
+        valid = np.ones(arr.shape, dtype=bool)
+    arr_zero = np.where(valid, arr, 0.0)
+    weights = valid.astype(float)
+    smooth_arr = gaussian_filter1d(arr_zero, sigma=sigma_bins, mode="constant", cval=0.0)
+    smooth_weights = gaussian_filter1d(weights, sigma=sigma_bins, mode="constant", cval=0.0)
+    out = np.full(arr.shape, np.nan, dtype=float)
+    keep = smooth_weights > 0
+    out[keep] = smooth_arr[keep] / smooth_weights[keep]
+    out[~valid] = np.nan
+    return out
 
 
 def _interpolate_short_nan_runs(values, max_gap):
@@ -1664,7 +1927,7 @@ def build_dashboard_delay_event_inputs(
         return events_by_name, contrasts_by_name, trial_idx_by_name
 
     trial_contrasts = get_trial_contrasts(sl)
-    task_stim_subsets = task_stim_subsets or io_utils.select_task_stim_events_by_side(sl)
+    task_stim_subsets = task_stim_subsets or _select_task_stim_events_by_side(sl)
     passive_events = passive_events or {}
     whisk_events = whisk_events or {}
 
@@ -2188,7 +2451,7 @@ def calculate_delays(
         idx = cid_to_idx.get(cid)
         if idx is None:
             continue
-        label = io_utils.get_cluster_label(clusters, idx)
+        label = _get_cluster_label(clusters, idx)
         if not _label_ok(label):
             continue
         results.append(
@@ -2447,7 +2710,7 @@ def calculate_event_delays(
         idx = cid_to_idx.get(cid)
         if idx is None:
             continue
-        label = io_utils.get_cluster_label(clusters, idx)
+        label = _get_cluster_label(clusters, idx)
         if not _label_ok(label):
             continue
         results.append(
@@ -2720,7 +2983,7 @@ def calculate_delay_reliability(
         idx = cid_to_idx.get(cid)
         if idx is None:
             continue
-        label = io_utils.get_cluster_label(clusters, idx)
+        label = _get_cluster_label(clusters, idx)
         if config["CALC_ONLY_GOOD_UNITS"] and label != 1:
             continue
         results.append({"cluster_id": cid, "acronym": cluster_acronyms[idx]})
@@ -2969,6 +3232,7 @@ def compute_population_coupling(
             "cluster_id",
             "region",
             "coupling_delay_ms",
+            "coupling_delay_peak_ms",
             "coupling_strength",
             "coupling_max",
             "stpr_curve",
@@ -2980,16 +3244,19 @@ def compute_population_coupling(
                 "cluster_id",
                 "region",
                 "coupling_delay_ms",
+                "coupling_delay_peak_ms",
                 "coupling_strength",
                 "coupling_max",
                 "stpr_curve",
                 "stpr_curve_raw",
                 "coupling_delay_ms_h1",
+                "coupling_delay_peak_ms_h1",
                 "coupling_strength_h1",
                 "coupling_max_h1",
                 "stpr_curve_h1",
                 "stpr_curve_raw_h1",
                 "coupling_delay_ms_h2",
+                "coupling_delay_peak_ms_h2",
                 "coupling_strength_h2",
                 "coupling_max_h2",
                 "stpr_curve_h2",
@@ -3057,7 +3324,7 @@ def compute_population_coupling(
 
     bin_size_ms = bin_size * 1000
     window_bins = int(round(window_ms / bin_size_ms)) if bin_size_ms > 0 else 0
-    lags_ms = np.arange(-window_bins, window_bins + 1) * bin_size_ms
+    lags_ms = build_stpr_lags(config, curve_len=None)
     fs_hz = 1.0 / bin_size if bin_size > 0 else 0.0
 
     def _compute_for_spikes(spike_times_local, spike_clusters_local, desc_suffix=""):
@@ -3068,6 +3335,7 @@ def compute_population_coupling(
                         "cluster_id": cid,
                         "region": region_lookup.get(cid, "NA"),
                         "coupling_delay_ms": np.nan,
+                        "coupling_delay_peak_ms": np.nan,
                         "coupling_strength": np.nan,
                         "coupling_max": np.nan,
                         "stpr_curve": [],
@@ -3088,6 +3356,7 @@ def compute_population_coupling(
                         "cluster_id": cid,
                         "region": region_lookup.get(cid, "NA"),
                         "coupling_delay_ms": np.nan,
+                        "coupling_delay_peak_ms": np.nan,
                         "coupling_strength": np.nan,
                         "coupling_max": np.nan,
                         "stpr_curve": [],
@@ -3131,6 +3400,7 @@ def compute_population_coupling(
                             "cluster_id": cid,
                             "region": region_lookup.get(cid, "NA"),
                             "coupling_delay_ms": np.nan,
+                            "coupling_delay_peak_ms": np.nan,
                             "coupling_strength": np.nan,
                             "coupling_max": np.nan,
                             "stpr_curve": [],
@@ -3159,6 +3429,7 @@ def compute_population_coupling(
                             "cluster_id": cid,
                             "region": region_lookup.get(cid, "NA"),
                             "coupling_delay_ms": np.nan,
+                            "coupling_delay_peak_ms": np.nan,
                             "coupling_strength": np.nan,
                             "coupling_max": np.nan,
                             "stpr_curve": [],
@@ -3193,6 +3464,7 @@ def compute_population_coupling(
                             "cluster_id": cid,
                             "region": region_lookup.get(cid, "NA"),
                             "coupling_delay_ms": np.nan,
+                            "coupling_delay_peak_ms": np.nan,
                             "coupling_strength": np.nan,
                             "coupling_max": np.nan,
                             "stpr_curve": [],
@@ -3220,6 +3492,7 @@ def compute_population_coupling(
                             "cluster_id": cid,
                             "region": region_lookup.get(cid, "NA"),
                             "coupling_delay_ms": np.nan,
+                            "coupling_delay_peak_ms": np.nan,
                             "coupling_strength": np.nan,
                             "coupling_max": np.nan,
                             "stpr_curve": [],
@@ -3248,6 +3521,7 @@ def compute_population_coupling(
                             "cluster_id": cid,
                             "region": region_lookup.get(cid, "NA"),
                             "coupling_delay_ms": np.nan,
+                            "coupling_delay_peak_ms": np.nan,
                             "coupling_strength": np.nan,
                             "coupling_max": np.nan,
                             "stpr_curve": [],
@@ -3262,12 +3536,18 @@ def compute_population_coupling(
                 delay_ms, strength, peak = _stpr_metrics_from_curve(stpr, lags_ms)
                 if not np.isfinite(delay_ms) or abs(delay_ms) > window_ms:
                     delay_ms = np.nan
+                peak_delay_ms = stpr_peak_delay_from_curve(
+                    stpr,
+                    lags_ms=lags_ms,
+                    window_ms=window_ms,
+                )
 
                 results.append(
                     {
                         "cluster_id": cid,
                         "region": region_lookup.get(cid, "NA"),
                         "coupling_delay_ms": delay_ms,
+                        "coupling_delay_peak_ms": peak_delay_ms,
                         "coupling_strength": strength,
                         "coupling_max": peak,
                         "stpr_curve": stpr.tolist(),
@@ -3300,6 +3580,7 @@ def compute_population_coupling(
     mean_curves = []
     mean_raw_curves = []
     delay_means = []
+    peak_delay_means = []
     strength_means = []
     peak_means = []
     for curve_h1, curve_h2, curve_raw_h1, curve_raw_h2 in zip(
@@ -3310,15 +3591,22 @@ def compute_population_coupling(
         delay_ms, strength, peak = _stpr_metrics_from_curve(mean_curve, lags_ms)
         if not np.isfinite(delay_ms) or abs(delay_ms) > window_ms:
             delay_ms = np.nan
+        peak_delay_ms = stpr_peak_delay_from_curve(
+            mean_curve,
+            lags_ms=lags_ms,
+            window_ms=window_ms,
+        )
         mean_curves.append(mean_curve.tolist())
         mean_raw_curves.append(mean_raw_curve.tolist())
         delay_means.append(delay_ms)
+        peak_delay_means.append(peak_delay_ms)
         strength_means.append(strength)
         peak_means.append(peak)
 
     df["stpr_curve"] = mean_curves
     df["stpr_curve_raw"] = mean_raw_curves
     df["coupling_delay_ms"] = delay_means
+    df["coupling_delay_peak_ms"] = peak_delay_means
     df["coupling_strength"] = strength_means
     df["coupling_max"] = peak_means
 
@@ -3332,8 +3620,361 @@ def compute_population_coupling(
     return df
 
 
+def compute_population_coupling_okun(
+    spikes,
+    clusters,
+    cluster_acronyms,
+    config,
+    cluster_ids=None,
+    split_halves=False,
+    by_region=True,
+    intervals=None,
+    context_label=None,
+):
+    """
+    Compute a paper-style spike-triggered population-rate curve.
+
+    This variant follows the Okun et al. construction more closely than the
+    default coupling method:
+    - leave-one-out regional population activity;
+    - Gaussian smoothing of the population rate;
+    - baseline subtraction of the smoothed population rate;
+    - mirrored lag convention so negative lags indicate that the neuron leads.
+    """
+    bin_size = config.get("OKUN_BIN_SIZE_S", config.get("STPR_BIN_SIZE", 0.001))
+    window_ms = config.get("STPR_WINDOW_MS", 80)
+    gauss_half_width_ms = config.get("OKUN_GAUSS_HALF_WIDTH_MS", 12)
+    use_good_population = config.get("STPR_POP_USE_GOOD_UNITS", False)
+
+    def _base_columns(include_halves):
+        base = [
+            "cluster_id",
+            "region",
+            "coupling_delay_ms",
+            "coupling_delay_peak_ms",
+            "coupling_strength",
+            "coupling_max",
+            "stpr_curve",
+            "stpr_curve_raw",
+            "sorting_number",
+        ]
+        if include_halves:
+            base = [
+                "cluster_id",
+                "region",
+                "coupling_delay_ms",
+                "coupling_delay_peak_ms",
+                "coupling_strength",
+                "coupling_max",
+                "stpr_curve",
+                "stpr_curve_raw",
+                "coupling_delay_ms_h1",
+                "coupling_delay_peak_ms_h1",
+                "coupling_strength_h1",
+                "coupling_max_h1",
+                "stpr_curve_h1",
+                "stpr_curve_raw_h1",
+                "coupling_delay_ms_h2",
+                "coupling_delay_peak_ms_h2",
+                "coupling_strength_h2",
+                "coupling_max_h2",
+                "stpr_curve_h2",
+                "stpr_curve_raw_h2",
+                "sorting_number",
+            ]
+        return base
+
+    def _empty_row(cid, region_lookup_local):
+        return {
+            "cluster_id": cid,
+            "region": region_lookup_local.get(cid, "NA"),
+            "coupling_delay_ms": np.nan,
+            "coupling_delay_peak_ms": np.nan,
+            "coupling_strength": np.nan,
+            "coupling_max": np.nan,
+            "stpr_curve": [],
+            "stpr_curve_raw": [],
+        }
+
+    if spikes is None or len(spikes.get("times", [])) == 0:
+        return pd.DataFrame(columns=_base_columns(split_halves))
+
+    spike_times = np.asarray(spikes["times"])
+    spike_clusters = np.asarray(spikes["clusters"])
+
+    def _get_array(obj, key):
+        if obj is None:
+            return None
+        if hasattr(obj, key):
+            return np.asarray(getattr(obj, key))
+        if isinstance(obj, dict) and key in obj:
+            return np.asarray(obj[key])
+        return None
+
+    cluster_id_all = _get_array(clusters, "cluster_id")
+    if cluster_id_all is None:
+        cluster_id_all = np.arange(len(cluster_acronyms))
+
+    if cluster_ids is None:
+        cluster_ids = np.asarray(cluster_id_all)
+    else:
+        cluster_ids = np.asarray(cluster_ids)
+
+    if cluster_ids is None or len(cluster_ids) == 0:
+        return pd.DataFrame(columns=_base_columns(split_halves))
+
+    labels = None
+    if hasattr(clusters, "metrics") and hasattr(clusters.metrics, "columns"):
+        if "label" in clusters.metrics.columns:
+            labels = np.asarray(clusters.metrics.label)
+    if labels is None:
+        labels = _get_array(clusters, "label")
+
+    if cluster_ids is not None and len(cluster_ids) > 0:
+        population_cluster_ids = np.asarray(cluster_ids)
+    elif use_good_population and labels is not None:
+        population_cluster_ids = np.asarray(cluster_id_all)[labels == 1]
+    else:
+        population_cluster_ids = np.asarray(cluster_id_all)
+
+    cluster_acronyms = np.asarray(cluster_acronyms).astype(str)
+    region_lookup = dict(zip(cluster_id_all, cluster_acronyms))
+
+    if by_region:
+        region_groups = {}
+        for cid in cluster_ids:
+            region = region_lookup.get(cid, "NA")
+            region_groups.setdefault(region, []).append(cid)
+        population_groups = {}
+        for cid in population_cluster_ids:
+            region = region_lookup.get(cid, "NA")
+            population_groups.setdefault(region, []).append(cid)
+    else:
+        region_groups = {"all": list(cluster_ids)}
+        population_groups = {"all": list(population_cluster_ids)}
+
+    config_lags = dict(config)
+    config_lags["STPR_BIN_SIZE"] = bin_size
+    bin_size_ms = float(bin_size) * 1000.0
+    window_bins = int(round(float(window_ms) / bin_size_ms)) if bin_size_ms > 0 else 0
+    lags_ms = build_stpr_lags(config_lags, curve_len=None)
+    sigma_bins = _gaussian_half_width_to_sigma_bins(gauss_half_width_ms, bin_size)
+
+    def _compute_for_spikes(spike_times_local, spike_clusters_local, desc_suffix=""):
+        if spike_times_local is None or len(spike_times_local) == 0:
+            return pd.DataFrame(
+                [_empty_row(cid, region_lookup) for cid in cluster_ids]
+            )
+
+        start_time = spike_times_local.min()
+        end_time = spike_times_local.max()
+        bin_edges = np.arange(start_time, end_time + bin_size, bin_size)
+        bins_count = len(bin_edges) - 1
+        if bins_count <= 0:
+            return pd.DataFrame(
+                [_empty_row(cid, region_lookup) for cid in cluster_ids]
+            )
+
+        use_cluster_set = set(cluster_ids).union(set(population_cluster_ids))
+        unique_clusters = [
+            cid for cid in np.unique(spike_clusters_local) if cid in use_cluster_set
+        ]
+        cluster_to_counts = {}
+        spike_times_by_cluster = {}
+        for cid in unique_clusters:
+            cluster_spikes = spike_times_local[spike_clusters_local == cid]
+            spike_times_by_cluster[cid] = cluster_spikes
+            cluster_to_counts[cid], _ = np.histogram(cluster_spikes, bins=bin_edges)
+
+        if intervals is not None:
+            intervals_arr = np.asarray(intervals, dtype=float)
+            if intervals_arr.ndim == 1 and intervals_arr.size == 2:
+                intervals_arr = intervals_arr.reshape(1, 2)
+            bin_centers = bin_edges[:-1] + bin_size / 2.0
+            valid_bins = np.zeros(bins_count, dtype=bool)
+            for start, end in intervals_arr:
+                if not np.isfinite(start) or not np.isfinite(end) or end <= start:
+                    continue
+                start = max(start, bin_edges[0])
+                end = min(end, bin_edges[-1])
+                if end <= start:
+                    continue
+                valid_bins |= (bin_centers >= start) & (bin_centers < end)
+            if not np.any(valid_bins):
+                return pd.DataFrame(
+                    [_empty_row(cid, region_lookup) for cid in cluster_ids]
+                )
+        else:
+            valid_bins = np.ones(bins_count, dtype=bool)
+
+        invalid_prefix = np.concatenate(([0], np.cumsum((~valid_bins).astype(int))))
+        results = []
+
+        for region, target_cids in region_groups.items():
+            population_cids = population_groups.get(region, [])
+            if len(target_cids) == 0:
+                continue
+            if len(population_cids) == 0:
+                results.extend([_empty_row(cid, region_lookup) for cid in target_cids])
+                continue
+
+            population_counts = np.zeros(bins_count, dtype=float)
+            for cid in population_cids:
+                counts = cluster_to_counts.get(cid, None)
+                if counts is not None:
+                    population_counts += counts
+            population_cluster_set = set(population_cids)
+
+            label = context_label or "coupling"
+            desc = f"stPR {label}{desc_suffix} ({region})"
+            for cid in tqdm(target_cids, desc=desc, unit="cluster"):
+                neuron_spikes = spike_times_by_cluster.get(cid, np.array([]))
+                if len(neuron_spikes) == 0:
+                    results.append(_empty_row(cid, region_lookup))
+                    continue
+
+                neuron_counts = cluster_to_counts.get(cid, np.zeros_like(population_counts))
+                if cid in population_cluster_set:
+                    population_counts_excl = population_counts - neuron_counts
+                else:
+                    population_counts_excl = population_counts
+
+                population_rate_raw = (
+                    population_counts_excl / bin_size if bin_size > 0 else population_counts_excl
+                )
+                population_rate = _gaussian_smooth_masked(
+                    population_rate_raw,
+                    sigma_bins,
+                    valid_mask=valid_bins,
+                )
+                if not np.isfinite(population_rate[valid_bins]).any():
+                    results.append(_empty_row(cid, region_lookup))
+                    continue
+
+                raw_baseline = float(np.nanmean(population_rate_raw[valid_bins]))
+                smooth_baseline = float(np.nanmean(population_rate[valid_bins]))
+                pop_trace_raw = population_rate_raw - raw_baseline
+                pop_trace = population_rate - smooth_baseline
+
+                segments = []
+                segments_raw = []
+                for spike_time in neuron_spikes:
+                    bin_idx = np.searchsorted(bin_edges, spike_time, side="right") - 1
+                    start_idx = bin_idx - window_bins
+                    end_idx = bin_idx + window_bins + 1
+                    if start_idx < 0 or end_idx > bins_count:
+                        continue
+                    if invalid_prefix[end_idx] != invalid_prefix[start_idx]:
+                        continue
+                    segment = pop_trace[start_idx:end_idx]
+                    segment_raw = pop_trace_raw[start_idx:end_idx]
+                    if not np.isfinite(segment).all():
+                        continue
+                    segments.append(segment[::-1])
+                    segments_raw.append(segment_raw[::-1])
+
+                if len(segments) == 0:
+                    results.append(_empty_row(cid, region_lookup))
+                    continue
+
+                stpr = np.mean(np.vstack(segments), axis=0)
+                stpr_raw = np.mean(np.vstack(segments_raw), axis=0)
+
+                delay_ms, strength, peak = _stpr_metrics_from_curve(stpr, lags_ms)
+                if not np.isfinite(delay_ms) or abs(delay_ms) > window_ms:
+                    delay_ms = np.nan
+                peak_delay_ms = stpr_peak_delay_from_curve(
+                    stpr,
+                    config=config_lags,
+                    lags_ms=lags_ms,
+                    window_ms=window_ms,
+                )
+
+                results.append(
+                    {
+                        "cluster_id": cid,
+                        "region": region_lookup.get(cid, "NA"),
+                        "coupling_delay_ms": delay_ms,
+                        "coupling_delay_peak_ms": peak_delay_ms,
+                        "coupling_strength": strength,
+                        "coupling_max": peak,
+                        "stpr_curve": stpr.tolist(),
+                        "stpr_curve_raw": stpr_raw.tolist(),
+                    }
+                )
+
+        return pd.DataFrame(results)
+
+    if not split_halves:
+        df = _compute_for_spikes(spike_times, spike_clusters)
+        valid_mask = df["coupling_delay_ms"].notna()
+        sorted_indices = df.loc[valid_mask, "coupling_delay_ms"].sort_values().index
+        df["sorting_number"] = np.nan
+        df.loc[sorted_indices, "sorting_number"] = np.arange(len(sorted_indices))
+        df["sorting_number"] = df["sorting_number"].astype("Int64")
+        return df
+
+    start_time = spike_times.min()
+    end_time = spike_times.max()
+    mid_time = (start_time + end_time) / 2.0
+    mask_h1 = spike_times <= mid_time
+    mask_h2 = spike_times > mid_time
+
+    df_h1 = _compute_for_spikes(spike_times[mask_h1], spike_clusters[mask_h1], " (H1)")
+    df_h2 = _compute_for_spikes(spike_times[mask_h2], spike_clusters[mask_h2], " (H2)")
+
+    df = df_h1.merge(df_h2, on=["cluster_id", "region"], how="outer", suffixes=("_h1", "_h2"))
+
+    mean_curves = []
+    mean_raw_curves = []
+    delay_means = []
+    peak_delay_means = []
+    strength_means = []
+    peak_means = []
+    for curve_h1, curve_h2, curve_raw_h1, curve_raw_h2 in zip(
+        df["stpr_curve_h1"],
+        df["stpr_curve_h2"],
+        df["stpr_curve_raw_h1"],
+        df["stpr_curve_raw_h2"],
+    ):
+        mean_curve = _mean_stpr_curve(curve_h1, curve_h2)
+        mean_raw_curve = _mean_stpr_curve(curve_raw_h1, curve_raw_h2)
+        delay_ms, strength, peak = _stpr_metrics_from_curve(mean_curve, lags_ms)
+        if not np.isfinite(delay_ms) or abs(delay_ms) > window_ms:
+            delay_ms = np.nan
+        peak_delay_ms = stpr_peak_delay_from_curve(
+            mean_curve,
+            config=config_lags,
+            lags_ms=lags_ms,
+            window_ms=window_ms,
+        )
+        mean_curves.append(mean_curve.tolist())
+        mean_raw_curves.append(mean_raw_curve.tolist())
+        delay_means.append(delay_ms)
+        peak_delay_means.append(peak_delay_ms)
+        strength_means.append(strength)
+        peak_means.append(peak)
+
+    df["stpr_curve"] = mean_curves
+    df["stpr_curve_raw"] = mean_raw_curves
+    df["coupling_delay_ms"] = delay_means
+    df["coupling_delay_peak_ms"] = peak_delay_means
+    df["coupling_strength"] = strength_means
+    df["coupling_max"] = peak_means
+
+    valid_mask = df["coupling_delay_ms_h1"].notna()
+    sorted_indices = df.loc[valid_mask, "coupling_delay_ms_h1"].sort_values().index
+    df["sorting_number"] = np.nan
+    df.loc[sorted_indices, "sorting_number"] = np.arange(len(sorted_indices))
+    df["sorting_number"] = df["sorting_number"].astype("Int64")
+
+    return df
+
+
 def merge_stpr_splits(df_a, df_b, config, split_a="a", split_b="b", sort_on_split_a=True):
     """Merge two stPR result tables and compute mean-curve metrics."""
+    df_a, _ = ensure_coupling_peak_delay_columns(df_a, config, recompute_sorting=False)
+    df_b, _ = ensure_coupling_peak_delay_columns(df_b, config, recompute_sorting=False)
     if df_a is None and df_b is None:
         return pd.DataFrame()
     if df_a is None:
@@ -3346,6 +3987,7 @@ def merge_stpr_splits(df_a, df_b, config, split_a="a", split_b="b", sort_on_spli
             df["stpr_curve_raw"] = df[f"stpr_curve_raw_{split_b}"]
         elif "stpr_curve_raw" not in df.columns:
             df["stpr_curve_raw"] = df.get("stpr_curve", [[] for _ in range(len(df))])
+        df, _ = ensure_coupling_peak_delay_columns(df, config, recompute_sorting=False)
         return df
     if df_b is None:
         df = df_a.copy()
@@ -3357,6 +3999,7 @@ def merge_stpr_splits(df_a, df_b, config, split_a="a", split_b="b", sort_on_spli
             df["stpr_curve_raw"] = df[f"stpr_curve_raw_{split_a}"]
         elif "stpr_curve_raw" not in df.columns:
             df["stpr_curve_raw"] = df.get("stpr_curve", [[] for _ in range(len(df))])
+        df, _ = ensure_coupling_peak_delay_columns(df, config, recompute_sorting=False)
         return df
 
     df = df_a.merge(
@@ -3366,16 +4009,13 @@ def merge_stpr_splits(df_a, df_b, config, split_a="a", split_b="b", sort_on_spli
         suffixes=(f"_{split_a}", f"_{split_b}"),
     )
 
-    bin_size_ms = config.get("STPR_BIN_SIZE", 0.001) * 1000
-    if bin_size_ms <= 0:
-        bin_size_ms = 1.0
     window_ms = config.get("STPR_WINDOW_MS", 80)
-    window_bins = int(round(window_ms / bin_size_ms)) if bin_size_ms > 0 else 0
-    lags_ms = np.arange(-window_bins, window_bins + 1) * bin_size_ms
+    lags_ms = build_stpr_lags(config, curve_len=None)
 
     mean_curves = []
     mean_raw_curves = []
     delay_means = []
+    peak_delay_means = []
     strength_means = []
     peak_means = []
     for _, row in df.iterrows():
@@ -3388,15 +4028,22 @@ def merge_stpr_splits(df_a, df_b, config, split_a="a", split_b="b", sort_on_spli
         delay_ms, strength, peak = _stpr_metrics_from_curve(mean_curve, lags_ms)
         if not np.isfinite(delay_ms) or abs(delay_ms) > window_ms:
             delay_ms = np.nan
+        peak_delay_ms = stpr_peak_delay_from_curve(
+            mean_curve,
+            lags_ms=lags_ms,
+            window_ms=window_ms,
+        )
         mean_curves.append(mean_curve.tolist())
         mean_raw_curves.append(mean_raw_curve.tolist())
         delay_means.append(delay_ms)
+        peak_delay_means.append(peak_delay_ms)
         strength_means.append(strength)
         peak_means.append(peak)
 
     df["stpr_curve"] = mean_curves
     df["stpr_curve_raw"] = mean_raw_curves
     df["coupling_delay_ms"] = delay_means
+    df["coupling_delay_peak_ms"] = peak_delay_means
     df["coupling_strength"] = strength_means
     df["coupling_max"] = peak_means
 

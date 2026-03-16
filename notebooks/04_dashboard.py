@@ -3,6 +3,7 @@ from pathlib import Path
 import fnmatch
 import pickle
 import sys
+import importlib
 
 import numpy as np
 import pandas as pd
@@ -39,16 +40,65 @@ from utils.plotting_plotly import (
 )
 import utils.plotting_plotly as plotting_utils
 import utils.analysis as ana_utils
-from utils.io import (
-    setup_paths,
-    init_one,
-    load_session_data,
-    build_cluster_id_map,
-    load_task_replay_datasets,
-    build_passive_event_times,
-    build_passive_visual_contrast_events,
-    build_passive_auditory_event_times,
-)
+try:
+    from utils.io import (
+        setup_paths,
+        init_one,
+        load_session_data,
+        build_cluster_id_map,
+        load_task_replay_datasets,
+        build_passive_event_times,
+        build_passive_visual_contrast_events,
+        build_passive_auditory_event_times,
+    )
+    _IO_IMPORT_ERROR = None
+except Exception as _io_exc:  # pragma: no cover
+    _IO_IMPORT_ERROR = _io_exc
+
+    def setup_paths(base_path):
+        path_data = base_path / "data"
+        path_fig = base_path / "results" / "figures"
+        path_data_processed = path_data / "processed"
+        ibl_cache = path_data / "raw"
+        for p in (ibl_cache, path_fig, path_data_processed):
+            p.mkdir(exist_ok=True, parents=True)
+        return path_data, path_fig, path_data_processed, ibl_cache
+
+    def init_one(*args, **kwargs):
+        raise RuntimeError(
+            "ONE/iblutil backend unavailable in this environment "
+            f"(utils.io import failed: {_IO_IMPORT_ERROR})"
+        )
+
+    def load_session_data(*args, **kwargs):
+        raise RuntimeError(
+            "Raw session loading unavailable in this environment "
+            f"(utils.io import failed: {_IO_IMPORT_ERROR})"
+        )
+
+    def build_cluster_id_map(clusters):
+        if hasattr(clusters, "cluster_id"):
+            cluster_ids = np.asarray(clusters.cluster_id)
+        elif isinstance(clusters, dict) and "cluster_id" in clusters:
+            cluster_ids = np.asarray(clusters["cluster_id"])
+        elif hasattr(clusters, "acronym"):
+            cluster_ids = np.arange(len(clusters.acronym))
+        else:
+            cluster_ids = np.array([], dtype=int)
+        cid_to_idx = {int(cid): idx for idx, cid in enumerate(cluster_ids)}
+        return cluster_ids, cid_to_idx
+
+    def load_task_replay_datasets(*args, **kwargs):
+        return None, None
+
+    def build_passive_event_times(*args, **kwargs):
+        return {}
+
+    def build_passive_visual_contrast_events(*args, **kwargs):
+        return {}
+
+    def build_passive_auditory_event_times(*args, **kwargs):
+        return {}
 
 try:
     from iblatlas.regions import BrainRegions
@@ -73,6 +123,70 @@ def _load_cache(pid):
     path = CACHE_DIR / f"{pid}.pkl"
     with open(path, "rb") as f:
         return pickle.load(f)
+
+
+def _show_table(df, width="stretch", max_rows=400):
+    try:
+        st.dataframe(df, width=width)
+        return
+    except Exception:
+        if "_table_fallback_warned_04" not in st.session_state:
+            st.warning("`st.dataframe` is unavailable in this environment. Showing HTML table fallback.")
+            st.session_state["_table_fallback_warned_04"] = True
+
+    if df is None or df.empty:
+        st.info("No rows to display.")
+        return
+    df_show = df.head(max_rows).copy()
+    if len(df) > max_rows:
+        st.caption(f"Showing first {max_rows:,} rows (of {len(df):,}).")
+    html = df_show.to_html(index=True if df_show.index.name or not isinstance(df_show.index, pd.RangeIndex) else False, classes="fallback-table", border=0)
+    st.markdown(
+        f"""
+<style>
+.fallback-wrap {{
+  overflow: auto;
+  max-height: 430px;
+  border: 1px solid #d4d9e1;
+  border-radius: 10px;
+  background: #ffffff;
+}}
+.fallback-table {{
+  border-collapse: separate;
+  border-spacing: 0;
+  width: 100%;
+  font-size: 0.93rem;
+  line-height: 1.35;
+}}
+.fallback-table thead th {{
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: #f4f7fb;
+  color: #1f2937;
+  text-align: left;
+  font-weight: 700;
+  padding: 10px 12px;
+  border-bottom: 1px solid #d4d9e1;
+  white-space: nowrap;
+}}
+.fallback-table tbody td {{
+  padding: 9px 12px;
+  border-bottom: 1px solid #e8ebf0;
+  color: #1f2937;
+  white-space: nowrap;
+}}
+.fallback-table tbody tr:nth-child(even) {{
+  background: #f9fbfe;
+}}
+.fallback-table tbody tr:hover {{
+  background: #eef4ff;
+}}
+</style>
+<div class="fallback-wrap">{html}</div>
+""",
+        unsafe_allow_html=True,
+    )
 
 
 @st.cache_resource(show_spinner=False)
@@ -324,12 +438,65 @@ def _has_spont_interval(meta):
     return np.isfinite(start_val) and np.isfinite(end_val) and end_val > start_val
 
 
+@st.cache_resource(show_spinner=False)
+def _get_allen_color_lookup():
+    def _to_rgb(hex_value):
+        if pd.isna(hex_value):
+            return None
+        hv = str(hex_value).strip()
+        if hv.lower().startswith("0x"):
+            hv = hv[2:]
+        hv = "".join(ch for ch in hv if ch in "0123456789abcdefABCDEF")
+        if not hv:
+            return None
+        hv = hv.zfill(6)
+        if len(hv) > 6:
+            hv = hv[-6:]
+        try:
+            r = int(hv[0:2], 16)
+            g = int(hv[2:4], 16)
+            b = int(hv[4:6], 16)
+            return f"rgb({r},{g},{b})"
+        except Exception:
+            return None
+
+    try:
+        iblatlas_pkg = importlib.import_module("iblatlas")
+        csv_path = Path(iblatlas_pkg.__file__).resolve().parent / "allen_structure_tree.csv"
+        if not csv_path.exists():
+            return {}
+        df_allen = pd.read_csv(csv_path, dtype={"color_hex_triplet": "string"})
+    except Exception:
+        return {}
+
+    if "acronym" not in df_allen.columns or "color_hex_triplet" not in df_allen.columns:
+        return {}
+
+    colors = {}
+    for _, row in df_allen[["acronym", "color_hex_triplet"]].dropna(subset=["acronym"]).iterrows():
+        acr = str(row["acronym"])
+        rgb = _to_rgb(row.get("color_hex_triplet", ""))
+        if rgb is not None:
+            colors[acr] = rgb
+    return colors
+
+
 def _build_region_colors(acronyms):
+    all_lookup = _get_allen_color_lookup()
+    unique_regions = pd.Series(acronyms).astype(str).unique().tolist()
+    if all_lookup:
+        colors = {reg: all_lookup.get(reg) for reg in unique_regions}
+        colors = {k: v for k, v in colors.items() if v}
+        if colors:
+            return colors
+
     if BrainRegions is None:
         return None
     colors = {}
-    br = BrainRegions()
-    unique_regions = pd.Series(acronyms).astype(str).unique().tolist()
+    try:
+        br = BrainRegions()
+    except Exception:
+        return None
     for region in unique_regions:
         try:
             idx = br.acronym2index(region)[1][0][0]
@@ -355,7 +522,15 @@ def _build_stpr_lags(config_calc, curve_len=None):
     return (np.arange(curve_len) - half) * bin_size_ms
 
 
-def _plot_stpr_mean_comparison(df_spont, df_task, df_iti, config_calc, cluster_id, template):
+def _plot_stpr_mean_comparison(
+    df_spont,
+    df_task,
+    df_iti,
+    config_calc,
+    cluster_id,
+    template,
+    delay_mode_label="COM",
+):
     fig = go.Figure()
     curve_specs = [
         ("Spont", df_spont, "#1f77b4"),
@@ -390,7 +565,7 @@ def _plot_stpr_mean_comparison(df_spont, df_task, df_iti, config_calc, cluster_i
 
     fig.add_vline(x=0, line=dict(color="gray", dash="dot"))
     fig.update_layout(
-        title="Coupling Mean Curves (Task vs Spont vs ITI)",
+        title=f"Coupling Mean Curves (Task vs Spont vs ITI) | Delay={delay_mode_label}",
         xaxis_title="Lag (ms)",
         yaxis_title="Coupling (z)",
         template=template,
@@ -912,6 +1087,11 @@ def _build_pairwise_corr_plot(
 
 
 st.title("Neuron Session Dashboard")
+if _IO_IMPORT_ERROR is not None:
+    st.warning(
+        "Live ONE/IBL loading is unavailable in this environment. "
+        "Using cached dashboard data only."
+    )
 
 pid_list = _list_pids(CACHE_DIR)
 if not pid_list:
@@ -1103,7 +1283,7 @@ plot_cluster_acronyms = cluster_acronyms
 plot_label_values = _label_values_for_clusters(plot_cluster_ids, clusters, labels)
 region_table = pd.DataFrame({"All Neurons": all_counts, "Good Neurons": good_counts}).fillna(0)
 region_table = region_table.astype(int)
-st.dataframe(region_table, width="stretch")
+_show_table(region_table, width="stretch", max_rows=600)
 
 calc_label_min = config_calc.get("CALC_LABEL_MIN", None)
 if calc_label_min is None and config_calc.get("CALC_ONLY_GOOD_UNITS", False):
@@ -1121,6 +1301,8 @@ use_good_stpr = st.toggle(
     "Use Coupling computed from good neuron population",
     value=False,
 )
+coupling_delay_mode = "com"
+coupling_delay_mode_label = "COM"
 
 plot_config = dict(config_plot)
 plot_config["PLOT_ONLY_GOOD_UNITS"] = False
@@ -1461,6 +1643,7 @@ else:
 
 st.subheader("Response Analysis")
 st.caption("All heatmaps are baseline z-scored PSTHs with fixed color range [-8, +8].")
+st.caption(f"Coupling delay sort options use: {coupling_delay_mode_label}")
 response_sort_options = [
     "Event Own Delay",
     "Depth",
@@ -1648,6 +1831,7 @@ else:
             str(response_sort_map.get(response_sort, "depth")),
             float(plot_label_min) if plot_label_min is not None else None,
             bool(use_good_stpr),
+            str(coupling_delay_mode),
             str(plot_config.get("PLOTLY_TEMPLATE", "plotly_white")),
             tuple(config_plot.get("PLOT_REGIONS") or []),
         )
@@ -1688,6 +1872,7 @@ coupling_key = (
     pid,
     plot_label_min,
     use_good_stpr,
+    str(coupling_delay_mode),
     plot_config["PLOTLY_TEMPLATE"],
     tuple(config_plot.get("PLOT_REGIONS") or []),
     config_calc.get("STPR_BIN_SIZE"),
@@ -1730,7 +1915,9 @@ def _build_coupling_figs():
             continue
         fig_local.update_traces(showscale=False, selector=dict(type="heatmap"))
         fig_local.update_traces(zmin=-2, zmax=2, selector=dict(type="heatmap"))
-        fig_local.update_layout(title=f"Population Coupling ({label})")
+        fig_local.update_layout(
+            title=f"Population Coupling ({label}) | Delay={coupling_delay_mode_label}"
+        )
     return fig_spont_local, fig_iti_local, fig_task_local
 
 fig_spont, fig_iti, fig_task = _get_cached_value(
@@ -1888,10 +2075,12 @@ if ENABLE_COUPLING_STRENGTH_BY_REGION:
 else:
     st.caption("Coupling Strength by Region is disabled (set `ENABLE_COUPLING_STRENGTH_BY_REGION = True` to re-enable).")
 st.subheader("Correlation Matrices")
+st.caption(f"Coupling delay variables use: {coupling_delay_mode_label}")
 corr_key = (
     pid,
     plot_label_min,
     use_good_stpr,
+    str(coupling_delay_mode),
     bool(df_firing_rate is not None),
     spont_available,
     plot_config["PLOTLY_TEMPLATE"],
@@ -2249,6 +2438,7 @@ else:
                 str(region_choice),
                 float(plot_label_min) if plot_label_min is not None else None,
                 bool(use_good_stpr),
+                str(coupling_delay_mode),
                 str(plot_config.get("PLOTLY_TEMPLATE", "plotly_white")),
                 tuple(config_plot.get("PLOT_REGIONS") or []),
             )
@@ -2506,7 +2696,7 @@ def _render_single_neuron_section():
             df_coupling_task_plot,
             config_calc,
             selected_cluster_id_local,
-            title="Task Coupling Curve (Odd vs Even Trials)",
+            title=f"Task Coupling Curve (Odd vs Even Trials) | Delay={coupling_delay_mode_label}",
             template=plot_config["PLOTLY_TEMPLATE"],
             split_suffixes=("odd", "even"),
             split_labels=("Odd trials", "Even trials"),
@@ -2518,7 +2708,7 @@ def _render_single_neuron_section():
             df_coupling_plot,
             config_calc,
             selected_cluster_id_local,
-            title="Spont Coupling Curve (First vs Second Half)",
+            title=f"Spont Coupling Curve (First vs Second Half) | Delay={coupling_delay_mode_label}",
             template=plot_config["PLOTLY_TEMPLATE"],
         )
         st.plotly_chart(fig_spont_curve, width="stretch")
@@ -2528,7 +2718,7 @@ def _render_single_neuron_section():
             df_coupling_iti_plot,
             config_calc,
             selected_cluster_id_local,
-            title="ITI Coupling Curve (Odd vs Even Trials)",
+            title=f"ITI Coupling Curve (Odd vs Even Trials) | Delay={coupling_delay_mode_label}",
             template=plot_config["PLOTLY_TEMPLATE"],
             split_suffixes=("odd", "even"),
             split_labels=("Odd trials", "Even trials"),
@@ -2543,6 +2733,7 @@ def _render_single_neuron_section():
         config_calc,
         selected_cluster_id_local,
         plot_config["PLOTLY_TEMPLATE"],
+        delay_mode_label=coupling_delay_mode_label,
     )
     st.plotly_chart(fig_stpr_mean, width="stretch")
 

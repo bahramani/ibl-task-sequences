@@ -383,11 +383,10 @@ def _build_arousal_lookup(df_res, region_lookup):
     plus_labels = {"arousal_plus", "plus", "+", "arousal +", "arousal+"}
     minus_labels = {"arousal_minus", "minus", "-", "arousal -", "arousal-"}
     groups_raw = df_arousal["arousal_group"].astype(str).str.strip().str.lower()
-    groups_norm = pd.Series(np.nan, index=df_arousal.index, dtype=object)
+    groups_norm = pd.Series("arousal_neutral", index=df_arousal.index, dtype=object)
     groups_norm[groups_raw.isin(plus_labels)] = "arousal_plus"
     groups_norm[groups_raw.isin(minus_labels)] = "arousal_minus"
     df_arousal["arousal_group"] = groups_norm
-    df_arousal = df_arousal[df_arousal["arousal_group"].isin(["arousal_plus", "arousal_minus"])]
     if df_arousal.empty:
         return None
     df_arousal = (

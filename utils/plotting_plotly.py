@@ -3,7 +3,10 @@ import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
-from plotly_resampler import FigureResampler
+try:
+    from plotly_resampler import FigureResampler as _FigureResampler
+except Exception:  # pragma: no cover
+    _FigureResampler = None
 from scipy.stats import pearsonr, spearmanr
 from types import SimpleNamespace
 
@@ -15,6 +18,27 @@ from .analysis import (
 )
 
 DEFAULT_TEMPLATE = "plotly_white"
+
+
+if _FigureResampler is None:
+    class FigureResampler(go.Figure):
+        """
+        Lightweight fallback when plotly_resampler (and its dash deps) are unavailable.
+        It ignores high-frequency-specific kwargs and behaves like a regular Plotly figure.
+        """
+        def __init__(self, figure=None, *args, **kwargs):
+            if figure is None:
+                super().__init__(*args, **kwargs)
+            else:
+                super().__init__(figure, *args, **kwargs)
+
+        def add_trace(self, trace, *args, **kwargs):
+            kwargs.pop("max_n_samples", None)
+            kwargs.pop("hf_x", None)
+            kwargs.pop("hf_y", None)
+            return super().add_trace(trace, *args, **kwargs)
+else:
+    FigureResampler = _FigureResampler
 
 
 def _get_cluster_attr(clusters, key, fallback=None):
