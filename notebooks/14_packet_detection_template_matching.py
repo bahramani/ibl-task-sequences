@@ -33,7 +33,8 @@ from types import SimpleNamespace
 
 # %%
 # ---- Config ----
-PID =  "c9664185-d3fd-4e0e-89cf-77c402038938"
+# PID =  "c9664185-d3fd-4e0e-89cf-77c402038938"
+PID = "f967a527-257f-404a-871d-b91575dca3b4"
 
 # Data loading
 CACHE_DIR = BASE_PATH / "data" / "dashboard_cache"
@@ -65,9 +66,9 @@ MIN_PACKET_GAP_S = 0.1
 
 # Raster options
 LABEL_MIN = 0.5
-REGIONS = "VISp"  # e.g., ["VISp", "MOp"] or None for all
+REGIONS = "SSp-ul"  # e.g., ["VISp", "MOp"] or None for all
 REGION_PREFIX_MATCH = False
-SORT_CHOICE = "Task stPR Delay"
+SORT_CHOICE = "Spont stPR Delay"
 TRIAL_IDX = 829
 PACKET_PSTH_REGION = None  # default: first available region
 PLOTLY_RENDERER = None  # "browser", "notebook_connected", "png", "svg"
@@ -1323,6 +1324,3 @@ else:
             post=6.0,
         )
 
-
-# %%
-a = 2
