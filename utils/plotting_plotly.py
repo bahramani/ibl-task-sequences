@@ -18,6 +18,7 @@ from .analysis import (
 )
 
 DEFAULT_TEMPLATE = "plotly_white"
+WHISK_RASTER_Y_RANGE = (0.0, 0.3)
 
 
 if _FigureResampler is None:
@@ -1522,7 +1523,7 @@ def plot_trial_raster_plotly(
     fig.update_xaxes(title_text=xlabel_text, row=6, col=1)
     fig.update_xaxes(range=[t_start - t_offset, t_end - t_offset])
     if is_whisk_trace:
-        fig.update_yaxes(range=[-0.02, 1.05], row=5, col=1)
+        fig.update_yaxes(range=list(WHISK_RASTER_Y_RANGE), row=5, col=1)
 
     fig.update_layout(
         title=f"{plot_title} | Sort: {sort_label}",
@@ -3114,7 +3115,7 @@ def plot_time_window_raster_plotly(
     fig.update_yaxes(showgrid=False, row=1, col=1)
     fig.update_xaxes(title_text="Time in session (s)", row=6, col=1)
     if is_whisk_trace:
-        fig.update_yaxes(range=[-0.02, 1.05], row=5, col=1)
+        fig.update_yaxes(range=list(WHISK_RASTER_Y_RANGE), row=5, col=1)
 
     fig.update_layout(
         title=f"Window {t_start:.2f}-{t_end:.2f}s | Sort: {sort_label}",

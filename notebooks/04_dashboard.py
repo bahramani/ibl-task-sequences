@@ -1560,7 +1560,49 @@ else:
     st.plotly_chart(fig_session, width="stretch")
 
 st.subheader("Trial Inspector")
-trial_idx = st.selectbox("Trial Number", trials["trial_idx"].tolist())
+trial_options = trials["trial_idx"].tolist()
+trial_select_key = "trial_inspector_select"
+default_trial_idx = trial_options[0]
+selected_trial_idx = st.session_state.get(trial_select_key, default_trial_idx)
+if selected_trial_idx not in trial_options:
+    selected_trial_idx = default_trial_idx
+    st.session_state[trial_select_key] = selected_trial_idx
+
+current_trial_pos = trial_options.index(selected_trial_idx)
+trial_col, prev_col, next_col = st.columns([1, 0.18, 0.18])
+with prev_col:
+    st.markdown("<div style='height: 1.7rem;'></div>", unsafe_allow_html=True)
+    prev_trial = st.button(
+        "Prev",
+        use_container_width=True,
+        disabled=current_trial_pos == 0,
+    )
+with next_col:
+    st.markdown("<div style='height: 1.7rem;'></div>", unsafe_allow_html=True)
+    next_trial = st.button(
+        "Next",
+        use_container_width=True,
+        disabled=current_trial_pos == len(trial_options) - 1,
+    )
+
+if prev_trial:
+    current_trial_pos -= 1
+    st.session_state[trial_select_key] = trial_options[current_trial_pos]
+elif next_trial:
+    current_trial_pos += 1
+    st.session_state[trial_select_key] = trial_options[current_trial_pos]
+
+selected_trial_idx = st.session_state.get(trial_select_key, selected_trial_idx)
+selected_trial_pos = trial_options.index(selected_trial_idx)
+
+with trial_col:
+    trial_idx = st.selectbox(
+        "Trial Number",
+        trial_options,
+        index=selected_trial_pos,
+        key=trial_select_key,
+    )
+
 trial_row = trials.loc[trials["trial_idx"] == trial_idx].iloc[0]
 trial_table = pd.DataFrame(
     {
@@ -1577,13 +1619,17 @@ sort_choice = st.selectbox(
     list(sort_map.keys()),
 )
 
+trial_plot_config = dict(plot_config)
+trial_plot_config["RASTER_ALIGN_TO_EVENT"] = False
+trial_plot_config["RASTER_ALIGN_TO_STIM_ON"] = False
+
 fig_trial = plot_trial_raster_plotly(
     spikes,
     clusters,
     plot_cluster_ids,
     plot_cluster_acronyms,
     session,
-    plot_config,
+    trial_plot_config,
     trial_idx,
     sorting_metric=sort_map[sort_choice],
     df_res=data.get("df_res"),
