@@ -34,7 +34,8 @@ from types import SimpleNamespace
 # %%
 # ---- Config ----
 # PID =  "c9664185-d3fd-4e0e-89cf-77c402038938"
-PID = "f967a527-257f-404a-871d-b91575dca3b4"
+# PID = "f967a527-257f-404a-871d-b91575dca3b4"
+PID = "b4131145-9675-4433-88e1-9ae016c701dd"
 
 # Data loading
 CACHE_DIR = BASE_PATH / "data" / "dashboard_cache"
@@ -44,32 +45,36 @@ LOAD_RAW_POSE = False
 ALLOW_REMOTE_METADATA = True
 
 # Template source and cross-validation
-TEMPLATE_SOURCE = "task"  # "task" -> df_coupling_task
+TEMPLATE_SOURCE = "spont"  # "task" -> df_coupling_task
 USE_SPLIT_TEMPLATES = True
 SPLIT_A = "odd"
 SPLIT_B = "even"
 
 # Thresholds and weighting
 STPR_STRENGTH_MIN = 0.01
-WEIGHT_BY_COUPLING = False
-RECTIFY_MATCH_SCORES = True  # set negative matches to 0
+WEIGHT_BY_COUPLING = True
+RECTIFY_MATCH_SCORES = False  # keep mismatch penalties to improve null separation
 
 # Signal processing
-DETECTION_BIN_SIZE = 0.005  # seconds
+DETECTION_BIN_SIZE = 0.001  # seconds
 SMOOTH_SIGMA_S = 0.005  # seconds
 TEMPLATE_TIME_SCALE = 1.0  # stretch (>1) / squish (<1)
 
 # Packet probability normalization + detection
 PACKET_SCORE_ZSCORE = True
-PACKET_THRESHOLD = 2.5  # z-score if PACKET_SCORE_ZSCORE else raw score
+PACKET_THRESHOLD = 10  # z-score if PACKET_SCORE_ZSCORE else raw score
+UNIT_MATCH_THRESHOLD = 0.25  # unit-level aligned match required to count as packet support
 MIN_PACKET_GAP_S = 0.1
+SHUFFLE_RANDOM_SEED = 0
 
 # Raster options
-LABEL_MIN = 0.5
-REGIONS = "SSp-ul"  # e.g., ["VISp", "MOp"] or None for all
+LABEL_MIN = 0.9
+REGIONS = "MOp"  # e.g., ["VISp", "MOp"] or None for all
 REGION_PREFIX_MATCH = False
 SORT_CHOICE = "Spont stPR Delay"
-TRIAL_IDX = 829
+TRIAL_IDX = 32
+TIME_WINDOW_START_S = 4100
+TIME_WINDOW_END_S = 4120
 PACKET_PSTH_REGION = None  # default: first available region
 PLOTLY_RENDERER = None  # "browser", "notebook_connected", "png", "svg"
 
@@ -388,42 +393,49 @@ if use_split and not (split_cols[0] in df_tpl.columns and split_cols[1] in df_tp
 stpr_bin_s = float(config_calc.get("STPR_BIN_SIZE", 0.001))
 
 
-def _extract_template_and_strength(row, split=None):
+def _extract_template_strength_delay(row, split=None):
     if split:
         curve = row.get(f"stpr_curve_{split}", [])
         strength = row.get(f"coupling_strength_{split}", np.nan)
+        delay = row.get(f"coupling_delay_ms_{split}", row.get("coupling_delay_ms", np.nan))
     else:
         curve = row.get("stpr_curve", [])
         strength = row.get("coupling_strength", np.nan)
+        delay = row.get("coupling_delay_ms", np.nan)
     curve = np.asarray(curve, dtype=float)
-    return curve, strength
+    return curve, strength, delay
 
 
 templates_a = {}
 templates_b = {}
 strength_a = {}
 strength_b = {}
+delay_a = {}
+delay_b = {}
 for cid, row in df_tpl.iterrows():
     if use_split:
-        curve_a, s_a = _extract_template_and_strength(row, split=SPLIT_A)
-        curve_b, s_b = _extract_template_and_strength(row, split=SPLIT_B)
+        curve_a, s_a, d_a = _extract_template_strength_delay(row, split=SPLIT_A)
+        curve_b, s_b, d_b = _extract_template_strength_delay(row, split=SPLIT_B)
         if curve_a.size > 0:
             templates_a[cid] = resample_template(
                 curve_a, stpr_bin_s, DETECTION_BIN_SIZE, TEMPLATE_TIME_SCALE
             )
             strength_a[cid] = s_a
+            delay_a[cid] = d_a
         if curve_b.size > 0:
             templates_b[cid] = resample_template(
                 curve_b, stpr_bin_s, DETECTION_BIN_SIZE, TEMPLATE_TIME_SCALE
             )
             strength_b[cid] = s_b
+            delay_b[cid] = d_b
     else:
-        curve, s = _extract_template_and_strength(row, split=None)
+        curve, s, d = _extract_template_strength_delay(row, split=None)
         if curve.size > 0:
             templates_a[cid] = resample_template(
                 curve, stpr_bin_s, DETECTION_BIN_SIZE, TEMPLATE_TIME_SCALE
             )
             strength_a[cid] = s
+            delay_a[cid] = d
 
 
 def _mean_strength(cid):
@@ -435,6 +447,18 @@ def _mean_strength(cid):
         return float(s_a)
     if np.isfinite(s_b):
         return float(s_b)
+    return np.nan
+
+
+def _mean_delay(cid):
+    d_a = delay_a.get(cid, np.nan)
+    d_b = delay_b.get(cid, np.nan)
+    if np.isfinite(d_a) and np.isfinite(d_b):
+        return float((d_a + d_b) / 2.0)
+    if np.isfinite(d_a):
+        return float(d_a)
+    if np.isfinite(d_b):
+        return float(d_b)
     return np.nan
 
 
@@ -503,91 +527,301 @@ bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2.0
 sigma_bins = SMOOTH_SIGMA_S / DETECTION_BIN_SIZE if DETECTION_BIN_SIZE > 0 else 0
 kernel = gaussian_kernel(sigma_bins)
 
-region_scores_raw = {}
-region_scores_plot = {}
-region_event_indices = {}
-region_event_times = {}
-region_event_scores = {}
-
 region_to_cids = {
     region: df_units.loc[df_units["acronym"] == region, "cluster_id"].to_numpy()
     for region in region_order
 }
 
-for region, cids in region_to_cids.items():
-    if len(cids) == 0:
-        continue
+def _mean_pair_value(cid, values_a, values_b):
+    v_a = values_a.get(cid, np.nan)
+    v_b = values_b.get(cid, np.nan)
+    if np.isfinite(v_a) and np.isfinite(v_b):
+        return float((v_a + v_b) / 2.0)
+    if np.isfinite(v_a):
+        return float(v_a)
+    if np.isfinite(v_b):
+        return float(v_b)
+    return np.nan
 
-    score_sum = np.zeros(n_bins, dtype=float)
-    weight_sum = np.zeros(n_bins, dtype=float)
-    kept = 0
-    for cid in tqdm(cids, desc=f"Region {region}", unit="unit"):
-        cid = int(cid)
-        strength_val = _mean_strength(cid)
-        if not np.isfinite(strength_val) or strength_val < STPR_STRENGTH_MIN:
+
+def _preferred_or_mean_value(cid, primary_values, secondary_values):
+    value = primary_values.get(cid, np.nan)
+    if np.isfinite(value):
+        return float(value)
+    return _mean_pair_value(cid, primary_values, secondary_values)
+
+
+def _align_trace_by_delay(trace, delay_s):
+    trace = np.asarray(trace, dtype=float)
+    if trace.size == 0:
+        return trace.copy()
+    if not np.isfinite(delay_s):
+        return np.full(trace.shape, np.nan, dtype=float)
+    shift_bins = float(delay_s) / float(DETECTION_BIN_SIZE)
+    x = np.arange(trace.size, dtype=float)
+    return np.interp(x + shift_bins, x, trace, left=np.nan, right=np.nan)
+
+
+def _fit_region_score_normalizer(reference_scores):
+    stats = {}
+    for region, values in reference_scores.items():
+        arr = np.asarray(values, dtype=float)
+        med = np.nanmedian(arr)
+        mad = np.nanmedian(np.abs(arr - med))
+        if np.isfinite(mad) and mad > 0:
+            stats[region] = {"mode": "mad", "center": med, "scale": mad}
             continue
-
-        tpl_a = templates_a.get(cid)
-        tpl_b = templates_b.get(cid) if use_split else None
-        if tpl_a is None and tpl_b is None:
-            continue
-
-        spikes_c = spike_times_by_cluster.get(cid, np.array([]))
-        if spikes_c.size == 0:
-            continue
-
-        bin_idx = ((spikes_c - t_start) / DETECTION_BIN_SIZE).astype(int)
-        mask = (bin_idx >= 0) & (bin_idx < n_bins)
-        if not np.any(mask):
-            continue
-        counts = np.bincount(bin_idx[mask], minlength=n_bins).astype(float)
-        rate = counts / DETECTION_BIN_SIZE
-        rate_smooth = smooth_signal(rate, kernel)
-
-        scores = []
-        if tpl_a is not None and tpl_a.size >= 3:
-            scores.append(normalized_xcorr(rate_smooth, tpl_a))
-        if tpl_b is not None and tpl_b.size >= 3:
-            scores.append(normalized_xcorr(rate_smooth, tpl_b))
-        if not scores:
-            continue
-
-        if len(scores) == 1:
-            score = scores[0]
+        mean = np.nanmean(arr)
+        std = np.nanstd(arr)
+        if np.isfinite(std) and std > 0:
+            stats[region] = {"mode": "std", "center": mean, "scale": std}
         else:
-            score = np.nanmean(np.vstack(scores), axis=0)
+            stats[region] = {"mode": "zero", "center": 0.0, "scale": 1.0}
+    return stats
 
-        if RECTIFY_MATCH_SCORES:
-            score = np.maximum(0.0, score)
 
-        weight = strength_val if WEIGHT_BY_COUPLING else 1.0
-        valid = np.isfinite(score)
-        if np.any(valid):
-            score_sum[valid] += weight * score[valid]
-            weight_sum[valid] += weight
-        kept += 1
+def _apply_region_score_normalizer(score_by_region, stats):
+    if not PACKET_SCORE_ZSCORE:
+        return {region: np.asarray(values, dtype=float).copy() for region, values in score_by_region.items()}
 
-    if not np.any(weight_sum > 0):
-        region_scores_raw[region] = np.full(n_bins, np.nan, dtype=float)
-        continue
+    out = {}
+    for region, values in score_by_region.items():
+        arr = np.asarray(values, dtype=float)
+        stat = stats.get(region, None)
+        if stat is None:
+            out[region] = robust_zscore(arr)
+            continue
+        if stat["mode"] == "mad":
+            out[region] = 0.6745 * (arr - stat["center"]) / stat["scale"]
+        elif stat["mode"] == "std":
+            out[region] = (arr - stat["center"]) / stat["scale"]
+        else:
+            out[region] = arr * 0.0
+    return out
 
-    region_score = np.full(n_bins, np.nan, dtype=float)
-    valid_bins = weight_sum > 0
-    region_score[valid_bins] = score_sum[valid_bins] / weight_sum[valid_bins]
-    region_scores_raw[region] = region_score
-    print(f"Region {region}: used {kept}/{len(cids)} units")
 
-    if PACKET_SCORE_ZSCORE:
-        region_scores_plot[region] = robust_zscore(region_score)
-    else:
-        region_scores_plot[region] = region_score.copy()
+def _compute_region_packet_model(
+    model_label,
+    templates_a_local,
+    templates_b_local,
+    strength_a_local,
+    strength_b_local,
+    delay_a_local,
+    delay_b_local,
+):
+    region_scores_raw_local = {}
 
-    peaks = detect_peaks(
-        region_scores_plot[region], bin_centers, PACKET_THRESHOLD, MIN_PACKET_GAP_S
-    )
-    region_event_indices[region] = peaks
-    region_event_times[region] = bin_centers[peaks] if peaks else np.array([])
-    region_event_scores[region] = region_scores_plot[region][peaks] if peaks else np.array([])
+    for region, cids in region_to_cids.items():
+        if len(cids) == 0:
+            continue
+
+        score_sum = np.zeros(n_bins, dtype=float)
+        available_weight = np.zeros(n_bins, dtype=float)
+        support_weight = np.zeros(n_bins, dtype=float)
+        total_weight = 0.0
+        kept = 0
+        for cid in tqdm(cids, desc=f"Region {region} | {model_label}", unit="unit"):
+            cid = int(cid)
+            strength_val = _mean_pair_value(cid, strength_a_local, strength_b_local)
+            if not np.isfinite(strength_val) or strength_val < STPR_STRENGTH_MIN:
+                continue
+
+            tpl_a = templates_a_local.get(cid)
+            tpl_b = templates_b_local.get(cid) if use_split else None
+            if tpl_a is None and tpl_b is None:
+                continue
+
+            spikes_c = spike_times_by_cluster.get(cid, np.array([]))
+            if spikes_c.size == 0:
+                continue
+
+            bin_idx = ((spikes_c - t_start) / DETECTION_BIN_SIZE).astype(int)
+            mask = (bin_idx >= 0) & (bin_idx < n_bins)
+            if not np.any(mask):
+                continue
+            counts = np.bincount(bin_idx[mask], minlength=n_bins).astype(float)
+            rate = counts / DETECTION_BIN_SIZE
+            rate_smooth = smooth_signal(rate, kernel)
+
+            aligned_scores = []
+            if tpl_a is not None and tpl_a.size >= 3:
+                score_a = normalized_xcorr(rate_smooth, tpl_a)
+                delay_s_a = _preferred_or_mean_value(cid, delay_a_local, delay_b_local)
+                aligned_scores.append(
+                    _align_trace_by_delay(score_a, delay_s_a / 1000.0 if np.isfinite(delay_s_a) else np.nan)
+                )
+            if tpl_b is not None and tpl_b.size >= 3:
+                score_b = normalized_xcorr(rate_smooth, tpl_b)
+                delay_s_b = _preferred_or_mean_value(cid, delay_b_local, delay_a_local)
+                aligned_scores.append(
+                    _align_trace_by_delay(score_b, delay_s_b / 1000.0 if np.isfinite(delay_s_b) else np.nan)
+                )
+            if not aligned_scores:
+                continue
+
+            if len(aligned_scores) == 1:
+                score = aligned_scores[0]
+            else:
+                score = np.nanmean(np.vstack(aligned_scores), axis=0)
+
+            if RECTIFY_MATCH_SCORES:
+                score = np.maximum(0.0, score)
+
+            weight = float(strength_val) if WEIGHT_BY_COUPLING else 1.0
+            valid = np.isfinite(score)
+            if np.any(valid):
+                score_sum[valid] += weight * score[valid]
+                available_weight[valid] += weight
+                support = valid & (score >= UNIT_MATCH_THRESHOLD)
+                if np.any(support):
+                    support_weight[support] += weight
+                total_weight += weight
+            kept += 1
+
+        if total_weight <= 0 or not np.any(available_weight > 0):
+            region_scores_raw_local[region] = np.full(n_bins, np.nan, dtype=float)
+            continue
+
+        region_score = np.full(n_bins, np.nan, dtype=float)
+        valid_bins = available_weight > 0
+        support_fraction = np.clip(support_weight[valid_bins] / total_weight, 0.0, 1.0)
+        # Fixed total-weight normalization makes packet score depend on broad,
+        # delay-aligned support rather than a small subset of matching units.
+        region_score[valid_bins] = (score_sum[valid_bins] / total_weight) * support_fraction
+        region_scores_raw_local[region] = region_score
+        print(f"Region {region} ({model_label}): used {kept}/{len(cids)} units")
+
+    return {"raw": region_scores_raw_local}
+
+
+def _finalize_packet_model(model_label, raw_score_by_region, normalization_stats):
+    plot_score_by_region = _apply_region_score_normalizer(raw_score_by_region, normalization_stats)
+    event_indices_by_region = {}
+    event_times_by_region = {}
+    event_scores_by_region = {}
+
+    for region, score_values in plot_score_by_region.items():
+        peaks = detect_peaks(score_values, bin_centers, PACKET_THRESHOLD, MIN_PACKET_GAP_S)
+        event_indices_by_region[region] = peaks
+        event_times_by_region[region] = bin_centers[peaks] if peaks else np.array([])
+        event_scores_by_region[region] = score_values[peaks] if peaks else np.array([])
+
+    return {
+        "raw": raw_score_by_region,
+        "plot": plot_score_by_region,
+        "event_indices": event_indices_by_region,
+        "event_times": event_times_by_region,
+        "event_scores": event_scores_by_region,
+        "label": model_label,
+    }
+
+
+def _build_shuffled_value_maps(values_a, values_b, seed):
+    shuffled_a = {}
+    shuffled_b = {}
+    rng = np.random.default_rng(seed)
+
+    for region, cids in region_to_cids.items():
+        cids = np.asarray(cids, dtype=int)
+        if cids.size == 0:
+            continue
+        source_cids = rng.permutation(cids)
+        for cid, src_cid in zip(cids, source_cids):
+            cid = int(cid)
+            src_cid = int(src_cid)
+            shuffled_a[cid] = _preferred_or_mean_value(src_cid, values_a, values_b)
+            shuffled_b[cid] = _preferred_or_mean_value(src_cid, values_b, values_a)
+    return shuffled_a, shuffled_b
+
+
+packet_model_observed_raw = _compute_region_packet_model(
+    "Observed",
+    templates_a,
+    templates_b,
+    strength_a,
+    strength_b,
+    delay_a,
+    delay_b,
+)
+delay_shuffle_a, delay_shuffle_b = _build_shuffled_value_maps(
+    delay_a, delay_b, SHUFFLE_RANDOM_SEED
+)
+strength_shuffle_a, strength_shuffle_b = _build_shuffled_value_maps(
+    strength_a, strength_b, SHUFFLE_RANDOM_SEED + 1
+)
+packet_model_delay_shuffle_raw = _compute_region_packet_model(
+    "Delay Shuffle",
+    templates_a,
+    templates_b,
+    strength_a,
+    strength_b,
+    delay_shuffle_a,
+    delay_shuffle_b,
+)
+packet_model_strength_shuffle_raw = _compute_region_packet_model(
+    "Strength Shuffle",
+    templates_a,
+    templates_b,
+    strength_shuffle_a,
+    strength_shuffle_b,
+    delay_a,
+    delay_b,
+)
+
+score_normalization_stats = (
+    _fit_region_score_normalizer(packet_model_observed_raw["raw"])
+    if PACKET_SCORE_ZSCORE
+    else {}
+)
+packet_model = _finalize_packet_model(
+    "Observed",
+    packet_model_observed_raw["raw"],
+    score_normalization_stats,
+)
+packet_model_delay_shuffle = _finalize_packet_model(
+    "Delay Shuffle",
+    packet_model_delay_shuffle_raw["raw"],
+    score_normalization_stats,
+)
+packet_model_strength_shuffle = _finalize_packet_model(
+    "Strength Shuffle",
+    packet_model_strength_shuffle_raw["raw"],
+    score_normalization_stats,
+)
+
+region_scores_raw = packet_model["raw"]
+region_scores_plot = packet_model["plot"]
+region_event_indices = packet_model["event_indices"]
+region_event_times = packet_model["event_times"]
+region_event_scores = packet_model["event_scores"]
+
+region_scores_raw_delay_shuffle = packet_model_delay_shuffle["raw"]
+region_scores_plot_delay_shuffle = packet_model_delay_shuffle["plot"]
+region_event_indices_delay_shuffle = packet_model_delay_shuffle["event_indices"]
+region_event_times_delay_shuffle = packet_model_delay_shuffle["event_times"]
+region_event_scores_delay_shuffle = packet_model_delay_shuffle["event_scores"]
+
+region_scores_raw_strength_shuffle = packet_model_strength_shuffle["raw"]
+region_scores_plot_strength_shuffle = packet_model_strength_shuffle["plot"]
+region_event_indices_strength_shuffle = packet_model_strength_shuffle["event_indices"]
+region_event_times_strength_shuffle = packet_model_strength_shuffle["event_times"]
+region_event_scores_strength_shuffle = packet_model_strength_shuffle["event_scores"]
+
+packet_panels = [
+    ("Packet Score", region_scores_plot, region_event_times, region_event_scores),
+    (
+        "Packet Score (Delay Shuffle)",
+        region_scores_plot_delay_shuffle,
+        region_event_times_delay_shuffle,
+        region_event_scores_delay_shuffle,
+    ),
+    (
+        "Packet Score (Strength Shuffle)",
+        region_scores_plot_strength_shuffle,
+        region_event_times_strength_shuffle,
+        region_event_scores_strength_shuffle,
+    ),
+]
 
 
 # %%
@@ -645,7 +879,7 @@ df_units_sorted, sort_label = plotting_utils._merge_metric(
     df_firing_rate=None,
 )
 df_units_sorted, region_order_sorted, sort_label = plotting_utils._sort_within_regions(
-    df_units_sorted, sort_label
+    df_units_sorted, sort_label, metric_key=sorting_metric
 )
 
 cluster_index_map = dict(
@@ -658,6 +892,61 @@ cluster_region_map = dict(
 template = config_plot.get("PLOTLY_TEMPLATE", "plotly_white")
 base_color = plotting_utils._template_base_color(template)
 region_colors = plotting_utils._region_color_map(region_order_sorted)
+packet_score_ylabel = "Packet score (z)" if PACKET_SCORE_ZSCORE else "Packet score"
+packet_subplot_titles = ("Raster",) + tuple(panel[0] for panel in packet_panels)
+packet_row_heights = [0.55] + [0.15] * len(packet_panels)
+packet_n_rows = 1 + len(packet_panels)
+
+
+def _add_packet_panel_traces(
+    fig,
+    row_idx,
+    score_lookup,
+    event_times_lookup,
+    event_scores_lookup,
+    t_start_plot,
+    t_end_plot,
+    t_offset=0.0,
+    align_to_event=False,
+):
+    for region in region_order:
+        score_plot = score_lookup.get(region)
+        if score_plot is None:
+            continue
+        color = region_colors.get(region)
+        mask = (bin_centers >= t_start_plot) & (bin_centers <= t_end_plot)
+        x_vals = bin_centers[mask] - t_offset if align_to_event else bin_centers[mask]
+        y_vals = score_plot[mask]
+        fig.add_trace(
+            go.Scatter(
+                x=x_vals,
+                y=y_vals,
+                mode="lines",
+                line=dict(color=color),
+                name=f"{region} score",
+                showlegend=False,
+            ),
+            row=row_idx,
+            col=1,
+        )
+        ev_times = event_times_lookup.get(region, np.array([]))
+        ev_scores = event_scores_lookup.get(region, np.array([]))
+        if ev_times.size > 0:
+            keep = (ev_times >= t_start_plot) & (ev_times <= t_end_plot)
+            ev_x = ev_times[keep] - t_offset if align_to_event else ev_times[keep]
+            ev_y = ev_scores[keep]
+            fig.add_trace(
+                go.Scatter(
+                    x=ev_x,
+                    y=ev_y,
+                    mode="markers",
+                    marker=dict(symbol="star", size=9, color=color),
+                    name=f"{region} packets",
+                    showlegend=False,
+                ),
+                row=row_idx,
+                col=1,
+            )
 
 
 # %%
@@ -738,12 +1027,12 @@ def plot_trial_view(trial_idx):
     spike_regions = pd.Series(window_spike_clusters).map(cluster_region_map).to_numpy()
 
     fig_base = make_subplots(
-        rows=2,
+        rows=packet_n_rows,
         cols=1,
         shared_xaxes=True,
         vertical_spacing=0.05,
-        row_heights=[0.7, 0.3],
-        subplot_titles=("Raster", "Packet Probability"),
+        row_heights=packet_row_heights,
+        subplot_titles=packet_subplot_titles,
     )
     fig = FigureResampler(fig_base) if FigureResampler is not None else fig_base
 
@@ -815,44 +1104,20 @@ def plot_trial_view(trial_idx):
             col=1,
         )
 
-    for region in region_order:
-        score_plot = region_scores_plot.get(region)
-        if score_plot is None:
-            continue
-        color = region_colors.get(region)
-        mask = (bin_centers >= t_start_plot) & (bin_centers <= t_end_plot)
-        x_vals = bin_centers[mask] - t_offset if align_to_event else bin_centers[mask]
-        y_vals = score_plot[mask]
-        fig.add_trace(
-            go.Scatter(
-                x=x_vals,
-                y=y_vals,
-                mode="lines",
-                line=dict(color=color),
-                name=f"{region} prob",
-                showlegend=False,
-            ),
-            row=2,
-            col=1,
+    for panel_row_idx, (_panel_title, score_lookup, event_times_lookup, event_scores_lookup) in enumerate(
+        packet_panels, start=2
+    ):
+        _add_packet_panel_traces(
+            fig,
+            panel_row_idx,
+            score_lookup,
+            event_times_lookup,
+            event_scores_lookup,
+            t_start_plot,
+            t_end_plot,
+            t_offset=t_offset,
+            align_to_event=align_to_event,
         )
-        ev_times = region_event_times.get(region, np.array([]))
-        ev_scores = region_event_scores.get(region, np.array([]))
-        if ev_times.size > 0:
-            keep = (ev_times >= t_start_plot) & (ev_times <= t_end_plot)
-            ev_x = ev_times[keep] - t_offset if align_to_event else ev_times[keep]
-            ev_y = ev_scores[keep]
-            fig.add_trace(
-                go.Scatter(
-                    x=ev_x,
-                    y=ev_y,
-                    mode="markers",
-                    marker=dict(symbol="star", size=9, color=color),
-                    name=f"{region} packets",
-                    showlegend=False,
-                ),
-                row=2,
-                col=1,
-            )
 
     event_style_map = {
         "stimOn_times": ("Stim On", "blue"),
@@ -873,8 +1138,8 @@ def plot_trial_view(trial_idx):
         if t_event < t_start_plot or t_event > t_end_plot:
             continue
         x_event = t_event - t_offset if align_to_event else t_event
-        fig.add_vline(x=x_event, line=dict(color=color, width=1.5), row=1, col=1)
-        fig.add_vline(x=x_event, line=dict(color=color, width=1.5), row=2, col=1)
+        for row_idx in range(1, packet_n_rows + 1):
+            fig.add_vline(x=x_event, line=dict(color=color, width=1.5), row=row_idx, col=1)
         fig.add_trace(
             go.Scatter(
                 x=[None],
@@ -901,30 +1166,23 @@ def plot_trial_view(trial_idx):
         showticklabels=False,
         range=[-0.5, len(df_units_sorted) - 0.5],
     )
-    fig.update_yaxes(
-        title_text="Packet score (z)" if PACKET_SCORE_ZSCORE else "Packet score",
-        row=2,
-        col=1,
-    )
-    fig.update_xaxes(title_text=xlabel_text, row=2, col=1)
+    for row_idx in range(2, packet_n_rows + 1):
+        fig.update_yaxes(title_text=packet_score_ylabel, row=row_idx, col=1)
+    fig.update_xaxes(title_text=xlabel_text, row=packet_n_rows, col=1)
 
     fig.update_layout(
         title=f"{plot_title} | Sort: {sort_label}",
-        height=900,
+        height=1200,
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
         margin=dict(l=70, r=40, t=90, b=60),
     )
     fig.update_layout(template=template, font=dict(color=base_color))
-    fig.update_xaxes(
-        range=[t_start_plot - t_offset, t_end_plot - t_offset],
-        row=1,
-        col=1,
-    )
-    fig.update_xaxes(
-        range=[t_start_plot - t_offset, t_end_plot - t_offset],
-        row=2,
-        col=1,
-    )
+    for row_idx in range(1, packet_n_rows + 1):
+        fig.update_xaxes(
+            range=[t_start_plot - t_offset, t_end_plot - t_offset],
+            row=row_idx,
+            col=1,
+        )
 
     return fig
 
@@ -934,10 +1192,171 @@ show_fig(fig, renderer=PLOTLY_RENDERER)
 
 
 # %%
+# ---- Plot (session time window view) ----
+def plot_time_window_view(window_start_s, window_end_s):
+    window_start_s = float(window_start_s)
+    window_end_s = float(window_end_s)
+    if not np.isfinite(window_start_s) or not np.isfinite(window_end_s):
+        raise ValueError("Window start/end must be finite.")
+    if window_end_s <= window_start_s:
+        raise ValueError("Window end must be larger than window start.")
+
+    t_start_plot = max(window_start_s, t_start)
+    t_end_plot = min(window_end_s, t_end)
+    if t_end_plot <= t_start_plot:
+        raise ValueError("Requested time window is outside the session range.")
+
+    window_mask = (spike_times >= t_start_plot) & (spike_times <= t_end_plot)
+    window_spike_times = spike_times[window_mask]
+    window_spike_clusters = spike_clusters[window_mask]
+
+    spike_mask = np.isin(window_spike_clusters, df_units_sorted["cluster_id"].values)
+    window_spike_times = window_spike_times[spike_mask]
+    window_spike_clusters = window_spike_clusters[spike_mask]
+
+    spike_y = pd.Series(window_spike_clusters).map(cluster_index_map).to_numpy()
+    spike_regions = pd.Series(window_spike_clusters).map(cluster_region_map).to_numpy()
+
+    fig_base = make_subplots(
+        rows=packet_n_rows,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.05,
+        row_heights=packet_row_heights,
+        subplot_titles=packet_subplot_titles,
+    )
+    fig = FigureResampler(fig_base) if FigureResampler is not None else fig_base
+
+    raster_trace = go.Scattergl(
+        x=window_spike_times,
+        y=spike_y,
+        mode="markers",
+        marker=dict(color=base_color, size=3, symbol="line-ns-open"),
+        customdata=np.column_stack([window_spike_clusters, spike_regions]),
+        hovertemplate=(
+            "Time: %{x:.3f}s<br>Unit: %{customdata[0]}<br>Region: %{customdata[1]}<extra></extra>"
+        ),
+        name="Spikes",
+    )
+
+    if FigureResampler is not None:
+        fig.add_trace(
+            raster_trace,
+            max_n_samples=len(window_spike_times),
+            hf_x=window_spike_times,
+            hf_y=spike_y,
+            row=1,
+            col=1,
+        )
+    else:
+        fig.add_trace(raster_trace, row=1, col=1)
+
+    for acronym in region_order_sorted:
+        group = df_units_sorted[df_units_sorted["acronym"] == acronym]
+        if group.empty:
+            continue
+        y0 = group.index.min() - 0.5
+        y1 = group.index.max() + 0.5
+        fill_color = plotting_utils._color_to_rgba(region_colors.get(acronym), alpha=0.18)
+        fig.add_shape(
+            type="rect",
+            x0=t_start_plot,
+            x1=t_end_plot,
+            y0=y0,
+            y1=y1,
+            line=dict(width=0),
+            fillcolor=fill_color,
+            layer="below",
+            row=1,
+            col=1,
+        )
+        fig.add_annotation(
+            x=t_end_plot,
+            y=(y0 + y1) / 2,
+            xanchor="left",
+            yanchor="middle",
+            text=acronym,
+            showarrow=False,
+            font=dict(size=10, color="gray"),
+            xshift=10,
+            row=1,
+            col=1,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=[None],
+                y=[None],
+                mode="markers",
+                marker=dict(color=region_colors.get(acronym), size=8),
+                name=acronym,
+                showlegend=True,
+            ),
+            row=1,
+            col=1,
+        )
+
+    for panel_row_idx, (_panel_title, score_lookup, event_times_lookup, event_scores_lookup) in enumerate(
+        packet_panels, start=2
+    ):
+        _add_packet_panel_traces(
+            fig,
+            panel_row_idx,
+            score_lookup,
+            event_times_lookup,
+            event_scores_lookup,
+            t_start_plot,
+            t_end_plot,
+            t_offset=0.0,
+            align_to_event=False,
+        )
+
+    ylabel_text = (
+        f"Good Units (n={len(df_units_sorted)})"
+        if config_plot.get("PLOT_ONLY_GOOD_UNITS", False)
+        else f"All Units (n={len(df_units_sorted)})"
+    )
+
+    fig.update_yaxes(
+        title_text=ylabel_text,
+        row=1,
+        col=1,
+        showticklabels=False,
+        range=[-0.5, len(df_units_sorted) - 0.5],
+    )
+    for row_idx in range(2, packet_n_rows + 1):
+        fig.update_yaxes(title_text=packet_score_ylabel, row=row_idx, col=1)
+    fig.update_xaxes(title_text="Time in session (s)", row=packet_n_rows, col=1)
+
+    fig.update_layout(
+        title=f"Session window {t_start_plot:.3f}-{t_end_plot:.3f} s | Sort: {sort_label}",
+        height=1200,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        margin=dict(l=70, r=40, t=90, b=60),
+    )
+    fig.update_layout(template=template, font=dict(color=base_color))
+    for row_idx in range(1, packet_n_rows + 1):
+        fig.update_xaxes(range=[t_start_plot, t_end_plot], row=row_idx, col=1)
+
+    return fig
+
+
+fig_time_window = plot_time_window_view(TIME_WINDOW_START_S, TIME_WINDOW_END_S)
+show_fig(fig_time_window, renderer=PLOTLY_RENDERER)
+
+
+# %%
 # ---- Summary ----
 print("Detected packet counts per region:")
 for region in region_order:
     n_events = len(region_event_times.get(region, []))
+    print(f"  {region}: {n_events}")
+print("Detected packet counts per region (delay shuffle):")
+for region in region_order:
+    n_events = len(region_event_times_delay_shuffle.get(region, []))
+    print(f"  {region}: {n_events}")
+print("Detected packet counts per region (strength shuffle):")
+for region in region_order:
+    n_events = len(region_event_times_strength_shuffle.get(region, []))
     print(f"  {region}: {n_events}")
 
 
@@ -1323,4 +1742,3 @@ else:
             pre=0.0,
             post=6.0,
         )
-
