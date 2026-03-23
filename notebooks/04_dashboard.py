@@ -30,6 +30,7 @@ from utils.plotting_plotly import (
     plot_population_sorted_plotly,
     plot_multi_event_population_panel_plotly,
     plot_whisking_overview_plotly,
+    build_whisk_raster_overlay_inputs,
     plot_population_coupling_heatmap_plotly,
     plot_single_neuron_plotly,
     plot_single_neuron_conditioned_event_plotly,
@@ -1507,10 +1508,19 @@ if passive_events_available:
         key="general_show_passive_events",
     )
 
+whisk_raster_inputs = build_whisk_raster_overlay_inputs(
+    df_wh=data.get("df_wh"),
+    wh_detect=data.get("wh_detect", {}),
+    wh_event_base=data.get("wh_event_base", {}),
+    wh_events_by_period=data.get("wh_events_by_period", {}),
+)
+
 if t_end <= t_start:
     st.warning("End time must be greater than start time.")
 else:
     passive_event_times = {}
+    general_extra_event_times = dict(whisk_raster_inputs.get("extra_event_times") or {})
+    general_extra_event_styles = dict(whisk_raster_inputs.get("extra_event_styles") or {})
     passive_event_styles = {
         "passive_visual": ("Passive Visual", "#17becf", "dot"),
         "passive_valve": ("Passive Valve", "#17becf", "solid"),
@@ -1519,6 +1529,8 @@ else:
     }
     if show_passive_events and passive_events_available and eid is not None:
         passive_event_times = _load_passive_event_times(eid, allow_remote=allow_remote)
+        general_extra_event_times.update(passive_event_times or {})
+        general_extra_event_styles.update(passive_event_styles)
 
     fig_session = plot_time_window_raster_plotly(
         spikes,
@@ -1539,8 +1551,11 @@ else:
         pupil_times=data.get("pupil_times"),
         pupil_value_col=pupil_value_col,
         region_colors=region_colors,
-        extra_event_times=passive_event_times if show_passive_events else None,
-        extra_event_styles=passive_event_styles,
+        motion_mean_df=whisk_raster_inputs.get("motion_mean_df"),
+        extra_event_times=general_extra_event_times,
+        extra_event_styles=general_extra_event_styles,
+        extra_event_spans=whisk_raster_inputs.get("extra_event_spans"),
+        extra_event_span_styles=whisk_raster_inputs.get("extra_event_span_styles"),
     )
     st.plotly_chart(fig_session, width="stretch")
 
@@ -1580,6 +1595,11 @@ fig_trial = plot_trial_raster_plotly(
     pupil_times=data.get("pupil_times"),
     pupil_value_col=pupil_value_col,
     region_colors=region_colors,
+    motion_mean_df=whisk_raster_inputs.get("motion_mean_df"),
+    extra_event_times=whisk_raster_inputs.get("extra_event_times"),
+    extra_event_styles=whisk_raster_inputs.get("extra_event_styles"),
+    extra_event_spans=whisk_raster_inputs.get("extra_event_spans"),
+    extra_event_span_styles=whisk_raster_inputs.get("extra_event_span_styles"),
 )
 st.plotly_chart(fig_trial, width="stretch")
 

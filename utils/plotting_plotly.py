@@ -218,6 +218,73 @@ def _extract_precomputed_motion_mean_series(
     return t_vals[order], y_vals[order]
 
 
+def _is_whisk_trace_df(df):
+    return isinstance(df, pd.DataFrame) and {"bin_center_s", "wh_norm"}.issubset(df.columns)
+
+
+def build_whisk_raster_overlay_inputs(
+    df_wh=None,
+    wh_detect=None,
+    wh_event_base=None,
+    wh_events_by_period=None,
+):
+    """
+    Package whisk trace, onset lines, and bout spans for raster overlays.
+    """
+    wh_detect = wh_detect or {}
+    wh_event_base = wh_event_base or {}
+    wh_events_by_period = wh_events_by_period or {}
+
+    wh_brief_times = np.asarray(
+        wh_event_base.get(
+            "wh_brief_times",
+            wh_events_by_period.get("wh_brief_times", np.array([])),
+        ),
+        dtype=float,
+    )
+    wh_long_times = np.asarray(
+        wh_event_base.get(
+            "wh_long_times",
+            wh_events_by_period.get("wh_long_times", np.array([])),
+        ),
+        dtype=float,
+    )
+
+    return {
+        "motion_mean_df": df_wh,
+        "extra_event_times": {
+            "wh_brief_times": wh_brief_times,
+            "wh_long_times": wh_long_times,
+        },
+        "extra_event_styles": {
+            "wh_brief_times": ("Wh brief", "#17becf", "dot"),
+            "wh_long_times": ("Wh long", "#d62728", "dash"),
+        },
+        "extra_event_spans": {
+            "wh_brief_bouts": np.asarray(
+                wh_detect.get("brief_bouts", np.empty((0, 2))),
+                dtype=float,
+            ),
+            "wh_long_bouts": np.asarray(
+                wh_detect.get("long_bouts", np.empty((0, 2))),
+                dtype=float,
+            ),
+        },
+        "extra_event_span_styles": {
+            "wh_brief_bouts": {
+                "label": "Wh brief bouts",
+                "color": "#17becf",
+                "alpha": 0.20,
+            },
+            "wh_long_bouts": {
+                "label": "Wh long bouts",
+                "color": "#d62728",
+                "alpha": 0.17,
+            },
+        },
+    }
+
+
 def _extract_pupil_series_from_df(
     pupil_df,
     t_start,
@@ -945,6 +1012,12 @@ def plot_trial_raster_plotly(
 
     template = config_plot.get("PLOTLY_TEMPLATE", DEFAULT_TEMPLATE)
     base_color = _template_base_color(template)
+    is_whisk_trace = _is_whisk_trace_df(motion_mean_df)
+    motion_subplot_title = "Whisking" if is_whisk_trace else "Motion energy (mean)"
+    motion_axis_label = "Normalized whisk signal" if is_whisk_trace else "Motion energy"
+    motion_trace_name = "Mean whisk" if is_whisk_trace else "Motion mean"
+    motion_trace_color = "#ff7f0e" if is_whisk_trace else "black"
+    motion_missing_text = "Whisking trace not available" if is_whisk_trace else "Motion energy not available"
     pupil_col_norm = str(pupil_value_col or "").strip().lower()
     if "raw" in pupil_col_norm:
         pupil_axis_label = "Pupil (raw)"
@@ -1073,7 +1146,7 @@ def plot_trial_raster_plotly(
                 "Avg PSTH",
                 "Wheel",
                 "Paw Speed",
-                "Motion energy (mean)",
+                motion_subplot_title,
                 pupil_subplot_title,
             ),
         )
@@ -1259,7 +1332,7 @@ def plot_trial_raster_plotly(
         t_end,
         t_offset=t_offset,
     )
-    if mean_t.size == 0:
+    if mean_t.size == 0 and not is_whisk_trace:
         mean_t, mean_me = _extract_mean_motion_energy_series(
             motion_energy,
             t_start,
@@ -1272,8 +1345,8 @@ def plot_trial_raster_plotly(
                 x=mean_t,
                 y=mean_me,
                 mode="lines",
-                line=dict(color="black"),
-                name="Motion mean",
+                line=dict(color=motion_trace_color),
+                name=motion_trace_name,
                 showlegend=True,
             ),
             row=5,
@@ -1285,7 +1358,7 @@ def plot_trial_raster_plotly(
             y=0.5,
             xref="paper",
             yref="y5",
-            text="Motion energy not available",
+            text=motion_missing_text,
             showarrow=False,
             row=5,
             col=1,
@@ -1442,12 +1515,14 @@ def plot_trial_raster_plotly(
     fig.update_yaxes(title_text="Avg PSTH (Hz)", row=2, col=1)
     fig.update_yaxes(title_text="Wheel (rad)", row=3, col=1)
     fig.update_yaxes(title_text="Paw (px/s)", row=4, col=1)
-    fig.update_yaxes(title_text="Motion energy", row=5, col=1)
+    fig.update_yaxes(title_text=motion_axis_label, row=5, col=1)
     fig.update_yaxes(title_text=pupil_axis_label, row=6, col=1)
     fig.update_xaxes(showgrid=False, row=1, col=1)
     fig.update_yaxes(showgrid=False, row=1, col=1)
     fig.update_xaxes(title_text=xlabel_text, row=6, col=1)
     fig.update_xaxes(range=[t_start - t_offset, t_end - t_offset])
+    if is_whisk_trace:
+        fig.update_yaxes(range=[-0.02, 1.05], row=5, col=1)
 
     fig.update_layout(
         title=f"{plot_title} | Sort: {sort_label}",
@@ -2594,6 +2669,12 @@ def plot_time_window_raster_plotly(
 
     template = config_plot.get("PLOTLY_TEMPLATE", DEFAULT_TEMPLATE)
     base_color = _template_base_color(template)
+    is_whisk_trace = _is_whisk_trace_df(motion_mean_df)
+    motion_subplot_title = "Whisking" if is_whisk_trace else "Motion energy (mean)"
+    motion_axis_label = "Normalized whisk signal" if is_whisk_trace else "Motion energy"
+    motion_trace_name = "Mean whisk" if is_whisk_trace else "Motion mean"
+    motion_trace_color = "#ff7f0e" if is_whisk_trace else "black"
+    motion_missing_text = "Whisking trace not available" if is_whisk_trace else "Motion energy not available"
     pupil_col_norm = str(pupil_value_col or "").strip().lower()
     if "raw" in pupil_col_norm:
         pupil_axis_label = "Pupil (raw)"
@@ -2679,7 +2760,7 @@ def plot_time_window_raster_plotly(
                 "Avg PSTH",
                 "Wheel",
                 "Paw Speed",
-                "Motion energy (mean)",
+                motion_subplot_title,
                 pupil_subplot_title,
             ),
         )
@@ -2857,7 +2938,7 @@ def plot_time_window_raster_plotly(
         t_end,
         t_offset=0.0,
     )
-    if mean_t.size == 0:
+    if mean_t.size == 0 and not is_whisk_trace:
         mean_t, mean_me = _extract_mean_motion_energy_series(
             motion_energy,
             t_start,
@@ -2870,8 +2951,8 @@ def plot_time_window_raster_plotly(
                 x=mean_t,
                 y=mean_me,
                 mode="lines",
-                line=dict(color="black"),
-                name="Motion mean",
+                line=dict(color=motion_trace_color),
+                name=motion_trace_name,
                 showlegend=True,
             ),
             row=5,
@@ -2883,7 +2964,7 @@ def plot_time_window_raster_plotly(
             y=0.5,
             xref="paper",
             yref="y5",
-            text="Motion energy not available",
+            text=motion_missing_text,
             showarrow=False,
             row=5,
             col=1,
@@ -3027,11 +3108,13 @@ def plot_time_window_raster_plotly(
     fig.update_yaxes(title_text="Avg PSTH (Hz)", row=2, col=1)
     fig.update_yaxes(title_text="Wheel (rad)", row=3, col=1)
     fig.update_yaxes(title_text="Paw (px/s)", row=4, col=1)
-    fig.update_yaxes(title_text="Motion energy", row=5, col=1)
+    fig.update_yaxes(title_text=motion_axis_label, row=5, col=1)
     fig.update_yaxes(title_text=pupil_axis_label, row=6, col=1)
     fig.update_xaxes(showgrid=False, row=1, col=1)
     fig.update_yaxes(showgrid=False, row=1, col=1)
     fig.update_xaxes(title_text="Time in session (s)", row=6, col=1)
+    if is_whisk_trace:
+        fig.update_yaxes(range=[-0.02, 1.05], row=5, col=1)
 
     fig.update_layout(
         title=f"Window {t_start:.2f}-{t_end:.2f}s | Sort: {sort_label}",

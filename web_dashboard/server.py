@@ -23,6 +23,7 @@ from utils.plotting_plotly import (  # noqa: E402
     plot_population_coupling_heatmap_plotly,
     plot_coupling_strength_summary_plotly,
     plot_coupling_delay_summary_plotly,
+    build_whisk_raster_overlay_inputs,
     plot_single_neuron_plotly,
     plot_single_neuron_conditioned_event_plotly,
     plot_stpr_curve_halves_plotly,
@@ -239,6 +240,12 @@ class Handler(SimpleHTTPRequestHandler):
             clusters = data.get("clusters")
             cluster_ids = data.get("cluster_ids")
             cluster_acronyms = data.get("cluster_acronyms_plot")
+            whisk_raster_inputs = build_whisk_raster_overlay_inputs(
+                df_wh=data.get("df_wh"),
+                wh_detect=data.get("wh_detect", {}),
+                wh_event_base=data.get("wh_event_base", {}),
+                wh_events_by_period=data.get("wh_events_by_period", {}),
+            )
 
             if parsed.path == "/api/fig/general_raster":
                 t_start = float(params.get("t_start", [0])[0])
@@ -263,6 +270,11 @@ class Handler(SimpleHTTPRequestHandler):
                         pupil_features=data.get("pupil_features"),
                         pupil_times=data.get("pupil_times"),
                         region_colors=None,
+                        motion_mean_df=whisk_raster_inputs.get("motion_mean_df"),
+                        extra_event_times=whisk_raster_inputs.get("extra_event_times"),
+                        extra_event_styles=whisk_raster_inputs.get("extra_event_styles"),
+                        extra_event_spans=whisk_raster_inputs.get("extra_event_spans"),
+                        extra_event_span_styles=whisk_raster_inputs.get("extra_event_span_styles"),
                     ),
                 )
                 return self._send_json(_fig_to_dict(fig))
@@ -290,6 +302,11 @@ class Handler(SimpleHTTPRequestHandler):
                         pupil_features=data.get("pupil_features"),
                         pupil_times=data.get("pupil_times"),
                         region_colors=None,
+                        motion_mean_df=whisk_raster_inputs.get("motion_mean_df"),
+                        extra_event_times=whisk_raster_inputs.get("extra_event_times"),
+                        extra_event_styles=whisk_raster_inputs.get("extra_event_styles"),
+                        extra_event_spans=whisk_raster_inputs.get("extra_event_spans"),
+                        extra_event_span_styles=whisk_raster_inputs.get("extra_event_span_styles"),
                     ),
                 )
                 return self._send_json(_fig_to_dict(fig))
