@@ -1,0 +1,12 @@
+{
+    "ALYX_URL": "https://openalyx.internationalbrainlab.org",
+    "ALYX_LOGIN": "intbrainlab",
+    "HTTP_DATA_SERVER": "https://ibl.flatironinstitute.org/public",
+    "HTTP_DATA_SERVER_LOGIN": null,
+    "HTTP_DATA_SERVER_PWD": null,
+    "TOKEN": {
+        "intbrainlab": {
+            "token": "c48f217eaa808b2cec0c6512e6465ac4d23c8c6f"
+        }
+    }
+}
