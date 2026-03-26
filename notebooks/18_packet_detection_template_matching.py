@@ -66,8 +66,8 @@ PACKET_THRESHOLD = 2.0  # z-score if PACKET_SCORE_ZSCORE else raw score
 MIN_PACKET_GAP_S = 0.1
 
 # Raster options
-LABEL_MIN = 0.5
-REGIONS = "SSp-ul"  # e.g., ["VISp", "MOp"] or None for all
+LABEL_MIN = 0.9
+REGIONS = "PO"  # e.g., ["VISp", "MOp"] or None for all
 REGION_PREFIX_MATCH = False
 SORT_CHOICE = "Spont stPR Delay"
 TRIAL_IDX = 829
@@ -2272,12 +2272,17 @@ else:
 # ---- Clean packet-feature presentation config ----
 PRESENT_PACKET_REGION = None  # defaults to packet_region, then first region with packets
 PRESENT_CONTEXT_MODE = "all"  # "all", "task", "spont", "iti"
-PRESENT_SHAPE_MODE = "residual"  # "raw", "normalized", "residual"
-PRESENT_N_CLUSTERS = 3
+PRESENT_SHAPE_MODE = "raw"  # "raw", "normalized", "residual"
+PRESENT_N_CLUSTERS = 4
 PRESENT_PCA_COMPONENTS = 6
+PRESENT_UMAP_PRE_PCA_COMPONENTS = 10
+PRESENT_UMAP_NEIGHBORS = 20
+PRESENT_UMAP_MIN_DIST = 0.2
+PRESENT_UMAP_RANDOM_STATE = 0
 PRESENT_TOP_COUPLING_FEATURES = 8
 PRESENT_TOP_COUPLING_SCATTERS = 1
 PRESENT_PACKET_ONSET_FRACTION = 0.25
+PRESENT_PACKET_PERIOD_MIN_OVERLAP_S = 0.05
 PRESENT_CLUSTER_FEATURES = [
     "packet_fraction",
     "peak_rate",
@@ -3956,6 +3961,46 @@ def _compute_matrix_pca(matrix, n_components=6):
     return dict(scores=scores, components=vt[:max_components], explained_ratio=explained_ratio)
 
 
+def _compute_matrix_umap(
+    matrix,
+    n_components=2,
+    pre_pca_components=10,
+    n_neighbors=20,
+    min_dist=0.2,
+    random_state=0,
+):
+    x = np.asarray(matrix, dtype=float)
+    if x.ndim != 2 or x.shape[0] < 2 or x.shape[1] == 0:
+        return None
+    try:
+        import umap
+    except Exception:
+        return None
+
+    umap_input = x
+    if pre_pca_components is not None and int(pre_pca_components) > 0 and x.shape[1] > int(pre_pca_components):
+        pca_result = _compute_matrix_pca(
+            x,
+            n_components=min(int(pre_pca_components), x.shape[0], x.shape[1]),
+        )
+        umap_input = np.asarray(pca_result["scores"], dtype=float)
+
+    reducer = umap.UMAP(
+        n_components=int(n_components),
+        n_neighbors=int(n_neighbors),
+        min_dist=float(min_dist),
+        metric="euclidean",
+        random_state=int(random_state),
+    )
+    return dict(
+        scores=np.asarray(reducer.fit_transform(umap_input), dtype=float),
+        input_matrix=np.asarray(umap_input, dtype=float),
+        n_neighbors=int(n_neighbors),
+        min_dist=float(min_dist),
+        pre_pca_components=int(pre_pca_components) if pre_pca_components is not None else None,
+    )
+
+
 def _residualize_matrix_against_scalar(matrix, scalar):
     x = np.asarray(matrix, dtype=float)
     scalar = np.asarray(scalar, dtype=float).reshape(-1)
@@ -4027,6 +4072,93 @@ def _cluster_palette():
     ]
 
 
+def _event_windows_from_times(event_times, start_offset_s, end_offset_s):
+    event_times = np.asarray(event_times, dtype=float).reshape(-1)
+    valid = np.isfinite(event_times)
+    if not np.any(valid):
+        return np.empty((0, 2), dtype=float)
+    event_times = event_times[valid]
+    windows = np.column_stack([event_times + float(start_offset_s), event_times + float(end_offset_s)])
+    valid_windows = np.isfinite(windows).all(axis=1) & (windows[:, 1] > windows[:, 0])
+    return np.asarray(windows[valid_windows], dtype=float)
+
+
+def _interval_overlap_exceeds(interval_a, interval_b, min_overlap_s):
+    start = max(float(interval_a[0]), float(interval_b[0]))
+    end = min(float(interval_a[1]), float(interval_b[1]))
+    return (end - start) > float(min_overlap_s)
+
+
+def _packet_overlap_mask(packet_windows, intervals, min_overlap_s):
+    packet_windows = _coerce_interval_array(packet_windows)
+    intervals = _coerce_interval_array(intervals)
+    mask = np.zeros(packet_windows.shape[0], dtype=bool)
+    if packet_windows.size == 0 or intervals.size == 0:
+        return mask
+    for pkt_idx, pkt_window in enumerate(packet_windows):
+        for interval in intervals:
+            if _interval_overlap_exceeds(pkt_window, interval, min_overlap_s):
+                mask[pkt_idx] = True
+                break
+    return mask
+
+
+def _packet_period_annotations(packet_dataset, min_overlap_s=0.05):
+    packet_windows = np.asarray(packet_dataset.get("packet_windows", np.empty((0, 2))), dtype=float)
+    packet_context = np.asarray(packet_dataset.get("packet_context", []), dtype=object)
+    n_packets = packet_windows.shape[0]
+
+    def _trial_times_local(key):
+        if hasattr(trials, "keys") and key in trials.keys():
+            return np.asarray(trials[key], dtype=float)
+        return np.array([], dtype=float)
+
+    whisk_bouts = _coerce_interval_array(wh_detect.get("all_bouts", np.empty((0, 2), dtype=float)))
+    stim_windows = _event_windows_from_times(_trial_times_local("stimOn_times"), 0.0, 0.2)
+    first_move_windows = _event_windows_from_times(_trial_times_local("firstMovement_times"), -0.1, 0.2)
+    feedback_windows = _event_windows_from_times(_trial_times_local("feedback_times"), 0.0, 0.4)
+
+    whisk_mask = _packet_overlap_mask(packet_windows, whisk_bouts, min_overlap_s)
+    stim_mask = _packet_overlap_mask(packet_windows, stim_windows, min_overlap_s)
+    first_move_mask = _packet_overlap_mask(packet_windows, first_move_windows, min_overlap_s)
+    feedback_mask = _packet_overlap_mask(packet_windows, feedback_windows, min_overlap_s)
+
+    whisk_only_mask = whisk_mask & ~(stim_mask | first_move_mask | feedback_mask)
+    non_whisking_mask = ~whisk_mask
+
+    context_split = packet_context.astype(object).copy()
+    spont_mask = packet_context == "spont"
+    context_split[spont_mask & whisk_mask] = "spont_whisking"
+    context_split[spont_mask & ~whisk_mask] = "spont_non_whisking"
+
+    event_period_order = ["whisking", "stim_on", "first_move", "feedback"]
+    event_period_masks = {
+        "whisking": whisk_mask,
+        "stim_on": stim_mask,
+        "first_move": first_move_mask,
+        "feedback": feedback_mask,
+    }
+
+    exclusive_labels = np.full(n_packets, "non_whisking", dtype=object)
+    exclusive_labels[whisk_only_mask] = "whisking"
+    exclusive_labels[first_move_mask] = "first_move"
+    exclusive_labels[feedback_mask] = "feedback"
+    exclusive_labels[stim_mask] = "stim_on"
+
+    return {
+        "whisking_mask": whisk_mask,
+        "whisk_only_mask": whisk_only_mask,
+        "non_whisking_mask": non_whisking_mask,
+        "stim_on_mask": stim_mask,
+        "first_move_mask": first_move_mask,
+        "feedback_mask": feedback_mask,
+        "context_split": context_split,
+        "event_period_order": event_period_order,
+        "event_period_masks": event_period_masks,
+        "exclusive_labels": exclusive_labels,
+    }
+
+
 def _plot_feature_cluster_embedding(packet_summary_df, pca_result, cluster_labels, title_prefix):
     scores = np.asarray(pca_result["scores"], dtype=float)
     explained_ratio = np.asarray(pca_result["explained_ratio"], dtype=float)
@@ -4062,6 +4194,235 @@ def _plot_feature_cluster_embedding(packet_summary_df, pca_result, cluster_label
     evr2 = 100.0 * explained_ratio[1] if explained_ratio.size >= 2 else 0.0
     fig.update_xaxes(title_text=f"PC1 ({evr1:.1f}% var)")
     fig.update_yaxes(title_text=f"PC2 ({evr2:.1f}% var)")
+    show_fig(fig, renderer=PLOTLY_RENDERER)
+
+
+def _plot_feature_embedding_by_context(packet_summary_df, pca_result, title_prefix):
+    scores = np.asarray(pca_result["scores"], dtype=float)
+    explained_ratio = np.asarray(pca_result["explained_ratio"], dtype=float)
+    context_style = {
+        "task": ("Task", "#1f77b4"),
+        "spont": ("Spont", "#ff7f0e"),
+        "iti": ("ITI", "#2ca02c"),
+        "other": ("Other", "#7f7f7f"),
+        "overlap": ("Overlap", "#9467bd"),
+    }
+    fig = go.Figure()
+    context_vals = np.asarray(packet_summary_df["packet_context"], dtype=object)
+    for context_key in ("task", "spont", "iti", "other", "overlap"):
+        mask = context_vals == context_key
+        if not np.any(mask):
+            continue
+        label, color = context_style[context_key]
+        fig.add_trace(
+            go.Scatter(
+                x=scores[mask, 0] if scores.shape[1] >= 1 else np.zeros(int(np.sum(mask))),
+                y=scores[mask, 1] if scores.shape[1] >= 2 else np.zeros(int(np.sum(mask))),
+                mode="markers",
+                marker=dict(color=color, size=9, opacity=0.86),
+                name=f"{label} (n={int(np.sum(mask))})",
+                customdata=packet_summary_df.loc[mask, ["packet_idx", "packet_peak_time_s", "packet_context"]].to_numpy(),
+                hovertemplate=(
+                    "Packet %{customdata[0]}<br>"
+                    "Peak time: %{customdata[1]:.3f}s<br>"
+                    "Context: %{customdata[2]}<br>"
+                    "PC1: %{x:.2f}<br>PC2: %{y:.2f}<extra></extra>"
+                ),
+            )
+        )
+    evr1 = 100.0 * explained_ratio[0] if explained_ratio.size >= 1 else 0.0
+    evr2 = 100.0 * explained_ratio[1] if explained_ratio.size >= 2 else 0.0
+    fig.update_layout(
+        title=f"{title_prefix} | Feature-space packet embedding by context",
+        template=template,
+        font=dict(color=base_color),
+        height=560,
+        margin=dict(l=70, r=40, t=90, b=60),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+    )
+    fig.update_xaxes(title_text=f"PC1 ({evr1:.1f}% var)")
+    fig.update_yaxes(title_text=f"PC2 ({evr2:.1f}% var)")
+    show_fig(fig, renderer=PLOTLY_RENDERER)
+
+
+def _plot_feature_embedding_by_period(packet_summary_df, pca_result, title_prefix):
+    scores = np.asarray(pca_result["scores"], dtype=float)
+    explained_ratio = np.asarray(pca_result["explained_ratio"], dtype=float)
+    period_style = {
+        "stim_on": ("Stim On", "#1f77b4"),
+        "feedback": ("Feedback", "#d62728"),
+        "first_move": ("First Move", "#2ca02c"),
+        "whisking": ("Whisking", "#ff7f0e"),
+        "non_whisking": ("Non-whisking", "#7f7f7f"),
+    }
+    labels = np.asarray(packet_summary_df["period_exclusive_label"], dtype=object)
+    fig = go.Figure()
+    for period_key in ("stim_on", "feedback", "first_move", "whisking", "non_whisking"):
+        mask = labels == period_key
+        if not np.any(mask):
+            continue
+        label, color = period_style[period_key]
+        fig.add_trace(
+            go.Scatter(
+                x=scores[mask, 0] if scores.shape[1] >= 1 else np.zeros(int(np.sum(mask))),
+                y=scores[mask, 1] if scores.shape[1] >= 2 else np.zeros(int(np.sum(mask))),
+                mode="markers",
+                marker=dict(color=color, size=9, opacity=0.86),
+                name=f"{label} (n={int(np.sum(mask))})",
+                customdata=packet_summary_df.loc[
+                    mask,
+                    ["packet_idx", "packet_peak_time_s", "packet_context", "period_exclusive_label"],
+                ].to_numpy(),
+                hovertemplate=(
+                    "Packet %{customdata[0]}<br>"
+                    "Peak time: %{customdata[1]:.3f}s<br>"
+                    "Context: %{customdata[2]}<br>"
+                    "Period: %{customdata[3]}<br>"
+                    "PC1: %{x:.2f}<br>PC2: %{y:.2f}<extra></extra>"
+                ),
+            )
+        )
+    evr1 = 100.0 * explained_ratio[0] if explained_ratio.size >= 1 else 0.0
+    evr2 = 100.0 * explained_ratio[1] if explained_ratio.size >= 2 else 0.0
+    fig.update_layout(
+        title=f"{title_prefix} | Feature-space packet embedding by event period",
+        template=template,
+        font=dict(color=base_color),
+        height=560,
+        margin=dict(l=70, r=40, t=90, b=60),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+    )
+    fig.update_xaxes(title_text=f"PC1 ({evr1:.1f}% var)")
+    fig.update_yaxes(title_text=f"PC2 ({evr2:.1f}% var)")
+    show_fig(fig, renderer=PLOTLY_RENDERER)
+
+
+def _plot_umap_cluster_embedding(packet_summary_df, umap_result, cluster_labels, title_prefix):
+    scores = np.asarray(umap_result["scores"], dtype=float)
+    palette = _cluster_palette()
+    fig = go.Figure()
+    for cluster_idx in np.unique(cluster_labels):
+        mask = np.asarray(cluster_labels) == cluster_idx
+        fig.add_trace(
+            go.Scatter(
+                x=scores[mask, 0] if scores.shape[1] >= 1 else np.zeros(int(np.sum(mask))),
+                y=scores[mask, 1] if scores.shape[1] >= 2 else np.zeros(int(np.sum(mask))),
+                mode="markers",
+                marker=dict(color=palette[int(cluster_idx) % len(palette)], size=9, opacity=0.9),
+                name=f"Cluster {int(cluster_idx) + 1} (n={int(np.sum(mask))})",
+                customdata=packet_summary_df.loc[mask, ["packet_idx", "packet_peak_time_s", "packet_context"]].to_numpy(),
+                hovertemplate=(
+                    "Packet %{customdata[0]}<br>"
+                    "Peak time: %{customdata[1]:.3f}s<br>"
+                    "Context: %{customdata[2]}<br>"
+                    "UMAP1: %{x:.2f}<br>UMAP2: %{y:.2f}<extra></extra>"
+                ),
+            )
+        )
+    fig.update_layout(
+        title=f"{title_prefix} | Feature-space UMAP",
+        template=template,
+        font=dict(color=base_color),
+        height=560,
+        margin=dict(l=70, r=40, t=90, b=60),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+    )
+    fig.update_xaxes(title_text="UMAP1")
+    fig.update_yaxes(title_text="UMAP2")
+    show_fig(fig, renderer=PLOTLY_RENDERER)
+
+
+def _plot_umap_by_context(packet_summary_df, umap_result, title_prefix):
+    scores = np.asarray(umap_result["scores"], dtype=float)
+    context_style = {
+        "task": ("Task", "#1f77b4"),
+        "spont": ("Spont", "#ff7f0e"),
+        "iti": ("ITI", "#2ca02c"),
+        "other": ("Other", "#7f7f7f"),
+        "overlap": ("Overlap", "#9467bd"),
+    }
+    fig = go.Figure()
+    context_vals = np.asarray(packet_summary_df["packet_context"], dtype=object)
+    for context_key in ("task", "spont", "iti", "other", "overlap"):
+        mask = context_vals == context_key
+        if not np.any(mask):
+            continue
+        label, color = context_style[context_key]
+        fig.add_trace(
+            go.Scatter(
+                x=scores[mask, 0] if scores.shape[1] >= 1 else np.zeros(int(np.sum(mask))),
+                y=scores[mask, 1] if scores.shape[1] >= 2 else np.zeros(int(np.sum(mask))),
+                mode="markers",
+                marker=dict(color=color, size=9, opacity=0.86),
+                name=f"{label} (n={int(np.sum(mask))})",
+                customdata=packet_summary_df.loc[mask, ["packet_idx", "packet_peak_time_s", "packet_context"]].to_numpy(),
+                hovertemplate=(
+                    "Packet %{customdata[0]}<br>"
+                    "Peak time: %{customdata[1]:.3f}s<br>"
+                    "Context: %{customdata[2]}<br>"
+                    "UMAP1: %{x:.2f}<br>UMAP2: %{y:.2f}<extra></extra>"
+                ),
+            )
+        )
+    fig.update_layout(
+        title=f"{title_prefix} | Feature-space UMAP by context",
+        template=template,
+        font=dict(color=base_color),
+        height=560,
+        margin=dict(l=70, r=40, t=90, b=60),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+    )
+    fig.update_xaxes(title_text="UMAP1")
+    fig.update_yaxes(title_text="UMAP2")
+    show_fig(fig, renderer=PLOTLY_RENDERER)
+
+
+def _plot_umap_by_period(packet_summary_df, umap_result, title_prefix):
+    scores = np.asarray(umap_result["scores"], dtype=float)
+    period_style = {
+        "stim_on": ("Stim On", "#1f77b4"),
+        "feedback": ("Feedback", "#d62728"),
+        "first_move": ("First Move", "#2ca02c"),
+        "whisking": ("Whisking", "#ff7f0e"),
+        "non_whisking": ("Non-whisking", "#7f7f7f"),
+    }
+    labels = np.asarray(packet_summary_df["period_exclusive_label"], dtype=object)
+    fig = go.Figure()
+    for period_key in ("stim_on", "feedback", "first_move", "whisking", "non_whisking"):
+        mask = labels == period_key
+        if not np.any(mask):
+            continue
+        label, color = period_style[period_key]
+        fig.add_trace(
+            go.Scatter(
+                x=scores[mask, 0] if scores.shape[1] >= 1 else np.zeros(int(np.sum(mask))),
+                y=scores[mask, 1] if scores.shape[1] >= 2 else np.zeros(int(np.sum(mask))),
+                mode="markers",
+                marker=dict(color=color, size=9, opacity=0.86),
+                name=f"{label} (n={int(np.sum(mask))})",
+                customdata=packet_summary_df.loc[
+                    mask,
+                    ["packet_idx", "packet_peak_time_s", "packet_context", "period_exclusive_label"],
+                ].to_numpy(),
+                hovertemplate=(
+                    "Packet %{customdata[0]}<br>"
+                    "Peak time: %{customdata[1]:.3f}s<br>"
+                    "Context: %{customdata[2]}<br>"
+                    "Period: %{customdata[3]}<br>"
+                    "UMAP1: %{x:.2f}<br>UMAP2: %{y:.2f}<extra></extra>"
+                ),
+            )
+        )
+    fig.update_layout(
+        title=f"{title_prefix} | Feature-space UMAP by event period",
+        template=template,
+        font=dict(color=base_color),
+        height=560,
+        margin=dict(l=70, r=40, t=90, b=60),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+    )
+    fig.update_xaxes(title_text="UMAP1")
+    fig.update_yaxes(title_text="UMAP2")
     show_fig(fig, renderer=PLOTLY_RENDERER)
 
 
@@ -4152,42 +4513,58 @@ def _plot_cluster_usage(packet_summary_df, title_prefix):
     fig = make_subplots(
         rows=1,
         cols=2,
-        subplot_titles=("Cluster use across session time", "Cluster counts by context"),
+        subplot_titles=("Cluster counts by event period", "Cluster counts by context"),
         horizontal_spacing=0.16,
     )
+    period_order = ["whisking", "stim_on", "first_move", "feedback"]
+    period_labels = {
+        "whisking": "Whisking",
+        "stim_on": "Stim On",
+        "first_move": "First Move",
+        "feedback": "Feedback",
+    }
+    period_count_table = pd.DataFrame(index=period_order)
     for cluster_idx in sorted(packet_summary_df["cluster_label"].dropna().astype(int).unique()):
-        sub = packet_summary_df.loc[packet_summary_df["cluster_label"] == cluster_idx].copy()
+        period_count_table[cluster_idx] = [
+            int(np.sum(packet_summary_df[f"period_{period_key}"].to_numpy(dtype=bool) & (packet_summary_df["cluster_label"] == cluster_idx).to_numpy(dtype=bool)))
+            for period_key in period_order
+        ]
         fig.add_trace(
-            go.Scatter(
-                x=sub["packet_peak_time_s"],
-                y=np.full(len(sub), int(cluster_idx) + 1, dtype=float),
-                mode="markers",
-                marker=dict(color=palette[int(cluster_idx) % len(palette)], size=9, opacity=0.85),
+            go.Bar(
+                x=[period_labels[key] for key in period_order],
+                y=period_count_table[cluster_idx].to_numpy(dtype=float),
+                marker=dict(color=palette[int(cluster_idx) % len(palette)]),
                 name=f"Cluster {int(cluster_idx) + 1}",
                 legendgroup=f"cluster-{int(cluster_idx)}",
                 showlegend=True,
-                customdata=sub[["packet_idx", "packet_context", "packet_size"]].to_numpy(),
-                hovertemplate=(
-                    "Packet %{customdata[0]}<br>"
-                    "Context: %{customdata[1]}<br>"
-                    "Packet size: %{customdata[2]:.1f}<br>"
-                    "Peak time: %{x:.3f}s<extra></extra>"
-                ),
             ),
             row=1,
             col=1,
         )
 
+    context_order = [
+        key
+        for key in ["task", "iti", "other", "overlap", "spont_whisking", "spont_non_whisking"]
+        if key in set(packet_summary_df["context_split"].astype(str))
+    ]
+    context_labels = {
+        "task": "Task",
+        "iti": "ITI",
+        "other": "Other",
+        "overlap": "Overlap",
+        "spont_whisking": "Spont Whisking",
+        "spont_non_whisking": "Spont Non-whisking",
+    }
     count_table = (
-        packet_summary_df.groupby(["packet_context", "cluster_label"])
+        packet_summary_df.groupby(["context_split", "cluster_label"])
         .size()
         .unstack(fill_value=0)
-        .sort_index()
+        .reindex(context_order, fill_value=0)
     )
     for cluster_idx in count_table.columns:
         fig.add_trace(
             go.Bar(
-                x=count_table.index.astype(str),
+                x=[context_labels.get(key, key) for key in count_table.index.astype(str)],
                 y=count_table[cluster_idx].to_numpy(dtype=float),
                 marker=dict(color=palette[int(cluster_idx) % len(palette)]),
                 name=f"Cluster {int(cluster_idx) + 1}",
@@ -4198,8 +4575,8 @@ def _plot_cluster_usage(packet_summary_df, title_prefix):
             col=2,
         )
 
-    fig.update_xaxes(title_text="Time in session (s)", row=1, col=1)
-    fig.update_yaxes(title_text="Cluster", tickmode="linear", dtick=1, row=1, col=1)
+    fig.update_xaxes(title_text="Event period", row=1, col=1)
+    fig.update_yaxes(title_text="Packet count", row=1, col=1)
     fig.update_xaxes(title_text="Packet context", row=1, col=2)
     fig.update_yaxes(title_text="Packet count", row=1, col=2)
     fig.update_layout(
@@ -4301,6 +4678,16 @@ else:
         cluster_pca = _compute_matrix_pca(cluster_matrix, n_components=PRESENT_PCA_COMPONENTS)
         packet_summary_plot = packet_summary_df.copy()
         packet_summary_plot["cluster_label"] = cluster_labels
+        packet_period_info = _packet_period_annotations(
+            packet_feature_results["packet_dataset"],
+            min_overlap_s=PRESENT_PACKET_PERIOD_MIN_OVERLAP_S,
+        )
+        packet_summary_plot["context_split"] = packet_period_info["context_split"]
+        packet_summary_plot["period_exclusive_label"] = packet_period_info["exclusive_labels"]
+        packet_summary_plot["period_whisking"] = packet_period_info["whisking_mask"]
+        packet_summary_plot["period_stim_on"] = packet_period_info["stim_on_mask"]
+        packet_summary_plot["period_first_move"] = packet_period_info["first_move_mask"]
+        packet_summary_plot["period_feedback"] = packet_period_info["feedback_mask"]
 
         packet_tensor_raw = np.asarray(packet_feature_results["packet_dataset"]["packet_tensor"], dtype=float)
         packet_size = np.asarray(cluster_input["packet_size"], dtype=float)
@@ -4314,6 +4701,7 @@ else:
             "cluster_pca": cluster_pca,
             "packet_summary_df": packet_summary_plot,
             "packet_tensor_normalized": packet_tensor_normalized,
+            "packet_period_info": packet_period_info,
         }
         print(
             f"Packet feature clustering | shape_mode={PRESENT_SHAPE_MODE} | "
@@ -4336,9 +4724,14 @@ else:
         packet_cluster_results["cluster_labels"],
         plot_title_prefix,
     )
-    _plot_packet_feature_pair_scatters(
+    _plot_feature_embedding_by_context(
         packet_cluster_results["packet_summary_df"],
-        packet_cluster_results["cluster_labels"],
+        packet_cluster_results["cluster_pca"],
+        plot_title_prefix,
+    )
+    _plot_feature_embedding_by_period(
+        packet_cluster_results["packet_summary_df"],
+        packet_cluster_results["cluster_pca"],
         plot_title_prefix,
     )
     _plot_cluster_usage(
@@ -4357,5 +4750,441 @@ else:
         packet_cluster_results["cluster_labels"],
         f"{plot_title_prefix} | Size-normalized packet heatmaps",
     )
+
+
+# %% Packet UMAP Figures
+packet_umap_result = None
+if packet_cluster_results is None:
+    print("Packet UMAP figures: feature clustering results are not available.")
+else:
+    plot_title_prefix = (
+        f"Region {packet_feature_results['region']} | "
+        f"context={packet_feature_results['context_mode']} | "
+        f"shape={PRESENT_SHAPE_MODE}"
+    )
+    cluster_matrix = np.asarray(packet_cluster_results["cluster_input"]["cluster_matrix"], dtype=float)
+    packet_umap = _compute_matrix_umap(
+        cluster_matrix,
+        n_components=2,
+        pre_pca_components=PRESENT_UMAP_PRE_PCA_COMPONENTS,
+        n_neighbors=PRESENT_UMAP_NEIGHBORS,
+        min_dist=PRESENT_UMAP_MIN_DIST,
+        random_state=PRESENT_UMAP_RANDOM_STATE,
+    )
+    if packet_umap is None:
+        print("Packet UMAP figures: `umap-learn` is not available or the packet matrix is too small.")
+    else:
+        packet_umap_result = packet_umap
+        _plot_umap_cluster_embedding(
+            packet_cluster_results["packet_summary_df"],
+            packet_umap,
+            packet_cluster_results["cluster_labels"],
+            plot_title_prefix,
+        )
+        _plot_umap_by_context(
+            packet_cluster_results["packet_summary_df"],
+            packet_umap,
+            plot_title_prefix,
+        )
+        _plot_umap_by_period(
+            packet_cluster_results["packet_summary_df"],
+            packet_umap,
+            plot_title_prefix,
+        )
+
+
+# %% Packet Cluster PSTH
+if packet_cluster_results is None or packet_feature_results is None:
+    print("Packet cluster PSTH: clustering results are not available.")
+else:
+    packet_times_cluster = np.asarray(
+        packet_feature_results["packet_dataset"]["packet_times"],
+        dtype=float,
+    )
+    cluster_labels = np.asarray(packet_cluster_results["cluster_labels"], dtype=int)
+    if packet_times_cluster.size == 0 or cluster_labels.size == 0:
+        print("Packet cluster PSTH: no clustered packet events are available.")
+    elif packet_times_cluster.size != cluster_labels.size:
+        print("Packet cluster PSTH: packet times and cluster labels have inconsistent lengths.")
+    else:
+        packet_spikes_cluster = SimpleNamespace(
+            times=packet_times_cluster,
+            clusters=cluster_labels,
+        )
+        bin_size = config_plot.get("SINGLE_NEURON_BIN_SIZE", 0.05)
+        smooth_sigma = config_plot.get("SINGLE_NEURON_SMOOTH_SIGMA", 1)
+        default_pre = float(config_plot.get("SINGLE_NEURON_RASTER_PRE", 0.5))
+        default_post = float(config_plot.get("SINGLE_NEURON_RASTER_POST", 1.0))
+        event_specs = [
+            ("stimOn_times", event_label("stimOn_times"), default_pre, default_post, f"Time from {event_label('stimOn_times')} (s)"),
+            (
+                "firstMovement_times",
+                event_label("firstMovement_times"),
+                default_pre,
+                default_post,
+                f"Time from {event_label('firstMovement_times')} (s)",
+            ),
+            (
+                "feedback_times",
+                event_label("feedback_times"),
+                0.5,
+                5.0,
+                f"Time from {event_label('feedback_times')} (s)",
+            ),
+        ]
+        valid_specs = []
+        for event_name, display_label, pre_s, post_s, xaxis_title in event_specs:
+            if hasattr(trials, "keys") and event_name in trials.keys():
+                events = np.asarray(trials[event_name], dtype=float).reshape(-1)
+                events = events[np.isfinite(events)]
+                if events.size > 0:
+                    valid_specs.append(
+                        (event_name, display_label, events, float(pre_s), float(post_s), xaxis_title)
+                    )
+
+        whisk_context_mode = str(PACKET_WHISK_EVENT_CONTEXT).strip().lower()
+        whisk_context_suffix_map = {
+            "all": "",
+            "task": "_task",
+            "iti": "_iti",
+            "spont": "_spont",
+        }
+        whisk_suffix = whisk_context_suffix_map.get(whisk_context_mode, "")
+        whisk_brief = np.asarray(
+            wh_events_by_period.get(f"wh_brief_times{whisk_suffix}", np.array([])),
+            dtype=float,
+        )
+        whisk_long = np.asarray(
+            wh_events_by_period.get(f"wh_long_times{whisk_suffix}", np.array([])),
+            dtype=float,
+        )
+        whisk_events = np.concatenate([whisk_brief[np.isfinite(whisk_brief)], whisk_long[np.isfinite(whisk_long)]])
+        if whisk_events.size > 0:
+            whisk_events = np.unique(np.sort(whisk_events))
+            valid_specs.append(
+                (
+                    "whisk_combined",
+                    f"Whisk Onset ({whisk_context_mode})",
+                    whisk_events,
+                    default_pre,
+                    default_post,
+                    "Time from whisk onset (s)",
+                )
+            )
+
+        if not valid_specs:
+            print("Packet cluster PSTH: no valid task/whisk event series are available.")
+        else:
+            palette = _cluster_palette()
+            unique_clusters = np.unique(cluster_labels)
+            n_panels = len(valid_specs)
+            n_rows = 2
+            n_cols = 2
+            fig_cluster_psth = make_subplots(
+                rows=n_rows,
+                cols=n_cols,
+                shared_yaxes=True,
+                horizontal_spacing=0.08,
+                vertical_spacing=0.14,
+                subplot_titles=tuple(
+                    f"{display_label} (n={len(events)})"
+                    for _event_name, display_label, events, _pre_s, _post_s, _xaxis_title in valid_specs
+                ),
+            )
+
+            for panel_idx, (_event_name, display_label, events, pre_s, post_s, xaxis_title) in enumerate(
+                valid_specs,
+                start=0,
+            ):
+                row_idx = (panel_idx // n_cols) + 1
+                col_idx = (panel_idx % n_cols) + 1
+                psth_by_cluster, bin_centers = compute_psth_for_clusters(
+                    packet_spikes_cluster,
+                    [int(cluster_idx) for cluster_idx in unique_clusters],
+                    events,
+                    -float(pre_s),
+                    float(post_s),
+                    bin_size,
+                    smooth_sigma,
+                    show_progress=False,
+                )
+                for cluster_idx in unique_clusters:
+                    psth_entry = psth_by_cluster.get(int(cluster_idx))
+                    if psth_entry and bin_centers is not None:
+                        firing_rate = psth_entry["fr_smooth"]
+                    else:
+                        firing_rate = np.zeros(len(bin_centers) if bin_centers is not None else 0)
+                    fig_cluster_psth.add_trace(
+                        go.Scatter(
+                            x=bin_centers,
+                            y=firing_rate,
+                            mode="lines",
+                            line=dict(
+                                color=palette[int(cluster_idx) % len(palette)],
+                                width=2,
+                            ),
+                            name=f"Cluster {int(cluster_idx) + 1} (n={int(np.sum(cluster_labels == cluster_idx))})",
+                            legendgroup=f"cluster-{int(cluster_idx)}",
+                            showlegend=(panel_idx == 0),
+                        ),
+                        row=row_idx,
+                        col=col_idx,
+                    )
+                fig_cluster_psth.add_vline(
+                    x=0,
+                    line=dict(color="black", dash="dash"),
+                    row=row_idx,
+                    col=col_idx,
+                )
+                fig_cluster_psth.update_xaxes(
+                    title_text=xaxis_title,
+                    range=[-float(pre_s), float(post_s)],
+                    row=row_idx,
+                    col=col_idx,
+                )
+                if col_idx == 1:
+                    fig_cluster_psth.update_yaxes(title_text="Packet rate (Hz)", row=row_idx, col=col_idx)
+
+            fig_cluster_psth.update_layout(
+                title=(
+                    f"Packet Cluster PSTHs | Region {packet_feature_results['region']} | "
+                    f"context={packet_feature_results['context_mode']}"
+                ),
+                height=760,
+                margin=dict(l=70, r=40, t=90, b=130),
+                legend=dict(
+                    orientation="h",
+                    yanchor="top",
+                    y=-0.22,
+                    xanchor="center",
+                    x=0.5,
+                ),
+            )
+            fig_cluster_psth.update_layout(template=template, font=dict(color=base_color))
+            show_fig(fig_cluster_psth, renderer=PLOTLY_RENDERER)
+
+
+# %% Packet UMAP Clustering
+packet_umap_cluster_results = None
+if packet_cluster_results is None or packet_feature_results is None:
+    print("Packet UMAP clustering: feature clustering results are not available.")
+else:
+    plot_title_prefix = (
+        f"Region {packet_feature_results['region']} | "
+        f"context={packet_feature_results['context_mode']} | "
+        f"shape={PRESENT_SHAPE_MODE}"
+    )
+    if packet_umap_result is None:
+        cluster_matrix = np.asarray(packet_cluster_results["cluster_input"]["cluster_matrix"], dtype=float)
+        packet_umap_result = _compute_matrix_umap(
+            cluster_matrix,
+            n_components=2,
+            pre_pca_components=PRESENT_UMAP_PRE_PCA_COMPONENTS,
+            n_neighbors=PRESENT_UMAP_NEIGHBORS,
+            min_dist=PRESENT_UMAP_MIN_DIST,
+            random_state=PRESENT_UMAP_RANDOM_STATE,
+        )
+    if packet_umap_result is None:
+        print("Packet UMAP clustering: `umap-learn` is not available or the packet matrix is too small.")
+    else:
+        umap_scores = np.asarray(packet_umap_result["scores"], dtype=float)
+        if umap_scores.ndim != 2 or umap_scores.shape[0] < 2 or umap_scores.shape[1] < 2:
+            print("Packet UMAP clustering: UMAP embedding is too small for clustering.")
+        else:
+            umap_cluster_labels, umap_cluster_centroids = _kmeans_numpy(
+                umap_scores,
+                n_clusters=PRESENT_N_CLUSTERS,
+                n_init=PACKET_KMEANS_N_INIT,
+                max_iter=PACKET_KMEANS_MAX_ITER,
+                random_state=0,
+            )
+            packet_summary_umap = packet_cluster_results["packet_summary_df"].copy()
+            packet_summary_umap["umap_cluster_label"] = umap_cluster_labels
+            _plot_umap_cluster_embedding(
+                packet_summary_umap,
+                packet_umap_result,
+                umap_cluster_labels,
+                f"{plot_title_prefix} | UMAP k-means",
+            )
+            packet_umap_cluster_results = {
+                "umap_result": packet_umap_result,
+                "cluster_labels": umap_cluster_labels,
+                "cluster_centroids": umap_cluster_centroids,
+                "packet_summary_df": packet_summary_umap,
+            }
+            print(
+                f"Packet UMAP clustering | shape_mode={PRESENT_SHAPE_MODE} | "
+                f"clusters={PRESENT_N_CLUSTERS} | matrix={umap_scores.shape[0]}x{umap_scores.shape[1]}"
+            )
+
+
+# %% Packet UMAP Cluster PSTH
+if packet_umap_cluster_results is None or packet_feature_results is None:
+    print("Packet UMAP cluster PSTH: UMAP clustering results are not available.")
+else:
+    packet_times_cluster = np.asarray(
+        packet_feature_results["packet_dataset"]["packet_times"],
+        dtype=float,
+    )
+    cluster_labels = np.asarray(packet_umap_cluster_results["cluster_labels"], dtype=int)
+    if packet_times_cluster.size == 0 or cluster_labels.size == 0:
+        print("Packet UMAP cluster PSTH: no clustered packet events are available.")
+    elif packet_times_cluster.size != cluster_labels.size:
+        print("Packet UMAP cluster PSTH: packet times and cluster labels have inconsistent lengths.")
+    else:
+        packet_spikes_cluster = SimpleNamespace(
+            times=packet_times_cluster,
+            clusters=cluster_labels,
+        )
+        bin_size = config_plot.get("SINGLE_NEURON_BIN_SIZE", 0.05)
+        smooth_sigma = config_plot.get("SINGLE_NEURON_SMOOTH_SIGMA", 1)
+        default_pre = float(config_plot.get("SINGLE_NEURON_RASTER_PRE", 0.5))
+        default_post = float(config_plot.get("SINGLE_NEURON_RASTER_POST", 1.0))
+        event_specs = [
+            ("stimOn_times", event_label("stimOn_times"), default_pre, default_post, f"Time from {event_label('stimOn_times')} (s)"),
+            (
+                "firstMovement_times",
+                event_label("firstMovement_times"),
+                default_pre,
+                default_post,
+                f"Time from {event_label('firstMovement_times')} (s)",
+            ),
+            (
+                "feedback_times",
+                event_label("feedback_times"),
+                0.5,
+                5.0,
+                f"Time from {event_label('feedback_times')} (s)",
+            ),
+        ]
+        valid_specs = []
+        for event_name, display_label, pre_s, post_s, xaxis_title in event_specs:
+            if hasattr(trials, "keys") and event_name in trials.keys():
+                events = np.asarray(trials[event_name], dtype=float).reshape(-1)
+                events = events[np.isfinite(events)]
+                if events.size > 0:
+                    valid_specs.append(
+                        (event_name, display_label, events, float(pre_s), float(post_s), xaxis_title)
+                    )
+
+        whisk_context_mode = str(PACKET_WHISK_EVENT_CONTEXT).strip().lower()
+        whisk_context_suffix_map = {
+            "all": "",
+            "task": "_task",
+            "iti": "_iti",
+            "spont": "_spont",
+        }
+        whisk_suffix = whisk_context_suffix_map.get(whisk_context_mode, "")
+        whisk_brief = np.asarray(
+            wh_events_by_period.get(f"wh_brief_times{whisk_suffix}", np.array([])),
+            dtype=float,
+        )
+        whisk_long = np.asarray(
+            wh_events_by_period.get(f"wh_long_times{whisk_suffix}", np.array([])),
+            dtype=float,
+        )
+        whisk_events = np.concatenate([whisk_brief[np.isfinite(whisk_brief)], whisk_long[np.isfinite(whisk_long)]])
+        if whisk_events.size > 0:
+            whisk_events = np.unique(np.sort(whisk_events))
+            valid_specs.append(
+                (
+                    "whisk_combined",
+                    f"Whisk Onset ({whisk_context_mode})",
+                    whisk_events,
+                    default_pre,
+                    default_post,
+                    "Time from whisk onset (s)",
+                )
+            )
+
+        if not valid_specs:
+            print("Packet UMAP cluster PSTH: no valid task/whisk event series are available.")
+        else:
+            palette = _cluster_palette()
+            unique_clusters = np.unique(cluster_labels)
+            n_rows = 2
+            n_cols = 2
+            fig_cluster_psth = make_subplots(
+                rows=n_rows,
+                cols=n_cols,
+                shared_yaxes=True,
+                horizontal_spacing=0.08,
+                vertical_spacing=0.14,
+                subplot_titles=tuple(
+                    f"{display_label} (n={len(events)})"
+                    for _event_name, display_label, events, _pre_s, _post_s, _xaxis_title in valid_specs
+                ),
+            )
+
+            for panel_idx, (_event_name, display_label, events, pre_s, post_s, xaxis_title) in enumerate(
+                valid_specs,
+                start=0,
+            ):
+                row_idx = (panel_idx // n_cols) + 1
+                col_idx = (panel_idx % n_cols) + 1
+                psth_by_cluster, bin_centers = compute_psth_for_clusters(
+                    packet_spikes_cluster,
+                    [int(cluster_idx) for cluster_idx in unique_clusters],
+                    events,
+                    -float(pre_s),
+                    float(post_s),
+                    bin_size,
+                    smooth_sigma,
+                    show_progress=False,
+                )
+                for cluster_idx in unique_clusters:
+                    psth_entry = psth_by_cluster.get(int(cluster_idx))
+                    if psth_entry and bin_centers is not None:
+                        firing_rate = psth_entry["fr_smooth"]
+                    else:
+                        firing_rate = np.zeros(len(bin_centers) if bin_centers is not None else 0)
+                    fig_cluster_psth.add_trace(
+                        go.Scatter(
+                            x=bin_centers,
+                            y=firing_rate,
+                            mode="lines",
+                            line=dict(
+                                color=palette[int(cluster_idx) % len(palette)],
+                                width=2,
+                            ),
+                            name=f"UMAP Cluster {int(cluster_idx) + 1} (n={int(np.sum(cluster_labels == cluster_idx))})",
+                            legendgroup=f"umap-cluster-{int(cluster_idx)}",
+                            showlegend=(panel_idx == 0),
+                        ),
+                        row=row_idx,
+                        col=col_idx,
+                    )
+                fig_cluster_psth.add_vline(
+                    x=0,
+                    line=dict(color="black", dash="dash"),
+                    row=row_idx,
+                    col=col_idx,
+                )
+                fig_cluster_psth.update_xaxes(
+                    title_text=xaxis_title,
+                    range=[-float(pre_s), float(post_s)],
+                    row=row_idx,
+                    col=col_idx,
+                )
+                if col_idx == 1:
+                    fig_cluster_psth.update_yaxes(title_text="Packet rate (Hz)", row=row_idx, col=col_idx)
+
+            fig_cluster_psth.update_layout(
+                title=(
+                    f"Packet UMAP Cluster PSTHs | Region {packet_feature_results['region']} | "
+                    f"context={packet_feature_results['context_mode']}"
+                ),
+                height=760,
+                margin=dict(l=70, r=40, t=90, b=130),
+                legend=dict(
+                    orientation="h",
+                    yanchor="top",
+                    y=-0.22,
+                    xanchor="center",
+                    x=0.5,
+                ),
+            )
+            fig_cluster_psth.update_layout(template=template, font=dict(color=base_color))
+            show_fig(fig_cluster_psth, renderer=PLOTLY_RENDERER)
 
 
