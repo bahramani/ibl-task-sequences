@@ -147,6 +147,14 @@ REGIONS = None # ["VISp", "MOp", "PO", "CA1", "AUDp", "CP", "VPM"]
 TAG = "2025_Q3_IBL_et_al_BWM"
 
 
+def _tag_search_kwargs(tag):
+    # IBL docs: tags are attached to datasets, and insertion queries should use
+    # django='datasets__tags__name,<tag>' when restricting by a data-release tag.
+    if not tag:
+        return {}
+    return {"django": f"datasets__tags__name,{tag}"}
+
+
 def _fetch_session_metadata(one, eid):
     meta = {"lab": None, "date": None, "subject": None}
     try:
@@ -172,17 +180,15 @@ def _load_spontaneous_intervals(one, eid):
 
 
 def _get_pids_for_subject(one, subject, tag):
-    eids, _session_dicts = one.search(
-        tag=tag,
-        subject=subject,
-        details=True,
-        query_type="remote",
+    return list(
+        dict.fromkeys(
+            one.search_insertions(
+                subject=subject,
+                query_type="remote",
+                **_tag_search_kwargs(tag),
+            )
+        )
     )
-    pids = []
-    for eid in eids:
-        insertions = one.alyx.rest("insertions", "list", session=eid)
-        pids.extend([ins["id"] for ins in insertions])
-    return pids
 
 
 def _get_pids_for_regions(one, regions, tag):
@@ -190,29 +196,25 @@ def _get_pids_for_regions(one, regions, tag):
         return []
     all_pids = []
     for region in regions:
-        eids, _session_dicts = one.search(
-            tag=tag,
-            details=True,
-            query_type="remote",
-            atlas_acronym=region,
+        all_pids.extend(
+            one.search_insertions(
+                atlas_acronym=region,
+                query_type="remote",
+                **_tag_search_kwargs(tag),
+            )
         )
-        for eid in eids:
-            insertions = one.alyx.rest("insertions", "list", session=eid)
-            all_pids.extend([ins["id"] for ins in insertions])
     return list(dict.fromkeys(all_pids))
 
 
 def _get_all_tag_pids(one, tag):
-    eids, _session_dicts = one.search(
-        tag=tag,
-        details=True,
-        query_type="remote",
+    return list(
+        dict.fromkeys(
+            one.search_insertions(
+                query_type="remote",
+                **_tag_search_kwargs(tag),
+            )
+        )
     )
-    pids = []
-    for eid in eids:
-        insertions = one.alyx.rest("insertions", "list", session=eid)
-        pids.extend([ins["id"] for ins in insertions if ins.get("id")])
-    return list(dict.fromkeys(pids))
 
 
 def _load_cache_if_exists(path):

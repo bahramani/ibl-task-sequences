@@ -1135,9 +1135,16 @@ def plot_trial_raster_plotly(
     spike_y = pd.Series(window_spike_clusters).map(cluster_index_map).to_numpy()
     spike_regions = pd.Series(window_spike_clusters).map(cluster_region_map).to_numpy()
 
+    n_rows = 6
+    row_raster = 1
+    row_psth = 2
+    row_wheel = 3
+    row_paw = 4
+    row_motion = 5
+    row_pupil = 6
     fig = FigureResampler(
         make_subplots(
-            rows=6,
+            rows=n_rows,
             cols=1,
             shared_xaxes=True,
             vertical_spacing=0.02,
@@ -1168,7 +1175,7 @@ def plot_trial_raster_plotly(
         max_n_samples=len(window_spike_times),
         hf_x=window_spike_times,
         hf_y=spike_y,
-        row=1,
+        row=row_raster,
         col=1,
     )
 
@@ -1193,7 +1200,7 @@ def plot_trial_raster_plotly(
             line=dict(width=0),
             fillcolor=fill_color,
             layer="below",
-            row=1,
+            row=row_raster,
             col=1,
         )
         if region_idx > 0:
@@ -1205,7 +1212,7 @@ def plot_trial_raster_plotly(
                 y1=y0,
                 line=dict(color="black", width=1),
                 layer="above",
-                row=1,
+                row=row_raster,
                 col=1,
             )
         fig.add_annotation(
@@ -1217,7 +1224,7 @@ def plot_trial_raster_plotly(
             showarrow=False,
             font=dict(size=10, color="gray"),
             xshift=10,
-            row=1,
+            row=row_raster,
             col=1,
         )
         fig.add_trace(
@@ -1229,7 +1236,7 @@ def plot_trial_raster_plotly(
                 name=acronym,
                 showlegend=True,
             ),
-            row=1,
+            row=row_raster,
             col=1,
         )
 
@@ -1278,13 +1285,13 @@ def plot_trial_raster_plotly(
                     name=f"{acronym} PSTH",
                     showlegend=False,
                 ),
-                row=2,
+                row=row_psth,
                 col=1,
             )
 
     fig.add_trace(
         go.Scatter(x=wheel_t, y=wheel_pos, mode="lines", line=dict(color=base_color)),
-        row=3,
+        row=row_wheel,
         col=1,
     )
 
@@ -1312,7 +1319,7 @@ def plot_trial_raster_plotly(
     if paw_speed is not None:
         fig.add_trace(
             go.Scatter(x=pose_t, y=paw_speed, mode="lines", line=dict(color=base_color)),
-            row=4,
+            row=row_paw,
             col=1,
         )
     else:
@@ -1320,10 +1327,10 @@ def plot_trial_raster_plotly(
             x=0.5,
             y=0.5,
             xref="paper",
-            yref="y4",
+            yref=f"y{row_paw}",
             text="Paw data not available",
             showarrow=False,
-            row=4,
+            row=row_paw,
             col=1,
         )
 
@@ -1350,7 +1357,7 @@ def plot_trial_raster_plotly(
                 name=motion_trace_name,
                 showlegend=True,
             ),
-            row=5,
+            row=row_motion,
             col=1,
         )
     else:
@@ -1358,10 +1365,10 @@ def plot_trial_raster_plotly(
             x=0.5,
             y=0.5,
             xref="paper",
-            yref="y5",
+            yref=f"y{row_motion}",
             text=motion_missing_text,
             showarrow=False,
-            row=5,
+            row=row_motion,
             col=1,
         )
 
@@ -1384,7 +1391,7 @@ def plot_trial_raster_plotly(
                 name="Pupil",
                 showlegend=True,
             ),
-            row=6,
+            row=row_pupil,
             col=1,
         )
     else:
@@ -1392,10 +1399,10 @@ def plot_trial_raster_plotly(
             x=0.5,
             y=0.5,
             xref="paper",
-            yref="y6",
+            yref=f"y{row_pupil}",
             text="Pupil data not available",
             showarrow=False,
-            row=6,
+            row=row_pupil,
             col=1,
         )
 
@@ -1405,7 +1412,7 @@ def plot_trial_raster_plotly(
         ("Feedback", t_feedback, "red"),
     ]
     for name, time_val, color in event_lines:
-        for row in range(1, 7):
+        for row in range(1, n_rows + 1):
             fig.add_vline(x=time_val - t_offset, line=dict(color=color, width=2), row=row, col=1)
         fig.add_trace(
             go.Scatter(
@@ -1416,7 +1423,7 @@ def plot_trial_raster_plotly(
                 name=name,
                 showlegend=True,
             ),
-            row=1,
+            row=row_raster,
             col=1,
         )
 
@@ -1455,7 +1462,7 @@ def plot_trial_raster_plotly(
                 color,
                 x_start,
                 x_end,
-                n_rows=6,
+                n_rows=n_rows,
                 dash=dash,
             )
 
@@ -1495,7 +1502,7 @@ def plot_trial_raster_plotly(
                 color,
                 x_start,
                 x_end,
-                row=5,
+                row=row_motion,
                 col=1,
                 alpha=alpha,
             )
@@ -1508,22 +1515,22 @@ def plot_trial_raster_plotly(
 
     fig.update_yaxes(
         title_text=ylabel_text,
-        row=1,
+        row=row_raster,
         col=1,
         showticklabels=False,
         range=[-0.5, len(df_units) - 0.5],
     )
-    fig.update_yaxes(title_text="Avg PSTH (Hz)", row=2, col=1)
-    fig.update_yaxes(title_text="Wheel (rad)", row=3, col=1)
-    fig.update_yaxes(title_text="Paw (px/s)", row=4, col=1)
-    fig.update_yaxes(title_text=motion_axis_label, row=5, col=1)
-    fig.update_yaxes(title_text=pupil_axis_label, row=6, col=1)
-    fig.update_xaxes(showgrid=False, row=1, col=1)
-    fig.update_yaxes(showgrid=False, row=1, col=1)
-    fig.update_xaxes(title_text=xlabel_text, row=6, col=1)
+    fig.update_yaxes(title_text="Avg PSTH (Hz)", row=row_psth, col=1)
+    fig.update_yaxes(title_text="Wheel (rad)", row=row_wheel, col=1)
+    fig.update_yaxes(title_text="Paw (px/s)", row=row_paw, col=1)
+    fig.update_yaxes(title_text=motion_axis_label, row=row_motion, col=1)
+    fig.update_yaxes(title_text=pupil_axis_label, row=row_pupil, col=1)
+    fig.update_xaxes(showgrid=False, row=row_raster, col=1)
+    fig.update_yaxes(showgrid=False, row=row_raster, col=1)
+    fig.update_xaxes(title_text=xlabel_text, row=row_pupil, col=1)
     fig.update_xaxes(range=[t_start - t_offset, t_end - t_offset])
     if is_whisk_trace:
-        fig.update_yaxes(range=list(WHISK_RASTER_Y_RANGE), row=5, col=1)
+        fig.update_yaxes(range=list(WHISK_RASTER_Y_RANGE), row=row_motion, col=1)
 
     fig.update_layout(
         title=f"{plot_title} | Sort: {sort_label}",
@@ -2655,6 +2662,11 @@ def plot_time_window_raster_plotly(
     motion_mean_df=None,
     extra_event_spans=None,
     extra_event_span_styles=None,
+    packet_score_times=None,
+    packet_score_values=None,
+    packet_score_threshold=None,
+    avg_psth_region_acronyms=None,
+    avg_psth_subplot_title="Avg PSTH",
 ):
     """Plot a session-time raster for a specified time window."""
     if t_start >= t_end:
@@ -2749,20 +2761,26 @@ def plot_time_window_raster_plotly(
     spike_y = pd.Series(window_spike_clusters).map(cluster_index_map).to_numpy()
     spike_regions = pd.Series(window_spike_clusters).map(cluster_region_map).to_numpy()
 
+    has_packet_score = packet_score_times is not None and packet_score_values is not None
+    n_rows = 7 if has_packet_score else 6
+    row_raster = 1
+    row_packet_score = 2 if has_packet_score else None
+    row_psth = 3 if has_packet_score else 2
+    row_wheel = 4 if has_packet_score else 3
+    row_paw = 5 if has_packet_score else 4
+    row_motion = 6 if has_packet_score else 5
+    row_pupil = 7 if has_packet_score else 6
     fig = FigureResampler(
         make_subplots(
-            rows=6,
+            rows=n_rows,
             cols=1,
             shared_xaxes=True,
             vertical_spacing=0.02,
-            row_heights=[0.52, 0.14, 0.11, 0.08, 0.08, 0.07],
+            row_heights=([0.46, 0.10, 0.14, 0.10, 0.08, 0.07, 0.05] if has_packet_score else [0.52, 0.14, 0.11, 0.08, 0.08, 0.07]),
             subplot_titles=(
-                "",
-                "Avg PSTH",
-                "Wheel",
-                "Paw Speed",
-                motion_subplot_title,
-                pupil_subplot_title,
+                ("", "Packet Score", avg_psth_subplot_title, "Wheel", "Paw Speed", motion_subplot_title, pupil_subplot_title)
+                if has_packet_score
+                else ("", avg_psth_subplot_title, "Wheel", "Paw Speed", motion_subplot_title, pupil_subplot_title)
             ),
         )
     )
@@ -2781,12 +2799,21 @@ def plot_time_window_raster_plotly(
         max_n_samples=len(window_spike_times),
         hf_x=window_spike_times,
         hf_y=spike_y,
-        row=1,
+        row=row_raster,
         col=1,
     )
 
     if region_colors is None:
         region_colors = _region_color_map(region_order)
+    if avg_psth_region_acronyms is None:
+        packet_score_color = "#13866d"
+    else:
+        region_color_key = (
+            str(avg_psth_region_acronyms[0])
+            if isinstance(avg_psth_region_acronyms, (list, tuple, np.ndarray)) and len(avg_psth_region_acronyms) > 0
+            else str(avg_psth_region_acronyms)
+        )
+        packet_score_color = region_colors.get(region_color_key, "#13866d")
     for region_idx, acronym in enumerate(region_order):
         group = df_units[df_units["acronym"] == acronym]
         if group.empty:
@@ -2803,7 +2830,7 @@ def plot_time_window_raster_plotly(
             line=dict(width=0),
             fillcolor=fill_color,
             layer="below",
-            row=1,
+            row=row_raster,
             col=1,
         )
         if region_idx > 0:
@@ -2815,7 +2842,7 @@ def plot_time_window_raster_plotly(
                 y1=y0,
                 line=dict(color="black", width=1),
                 layer="above",
-                row=1,
+                row=row_raster,
                 col=1,
             )
         fig.add_annotation(
@@ -2827,7 +2854,7 @@ def plot_time_window_raster_plotly(
             showarrow=False,
             font=dict(size=10, color="gray"),
             xshift=10,
-            row=1,
+            row=row_raster,
             col=1,
         )
         fig.add_trace(
@@ -2839,7 +2866,7 @@ def plot_time_window_raster_plotly(
                 name=acronym,
                 showlegend=True,
             ),
-            row=1,
+            row=row_raster,
             col=1,
         )
 
@@ -2850,6 +2877,34 @@ def plot_time_window_raster_plotly(
     else:
         wheel_t = np.array([])
         wheel_pos = np.array([])
+    if has_packet_score:
+        pkt_times = np.asarray(packet_score_times, dtype=float)
+        pkt_values = np.asarray(packet_score_values, dtype=float)
+        pkt_keep = np.isfinite(pkt_times) & np.isfinite(pkt_values) & (pkt_times >= t_start) & (pkt_times <= t_end)
+        fig.add_trace(
+            go.Scatter(
+                x=pkt_times[pkt_keep],
+                y=pkt_values[pkt_keep],
+                mode="lines",
+                line=dict(color=packet_score_color, width=2),
+                name="Packet score",
+                showlegend=False,
+            ),
+            row=row_packet_score,
+            col=1,
+        )
+        if packet_score_threshold is not None:
+            try:
+                threshold_val = float(packet_score_threshold)
+            except Exception:
+                threshold_val = None
+            if threshold_val is not None and np.isfinite(threshold_val):
+                fig.add_hline(
+                    y=threshold_val,
+                    line=dict(color="black", dash="dash"),
+                    row=row_packet_score,
+                    col=1,
+                )
     # Average PSTH by region across the selected time window
     bin_size = config_plot.get("POP_BIN_SIZE", 0.005)
     smooth_window_s = 0.05
@@ -2857,14 +2912,20 @@ def plot_time_window_raster_plotly(
     if t_end > t_start and len(df_units_psth) > 0:
         bins = np.arange(t_start, t_end + bin_size, bin_size)
         bin_centers = (bins[:-1] + bins[1:]) / 2
-        for acronym in region_order:
-            region_ids = df_units_psth.loc[
-                df_units_psth["acronym"] == acronym, "cluster_id"
-            ].values
+        if avg_psth_region_acronyms is None:
+            region_order_psth = list(region_order)
+        else:
+            if isinstance(avg_psth_region_acronyms, str):
+                avg_psth_region_acronyms = [avg_psth_region_acronyms]
+            region_order_psth = [str(acronym) for acronym in avg_psth_region_acronyms]
+        for acronym in region_order_psth:
+            region_mask = np.zeros(len(df_units_psth), dtype=bool)
+            region_mask |= df_units_psth["acronym"].astype(str).str.startswith(str(acronym))
+            region_ids = df_units_psth.loc[region_mask, "cluster_id"].values
             if len(region_ids) == 0:
                 continue
-            region_mask = np.isin(window_spike_clusters_all, region_ids)
-            region_spike_times = window_spike_times_all[region_mask]
+            spike_region_mask = np.isin(window_spike_clusters_all, region_ids)
+            region_spike_times = window_spike_times_all[spike_region_mask]
             counts, _ = np.histogram(region_spike_times, bins=bins)
             rate = counts / (len(region_ids) * bin_size)
             rate_smoothed = _moving_mean(rate, smooth_bins)
@@ -2873,17 +2934,17 @@ def plot_time_window_raster_plotly(
                     x=bin_centers,
                     y=rate_smoothed,
                     mode="lines",
-                    line=dict(color=region_colors.get(acronym)),
+                    line=dict(color=region_colors.get(str(acronym), base_color), width=2),
                     name=f"{acronym} PSTH",
                     showlegend=False,
                 ),
-                row=2,
+                row=row_psth,
                 col=1,
             )
 
     fig.add_trace(
         go.Scatter(x=wheel_t, y=wheel_pos, mode="lines", line=dict(color=base_color)),
-        row=3,
+        row=row_wheel,
         col=1,
     )
 
@@ -2918,7 +2979,7 @@ def plot_time_window_raster_plotly(
     if paw_speed is not None:
         fig.add_trace(
             go.Scatter(x=pose_t, y=paw_speed, mode="lines", line=dict(color=base_color)),
-            row=4,
+            row=row_paw,
             col=1,
         )
     else:
@@ -2926,10 +2987,10 @@ def plot_time_window_raster_plotly(
             x=0.5,
             y=0.5,
             xref="paper",
-            yref="y4",
+            yref=f"y{row_paw}",
             text="Paw data not available",
             showarrow=False,
-            row=4,
+            row=row_paw,
             col=1,
         )
 
@@ -2956,7 +3017,7 @@ def plot_time_window_raster_plotly(
                 name=motion_trace_name,
                 showlegend=True,
             ),
-            row=5,
+            row=row_motion,
             col=1,
         )
     else:
@@ -2964,10 +3025,10 @@ def plot_time_window_raster_plotly(
             x=0.5,
             y=0.5,
             xref="paper",
-            yref="y5",
+            yref=f"y{row_motion}",
             text=motion_missing_text,
             showarrow=False,
-            row=5,
+            row=row_motion,
             col=1,
         )
 
@@ -2990,7 +3051,7 @@ def plot_time_window_raster_plotly(
                 name="Pupil",
                 showlegend=True,
             ),
-            row=6,
+            row=row_pupil,
             col=1,
         )
     else:
@@ -2998,10 +3059,10 @@ def plot_time_window_raster_plotly(
             x=0.5,
             y=0.5,
             xref="paper",
-            yref="y6",
+            yref=f"y{row_pupil}",
             text="Pupil data not available",
             showarrow=False,
-            row=6,
+            row=row_pupil,
             col=1,
         )
 
@@ -3022,7 +3083,7 @@ def plot_time_window_raster_plotly(
             color,
             t_start,
             t_end,
-            n_rows=6,
+            n_rows=n_rows,
             dash=dash,
         )
 
@@ -3055,7 +3116,7 @@ def plot_time_window_raster_plotly(
                 color,
                 t_start,
                 t_end,
-                n_rows=6,
+                n_rows=n_rows,
                 dash=dash,
             )
 
@@ -3088,7 +3149,7 @@ def plot_time_window_raster_plotly(
                 color,
                 t_start,
                 t_end,
-                row=5,
+                row=row_motion,
                 col=1,
                 alpha=alpha,
             )
@@ -3101,21 +3162,23 @@ def plot_time_window_raster_plotly(
 
     fig.update_yaxes(
         title_text=ylabel_text,
-        row=1,
+        row=row_raster,
         col=1,
         showticklabels=False,
         range=[-0.5, len(df_units) - 0.5],
     )
-    fig.update_yaxes(title_text="Avg PSTH (Hz)", row=2, col=1)
-    fig.update_yaxes(title_text="Wheel (rad)", row=3, col=1)
-    fig.update_yaxes(title_text="Paw (px/s)", row=4, col=1)
-    fig.update_yaxes(title_text=motion_axis_label, row=5, col=1)
-    fig.update_yaxes(title_text=pupil_axis_label, row=6, col=1)
-    fig.update_xaxes(showgrid=False, row=1, col=1)
-    fig.update_yaxes(showgrid=False, row=1, col=1)
-    fig.update_xaxes(title_text="Time in session (s)", row=6, col=1)
+    if has_packet_score:
+        fig.update_yaxes(title_text="Packet score (z)", row=row_packet_score, col=1)
+    fig.update_yaxes(title_text="Avg PSTH (Hz)", row=row_psth, col=1)
+    fig.update_yaxes(title_text="Wheel (rad)", row=row_wheel, col=1)
+    fig.update_yaxes(title_text="Paw (px/s)", row=row_paw, col=1)
+    fig.update_yaxes(title_text=motion_axis_label, row=row_motion, col=1)
+    fig.update_yaxes(title_text=pupil_axis_label, row=row_pupil, col=1)
+    fig.update_xaxes(showgrid=False, row=row_raster, col=1)
+    fig.update_yaxes(showgrid=False, row=row_raster, col=1)
+    fig.update_xaxes(title_text="Time in session (s)", row=row_pupil, col=1)
     if is_whisk_trace:
-        fig.update_yaxes(range=list(WHISK_RASTER_Y_RANGE), row=5, col=1)
+        fig.update_yaxes(range=list(WHISK_RASTER_Y_RANGE), row=row_motion, col=1)
 
     fig.update_layout(
         title=f"Window {t_start:.2f}-{t_end:.2f}s | Sort: {sort_label}",
@@ -3124,12 +3187,8 @@ def plot_time_window_raster_plotly(
         margin=dict(l=70, r=40, t=80, b=60),
     )
     fig.update_layout(template=template, font=dict(color=base_color))
-    fig.update_xaxes(range=[t_start, t_end], row=1, col=1)
-    fig.update_xaxes(range=[t_start, t_end], row=2, col=1)
-    fig.update_xaxes(range=[t_start, t_end], row=3, col=1)
-    fig.update_xaxes(range=[t_start, t_end], row=4, col=1)
-    fig.update_xaxes(range=[t_start, t_end], row=5, col=1)
-    fig.update_xaxes(range=[t_start, t_end], row=6, col=1)
+    for row_idx in range(1, n_rows + 1):
+        fig.update_xaxes(range=[t_start, t_end], row=row_idx, col=1)
 
     return fig
 

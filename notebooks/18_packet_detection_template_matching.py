@@ -4793,6 +4793,194 @@ else:
         )
 
 
+# %% Single-Neuron Packet Feature Scatter Matrix
+PACKET_SINGLE_NEURON_FEATURES = list(PRESENT_CLUSTER_FEATURES)
+PACKET_SINGLE_NEURON_CLUSTER_ID = None  # None -> neuron with highest combined variance across selected features
+
+if packet_cluster_results is None or packet_feature_df is None:
+    print("Single-neuron packet feature matrix: packet feature clustering results are not available.")
+else:
+    selected_features = []
+    for feature_name in PACKET_SINGLE_NEURON_FEATURES:
+        feat = _resolve_feature_name(feature_name)
+        if feat in PACKET_FEATURE_ORDER and feat not in selected_features:
+            selected_features.append(feat)
+    if not selected_features:
+        print("Single-neuron packet feature matrix: no valid packet features were selected.")
+    else:
+        packet_cluster_lookup = packet_cluster_results["packet_summary_df"][
+            ["packet_idx", "cluster_label"]
+        ].drop_duplicates(subset=["packet_idx"])
+        feature_df_local = packet_feature_df.merge(packet_cluster_lookup, on="packet_idx", how="left")
+
+        chosen_cluster_id = PACKET_SINGLE_NEURON_CLUSTER_ID
+        if chosen_cluster_id is None:
+            variance_rows = []
+            for cluster_id, group_df in feature_df_local.groupby("cluster_id", sort=False):
+                row = {"cluster_id": int(cluster_id)}
+                for feat in selected_features:
+                    values = pd.to_numeric(group_df[feat], errors="coerce").to_numpy(dtype=float)
+                    values = _display_feature_values(feat, values, stat="mean")
+                    valid = np.isfinite(values)
+                    row[feat] = float(np.nanvar(values[valid])) if np.any(valid) else np.nan
+                variance_rows.append(row)
+
+            variance_df = pd.DataFrame(variance_rows)
+            score_terms = []
+            for feat in selected_features:
+                values = pd.to_numeric(variance_df[feat], errors="coerce").to_numpy(dtype=float)
+                valid = np.isfinite(values)
+                feat_score = np.full(values.shape, np.nan, dtype=float)
+                if np.any(valid):
+                    spread = float(np.nanstd(values[valid]))
+                    if spread > 0:
+                        feat_score[valid] = (values[valid] - float(np.nanmean(values[valid]))) / spread
+                    else:
+                        feat_score[valid] = 0.0
+                score_terms.append(feat_score)
+            combined_score = np.nanmean(np.column_stack(score_terms), axis=1)
+            if not np.any(np.isfinite(combined_score)):
+                print("Single-neuron packet feature matrix: unable to determine a default neuron.")
+                chosen_cluster_id = None
+            else:
+                best_idx = int(np.nanargmax(combined_score))
+                chosen_cluster_id = int(variance_df.iloc[best_idx]["cluster_id"])
+
+        if chosen_cluster_id is None:
+            pass
+        else:
+            neuron_df = (
+                feature_df_local[feature_df_local["cluster_id"] == int(chosen_cluster_id)]
+                .copy()
+                .sort_values("packet_idx")
+            )
+            if neuron_df.empty:
+                print(
+                    f"Single-neuron packet feature matrix: cluster_id {int(chosen_cluster_id)} "
+                    "is not available in the current packet-feature table."
+                )
+            else:
+                palette = _cluster_palette()
+                n_features = len(selected_features)
+                display_col_map = {}
+                display_labels = {}
+                for feat in selected_features:
+                    display_col = f"{feat}__display"
+                    values = pd.to_numeric(neuron_df[feat], errors="coerce").to_numpy(dtype=float)
+                    neuron_df[display_col] = _display_feature_values(feat, values, stat="mean")
+                    display_col_map[feat] = display_col
+                    display_labels[feat] = _display_feature_label(feat, stat="mean")
+
+                unique_packet_clusters = sorted(
+                    neuron_df["cluster_label"].dropna().astype(int).unique().tolist()
+                )
+                fig_matrix = make_subplots(
+                    rows=n_features,
+                    cols=n_features,
+                    shared_xaxes=False,
+                    shared_yaxes=False,
+                    horizontal_spacing=0.02,
+                    vertical_spacing=0.02,
+                )
+
+                for row_idx, y_feat in enumerate(selected_features, start=1):
+                    for col_idx, x_feat in enumerate(selected_features, start=1):
+                        if row_idx == col_idx:
+                            for cluster_idx in unique_packet_clusters:
+                                mask = neuron_df["cluster_label"].to_numpy(dtype=float) == float(cluster_idx)
+                                x_vals = pd.to_numeric(
+                                    neuron_df.loc[mask, display_col_map[x_feat]],
+                                    errors="coerce",
+                                ).to_numpy(dtype=float)
+                                valid = np.isfinite(x_vals)
+                                if not np.any(valid):
+                                    continue
+                                fig_matrix.add_trace(
+                                    go.Histogram(
+                                        x=x_vals[valid],
+                                        marker=dict(color=palette[int(cluster_idx) % len(palette)]),
+                                        opacity=0.55,
+                                        nbinsx=18,
+                                        name=f"Packet Cluster {int(cluster_idx) + 1}",
+                                        legendgroup=f"packet-cluster-{int(cluster_idx)}",
+                                        showlegend=(row_idx == 1 and col_idx == 1),
+                                        hovertemplate=(
+                                            f"{display_labels[x_feat]}<br>"
+                                            "Value: %{x:.3f}<br>"
+                                            "Count: %{y}<extra></extra>"
+                                        ),
+                                    ),
+                                    row=row_idx,
+                                    col=col_idx,
+                                )
+                        else:
+                            for cluster_idx in unique_packet_clusters:
+                                mask = neuron_df["cluster_label"].to_numpy(dtype=float) == float(cluster_idx)
+                                x_vals = pd.to_numeric(
+                                    neuron_df.loc[mask, display_col_map[x_feat]],
+                                    errors="coerce",
+                                ).to_numpy(dtype=float)
+                                y_vals = pd.to_numeric(
+                                    neuron_df.loc[mask, display_col_map[y_feat]],
+                                    errors="coerce",
+                                ).to_numpy(dtype=float)
+                                valid = np.isfinite(x_vals) & np.isfinite(y_vals)
+                                if not np.any(valid):
+                                    continue
+                                customdata = neuron_df.loc[
+                                    mask,
+                                    ["packet_idx", "packet_peak_time_s", "packet_context"],
+                                ].to_numpy()[valid]
+                                fig_matrix.add_trace(
+                                    go.Scatter(
+                                        x=x_vals[valid],
+                                        y=y_vals[valid],
+                                        mode="markers",
+                                        marker=dict(
+                                            color=palette[int(cluster_idx) % len(palette)],
+                                            size=7,
+                                            opacity=0.78,
+                                        ),
+                                        name=f"Packet Cluster {int(cluster_idx) + 1}",
+                                        legendgroup=f"packet-cluster-{int(cluster_idx)}",
+                                        showlegend=False,
+                                        customdata=customdata,
+                                        hovertemplate=(
+                                            "Packet %{customdata[0]}<br>"
+                                            "Peak time: %{customdata[1]:.3f}s<br>"
+                                            "Context: %{customdata[2]}<br>"
+                                            f"{display_labels[x_feat]}: %{{x:.3f}}<br>"
+                                            f"{display_labels[y_feat]}: %{{y:.3f}}<extra></extra>"
+                                        ),
+                                    ),
+                                    row=row_idx,
+                                    col=col_idx,
+                                )
+
+                for feat_idx, feat in enumerate(selected_features, start=1):
+                    fig_matrix.update_xaxes(title_text=display_labels[feat], row=n_features, col=feat_idx)
+                    fig_matrix.update_yaxes(title_text=display_labels[feat], row=feat_idx, col=1)
+
+                fig_matrix.update_layout(
+                    title=(
+                        f"Single-neuron packet feature matrix | cluster_id {int(chosen_cluster_id)} | "
+                        f"region {packet_feature_results['region']} | packets={len(neuron_df)}"
+                    ),
+                    template=template,
+                    font=dict(color=base_color),
+                    barmode="overlay",
+                    height=max(900, 180 * n_features + 120),
+                    width=max(900, 180 * n_features + 120),
+                    margin=dict(l=90, r=40, t=90, b=90),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+                )
+                show_fig(fig_matrix, renderer=PLOTLY_RENDERER)
+                print(
+                    f"Single-neuron packet feature matrix | cluster_id={int(chosen_cluster_id)} | "
+                    f"n_packets={len(neuron_df)}"
+                )
+
+
 # %% Packet Cluster PSTH
 if packet_cluster_results is None or packet_feature_results is None:
     print("Packet cluster PSTH: clustering results are not available.")

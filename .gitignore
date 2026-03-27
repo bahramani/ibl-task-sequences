@@ -2,6 +2,7 @@
 data/raw/
 data/processed/
 data/dashboard_cache/
+data/packet_dashboard_cache/
 data/dashboard_region_cache/
 results/
 
