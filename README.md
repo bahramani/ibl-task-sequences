@@ -1,6 +1,6 @@
 # SeqProject2026
 
-This repository contains analysis code developed during a rotation project at CortexLab, UCL. It studies the functional role of brain-wide population sequences in IBL Neuropixels recordings using spike-triggered population rate (`stPR`) analyses and a cache-first workflow for fast interactive exploration.
+This repository contains analysis code developed during my rotation project at CortexLab, UCL. It studies the functional role of brain-wide population sequences in IBL Neuropixels recordings using spike-triggered population rate (`stPR`) analyses and a cache-first workflow for fast interactive exploration.
 
 The central question is whether a neuron's coupling to its population is related to behavior. In this project, that coupling is summarized by two per-neuron properties:
 
@@ -40,8 +40,6 @@ The scripts in this repository fall into three broad groups:
 | [17_ibl_seq_regions_dash.py](scripts/17_ibl_seq_regions_dash.py) | Region dashboard for cached sequence-comparison outputs from the `15/16` pipeline |
 | [20_packet_dashboard.py](scripts/20_packet_dashboard.py) | Interactive dashboard for the preliminary packet-detection pipeline |
 
-There is also an optional lightweight local viewer at [web_dashboard/server.py](web_dashboard/server.py), which serves cached plots through a small HTTP app without recomputing the main analysis.
-
 ## Environment Setup
 
 From the repository root:
@@ -61,7 +59,7 @@ mamba env create -f environment.yml
 
 This project is designed around IBL data accessed through `ONE`. For first-time runs, it is best to stay online so Alyx metadata and missing datasets can be fetched automatically.
 
-Most of the work in this repository was run on IBL data associated with:
+All of the work in this repository was run on IBL data associated with:
 
 - `TAG = "2025_Q3_IBL_et_al_BWM"`
 
@@ -117,18 +115,6 @@ Use [11_ibl_whisk_seq.py](scripts/11_ibl_whisk_seq.py) for whisking-event detect
 
 ![Example whisking sequence view](sample_whisking_sequence.png)
 
-### Sequence comparison workflow
-
-The sequence-comparison path is separate from the main coupling dashboard pipeline:
-
-1. Run [15_ibl_seq_comparison.py](scripts/15_ibl_seq_comparison.py) for single-PID sequence comparisons.
-2. Aggregate cached outputs with [16_ibl_seq_batch_comp.py](scripts/16_ibl_seq_batch_comp.py).
-3. Inspect the region-level outputs with:
-
-```bash
-streamlit run scripts/17_ibl_seq_regions_dash.py
-```
-
 ### Packet detection workflow (preliminary)
 
 This branch is exploratory and less mature than the main coupling pipeline:
@@ -156,7 +142,9 @@ The repository is strongly cache-driven. The main folders are:
 
 At the center of the project is the spike-triggered population rate (`stPR`):
 
-`stPR_i(tau) = E[r_pop,-i(t + tau) | spike_i(t)]`
+```math
+\mathrm{stPR}_i(\tau) = \mathbb{E}\left[r_{\mathrm{pop},-i}(t + \tau) \mid \mathrm{spike}_i(t)\right]
+```
 
 where the population rate excludes neuron `i` itself.
 
@@ -269,9 +257,14 @@ Several large language models were used during development as coding assistants.
 
 ## Background Reading
 
-- [A great review paper on the broader idea of structured spontaneous activity](https://www.nature.com/articles/nrn4026)
-- [Okun et al., 2015](https://www.nature.com/articles/nature14273): the key paper for coupling strength and the "chorister vs soloist" framing
-- [Bimbard et al., 2025](https://www.biorxiv.org/content/10.64898/2025.12.20.695676v2): the most directly related source for invariant sequence structure and the main coupling implementation used here
+- Luczak, A., McNaughton, B. L., & Harris, K. D. (2015). *Packet-based communication in the cortex*. *Nature Reviews Neuroscience, 16*, 745-755. https://www.nature.com/articles/nrn4026
+  This is the best conceptual entry point for the broader idea behind the project. It frames temporally structured population activity as packet-like communication rather than unstructured background variability.
+
+- Okun, M., Steinmetz, N. A., Cossell, L., Iacaruso, M. F., Ko, H., Bartho, P., Moore, T., Hofer, S. B., Mrsic-Flogel, T. D., Carandini, M., & Harris, K. D. (2015). *Diverse coupling of neurons to populations in sensory cortex*. *Nature, 521*, 511-515. https://www.nature.com/articles/nature14273
+  This is the key source for coupling strength in the present repository. It motivates the chorister-versus-soloist interpretation and the idea that population coupling captures an important component of neural variability.
+
+- International Brain Laboratory et al. (2025). *A brain-wide map of neural activity during complex behaviour*. *bioRxiv*. https://www.biorxiv.org/content/10.64898/2025.12.20.695676v2
+  This is the most directly related large-scale reference for the project. It motivates the brain-wide framing, supports the idea of invariant sequential structure, and is the closest methodological ancestor of the coupling analyses implemented here.
 
 ## License
 
