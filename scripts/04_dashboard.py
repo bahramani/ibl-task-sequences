@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import sys
 from pathlib import Path
-sys.path.insert(0, str(Path.cwd().parent))  # if notebook is in /notebooks/
+sys.path.insert(0, str(Path.cwd().parent))  # if script is in /scripts/
 
 from utils.plotting_plotly import (
     plot_trial_raster_plotly,

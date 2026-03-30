@@ -58,7 +58,7 @@ dependencies:
       - pyqtgraph>=0.13,<0.15
       - slidingrp>=1.1,<2
 
-      # Modeling / advanced notebooks
+      # Modeling / advanced analysis scripts
       - fastprogress>=1,<2
       - kornia>=0.7,<1
       - nemos>=0.2

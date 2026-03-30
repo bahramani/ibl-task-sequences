@@ -20,7 +20,7 @@ except Exception:  # pragma: no cover
 
 BASE_PATH = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BASE_PATH))
-sys.path.insert(0, str(Path.cwd().parent))  # if notebook is in /notebooks/
+sys.path.insert(0, str(Path.cwd().parent))  # if script is in /scripts/
 
 import utils.analysis as ana_utils
 import utils.plotting_plotly as plotting_utils
@@ -33,7 +33,8 @@ from utils.io import (
     build_cluster_id_map,
     get_cluster_labels_array,
     load_task_replay_datasets,
-    extract_passive_times_and_contrast,
+    build_passive_event_times,
+    build_passive_auditory_event_times,
 )
 from utils.plotting_plotly import (
     plot_trial_raster_plotly,
@@ -210,7 +211,7 @@ def _build_trial_table(trials, trial_idx):
     )
 
 
-def _build_delay_event_inputs(sl, passive_visual_times, passive_visual_contrasts):
+def _build_delay_event_inputs(sl, passive_auditory_events):
     trials = sl.trials
     trial_contrasts = ana_utils.get_trial_contrasts(sl)
 
@@ -220,338 +221,56 @@ def _build_delay_event_inputs(sl, passive_visual_times, passive_visual_contrasts
 
     stim_times_all = np.asarray(trials["stimOn_times"], dtype=float)
     stim_valid = np.isfinite(stim_times_all)
-    stim_nonzero = np.isfinite(trial_contrasts) & (trial_contrasts > 0)
-    stim_mask = stim_valid & stim_nonzero
-    stim_idx = np.nonzero(stim_mask)[0]
-    events_by_name["stimOn_times"] = stim_times_all[stim_mask]
+    stim_idx = np.nonzero(stim_valid)[0]
+    events_by_name["stimOn_times"] = stim_times_all[stim_valid]
     contrasts_by_name["stimOn_times"] = trial_contrasts[stim_idx]
     trial_idx_by_name["stimOn_times"] = stim_idx
 
-    passive_times = np.asarray(passive_visual_times, dtype=float).reshape(-1)
-    passive_contrasts = np.asarray(passive_visual_contrasts, dtype=float).reshape(-1)
-    if passive_contrasts.shape[0] != passive_times.shape[0]:
-        if (
-            passive_contrasts.size == 1
-            and passive_times.size > 0
-            and np.isfinite(float(passive_contrasts.ravel()[0]))
-        ):
-            passive_contrasts = np.full(
-                passive_times.shape[0],
-                float(passive_contrasts.ravel()[0]),
-                dtype=float,
-            )
-        else:
-            passive_contrasts = np.ones_like(passive_times, dtype=float)
+    feedback_times_all = np.asarray(trials["feedback_times"], dtype=float)
+    feedback_type = np.asarray(trials["feedbackType"])
+    feedback_valid = np.isfinite(feedback_times_all)
 
-    passive_mask = np.isfinite(passive_times) & np.isfinite(passive_contrasts) & (passive_contrasts > 0)
-    passive_times = passive_times[passive_mask]
-    passive_contrasts = passive_contrasts[passive_mask]
-    if passive_times.size > 0:
-        order = np.argsort(passive_times)
-        passive_times = passive_times[order]
-        passive_contrasts = passive_contrasts[order]
+    correct_mask = feedback_valid & (feedback_type == 1)
+    correct_idx = np.nonzero(correct_mask)[0]
+    events_by_name["feedback_correct_times"] = feedback_times_all[correct_mask]
+    contrasts_by_name["feedback_correct_times"] = trial_contrasts[correct_idx]
+    trial_idx_by_name["feedback_correct_times"] = correct_idx
 
-    events_by_name["passive_visual_times"] = passive_times
-    contrasts_by_name["passive_visual_times"] = passive_contrasts
-    trial_idx_by_name["passive_visual_times"] = np.arange(len(passive_times), dtype=int)
+    incorrect_mask = feedback_valid & (feedback_type != 1)
+    incorrect_idx = np.nonzero(incorrect_mask)[0]
+    events_by_name["feedback_incorrect_times"] = feedback_times_all[incorrect_mask]
+    contrasts_by_name["feedback_incorrect_times"] = trial_contrasts[incorrect_idx]
+    trial_idx_by_name["feedback_incorrect_times"] = incorrect_idx
+
+    passive_specs = [
+        ("passive_tone_times", "tone"),
+        ("passive_noise_times", "noise"),
+        ("passive_valve_times", "valve"),
+    ]
+    passive_auditory_events = passive_auditory_events or {}
+    for event_name, key in passive_specs:
+        times = passive_auditory_events.get(key, np.array([]))
+        times = np.asarray(times, dtype=float)
+        times = np.sort(times[np.isfinite(times)])
+        events_by_name[event_name] = times
+        contrasts_by_name[event_name] = np.ones(len(times), dtype=float)
+        trial_idx_by_name[event_name] = np.arange(len(times), dtype=int)
 
     return events_by_name, contrasts_by_name, trial_idx_by_name
 
 
-def _passive_visual_event_counts(passive_visual_times, passive_visual_contrasts):
-    times = np.asarray(passive_visual_times, dtype=float).reshape(-1)
-    contrasts = np.asarray(passive_visual_contrasts, dtype=float).reshape(-1)
-    if contrasts.shape[0] != times.shape[0]:
-        contrasts = np.ones_like(times, dtype=float)
-    valid = np.isfinite(times) & np.isfinite(contrasts) & (contrasts > 0)
-    return {"visual_nonzero": int(valid.sum())}
+def _passive_auditory_event_counts(passive_auditory_events):
+    passive_auditory_events = passive_auditory_events or {}
+    counts = {}
+    for key in ("tone", "noise", "valve"):
+        times = np.asarray(passive_auditory_events.get(key, np.array([])), dtype=float)
+        counts[key] = int(np.isfinite(times).sum())
+    return counts
 
 
-def _has_passive_visual_part(passive_visual_times, passive_visual_contrasts):
-    counts = _passive_visual_event_counts(passive_visual_times, passive_visual_contrasts)
-    return counts["visual_nonzero"] > 0, counts
-
-
-def _extract_tr_field_local(tr_obj, keys, suffixes=None):
-    if tr_obj is None:
-        return None
-    if hasattr(tr_obj, "keys"):
-        key_list = list(tr_obj.keys())
-        for key in keys:
-            if key in tr_obj:
-                return np.asarray(tr_obj[key])
-        if suffixes:
-            for key in key_list:
-                key_str = str(key)
-                for suffix in suffixes:
-                    if key_str.endswith(suffix):
-                        return np.asarray(tr_obj[key])
-    for key in keys:
-        if hasattr(tr_obj, key):
-            return np.asarray(getattr(tr_obj, key))
-    if suffixes:
-        for suffix in suffixes:
-            if hasattr(tr_obj, suffix):
-                return np.asarray(getattr(tr_obj, suffix))
-    return None
-
-
-def _coerce_passive_base_obj(tr_obj):
-    if tr_obj is None:
-        return None
-    base_obj = tr_obj
-    if isinstance(tr_obj, dict) and "table" in tr_obj:
-        base_obj = tr_obj["table"]
-    elif isinstance(tr_obj, (list, tuple)):
-        if len(tr_obj) == 1:
-            base_obj = tr_obj[0]
-        elif len(tr_obj) > 1:
-            preferred = None
-            for item in tr_obj:
-                if isinstance(item, pd.DataFrame) and "start" in item.columns:
-                    preferred = item
-                    break
-                if hasattr(item, "dtype") and getattr(item.dtype, "names", None):
-                    if "start" in set(item.dtype.names):
-                        preferred = item
-                        break
-            base_obj = preferred if preferred is not None else tr_obj[0]
-    return base_obj
-
-
-def _extract_passive_visual_times_contrast_side(tr_obj):
-    times, contrasts = extract_passive_times_and_contrast(tr_obj)
-    if times is None or contrasts is None:
-        return np.array([], dtype=float), np.array([], dtype=float), np.array([], dtype=object)
-
-    times = np.asarray(times, dtype=float).reshape(-1)
-    contrasts = np.asarray(contrasts, dtype=float).reshape(-1)
-    if contrasts.shape[0] != times.shape[0]:
-        if contrasts.size == 1 and times.size > 0:
-            contrasts = np.full(times.shape[0], float(contrasts.ravel()[0]), dtype=float)
-        else:
-            contrasts = np.ones_like(times, dtype=float)
-
-    side = np.full(times.shape[0], "unknown", dtype=object)
-    base_obj = _coerce_passive_base_obj(tr_obj)
-    contrast_left = _extract_tr_field_local(
-        base_obj,
-        keys=("contrastLeft",),
-        suffixes=(".contrastLeft", "contrastLeft"),
-    )
-    contrast_right = _extract_tr_field_local(
-        base_obj,
-        keys=("contrastRight",),
-        suffixes=(".contrastRight", "contrastRight"),
-    )
-
-    left_arr = None
-    right_arr = None
-    if contrast_left is not None:
-        left_arr = np.asarray(contrast_left, dtype=float).reshape(-1)
-    if contrast_right is not None:
-        right_arr = np.asarray(contrast_right, dtype=float).reshape(-1)
-
-    if left_arr is not None or right_arr is not None:
-        if left_arr is None and right_arr is not None:
-            left_arr = np.full(right_arr.shape[0], np.nan, dtype=float)
-        if right_arr is None and left_arr is not None:
-            right_arr = np.full(left_arr.shape[0], np.nan, dtype=float)
-        if left_arr is not None and right_arr is not None and left_arr.shape[0] == times.shape[0]:
-            left_abs = np.abs(left_arr)
-            right_abs = np.abs(right_arr)
-            left_on = np.isfinite(left_abs) & (left_abs > 0)
-            right_on = np.isfinite(right_abs) & (right_abs > 0)
-            side[left_on & ~right_on] = "left"
-            side[right_on & ~left_on] = "right"
-            both_on = left_on & right_on
-            side[both_on & (left_abs > right_abs)] = "left"
-            side[both_on & (right_abs > left_abs)] = "right"
-
-    if not np.any((side == "left") | (side == "right")):
-        side_hint = _extract_tr_field_local(
-            base_obj,
-            keys=(
-                "position",
-                "stim_position",
-                "stimPos",
-                "azimuth",
-                "side",
-                "stim_side",
-                "stimSide",
-                "is_right",
-                "isRight",
-            ),
-            suffixes=(
-                ".position",
-                "position",
-                ".azimuth",
-                "azimuth",
-                ".side",
-                "side",
-                ".stim_side",
-                "stim_side",
-            ),
-        )
-        if side_hint is not None:
-            side_hint = np.asarray(side_hint).reshape(-1)
-            if side_hint.shape[0] == times.shape[0]:
-                if np.issubdtype(side_hint.dtype, np.number):
-                    side_hint_num = side_hint.astype(float)
-                    side[side_hint_num < 0] = "left"
-                    side[side_hint_num > 0] = "right"
-                else:
-                    side_hint_str = pd.Series(side_hint).astype(str).str.lower().to_numpy()
-                    right_mask = (
-                        (side_hint_str == "right")
-                        | (side_hint_str == "r")
-                        | (side_hint_str == "1")
-                        | (side_hint_str == "true")
-                    )
-                    left_mask = (
-                        (side_hint_str == "left")
-                        | (side_hint_str == "l")
-                        | (side_hint_str == "-1")
-                        | (side_hint_str == "false")
-                    )
-                    side[left_mask] = "left"
-                    side[right_mask] = "right"
-
-    if not np.any((side == "left") | (side == "right")):
-        signed_mask = np.isfinite(contrasts)
-        if np.any(contrasts[signed_mask] < 0) and np.any(contrasts[signed_mask] > 0):
-            side[contrasts < 0] = "left"
-            side[contrasts > 0] = "right"
-
-    contrast_abs = np.abs(contrasts)
-    finite_mask = np.isfinite(times) & np.isfinite(contrast_abs)
-    return times[finite_mask], contrast_abs[finite_mask], side[finite_mask]
-
-
-def _top_nonzero_contrasts(values, top_n=2, round_decimals=6):
-    vals = np.asarray(values, dtype=float).reshape(-1)
-    vals = vals[np.isfinite(vals) & (vals > 0)]
-    if vals.size == 0:
-        return np.array([], dtype=float)
-    vals = np.round(vals, int(round_decimals))
-    unique_vals = np.unique(vals.astype(float))
-    unique_vals = np.sort(unique_vals)[::-1]
-    return unique_vals[: int(top_n)]
-
-
-def _select_task_response_heatmap_events(sl, top_n=2, round_decimals=6):
-    trials = sl.trials
-    stim_times = np.asarray(trials["stimOn_times"], dtype=float).reshape(-1)
-    contrast_left = np.asarray(trials["contrastLeft"], dtype=float).reshape(-1)
-    contrast_right = np.asarray(trials["contrastRight"], dtype=float).reshape(-1)
-    if (
-        stim_times.shape[0] != contrast_left.shape[0]
-        or stim_times.shape[0] != contrast_right.shape[0]
-    ):
-        return {
-            "task_all_right_times": np.array([], dtype=float),
-            "task_all_left_times": np.array([], dtype=float),
-            "task_top2_right_times": np.array([], dtype=float),
-            "task_top2_left_times": np.array([], dtype=float),
-            "task_zero_lr_times": np.array([], dtype=float),
-            "task_all_right_values": np.array([], dtype=float),
-            "task_all_left_values": np.array([], dtype=float),
-            "task_top2_right_values": np.array([], dtype=float),
-            "task_top2_left_values": np.array([], dtype=float),
-        }
-
-    left_abs = np.abs(contrast_left)
-    right_abs = np.abs(contrast_right)
-    stim_valid = np.isfinite(stim_times)
-
-    left_pos = np.isfinite(left_abs) & (left_abs > 0)
-    right_pos = np.isfinite(right_abs) & (right_abs > 0)
-    left_only = left_pos & (~right_pos)
-    right_only = right_pos & (~left_pos)
-    both_pos = left_pos & right_pos
-    left_only = left_only | (both_pos & (left_abs > right_abs))
-    right_only = right_only | (both_pos & (right_abs > left_abs))
-
-    tol = 10.0 ** (-int(round_decimals))
-    left_zero = np.isfinite(left_abs) & np.isclose(left_abs, 0.0, atol=tol)
-    right_zero = np.isfinite(right_abs) & np.isclose(right_abs, 0.0, atol=tol)
-    left_missing = ~np.isfinite(contrast_left)
-    right_missing = ~np.isfinite(contrast_right)
-    all_right_mask = right_only & stim_valid
-    all_left_mask = left_only & stim_valid
-    all_right_vals = np.unique(np.round(right_abs[all_right_mask], int(round_decimals)))
-    all_left_vals = np.unique(np.round(left_abs[all_left_mask], int(round_decimals)))
-    all_right_vals = np.sort(all_right_vals)[::-1]
-    all_left_vals = np.sort(all_left_vals)[::-1]
-
-    right_top_vals = _top_nonzero_contrasts(right_abs[right_only], top_n=top_n, round_decimals=round_decimals)
-    left_top_vals = _top_nonzero_contrasts(left_abs[left_only], top_n=top_n, round_decimals=round_decimals)
-
-    right_top_mask = np.zeros_like(stim_valid, dtype=bool)
-    for val in right_top_vals:
-        right_top_mask |= np.isclose(right_abs, float(val), atol=tol)
-    right_top_mask &= right_only & stim_valid
-
-    left_top_mask = np.zeros_like(stim_valid, dtype=bool)
-    for val in left_top_vals:
-        left_top_mask |= np.isclose(left_abs, float(val), atol=tol)
-    left_top_mask &= left_only & stim_valid
-
-    zero_left_trials = left_zero & (right_missing | right_zero)
-    zero_right_trials = right_zero & (left_missing | left_zero)
-    zero_mask = stim_valid & (zero_left_trials | zero_right_trials)
-
-    return {
-        "task_all_right_times": np.sort(stim_times[all_right_mask]),
-        "task_all_left_times": np.sort(stim_times[all_left_mask]),
-        "task_top2_right_times": np.sort(stim_times[right_top_mask]),
-        "task_top2_left_times": np.sort(stim_times[left_top_mask]),
-        "task_zero_lr_times": np.sort(stim_times[zero_mask]),
-        "task_all_right_values": all_right_vals,
-        "task_all_left_values": all_left_vals,
-        "task_top2_right_values": right_top_vals,
-        "task_top2_left_values": left_top_vals,
-    }
-
-
-def _select_passive_response_heatmap_events(visual_tr, top_n=2, round_decimals=6):
-    times, contrasts, sides = _extract_passive_visual_times_contrast_side(visual_tr)
-    if times.size == 0:
-        return {
-            "passive_top2_right_times": np.array([], dtype=float),
-            "passive_top2_left_times": np.array([], dtype=float),
-            "passive_top2_right_values": np.array([], dtype=float),
-            "passive_top2_left_values": np.array([], dtype=float),
-        }
-
-    finite_nonzero = np.isfinite(times) & np.isfinite(contrasts) & (contrasts > 0)
-    times = times[finite_nonzero]
-    contrasts = contrasts[finite_nonzero]
-    sides = np.asarray(sides, dtype=object)[finite_nonzero]
-
-    right_mask = sides == "right"
-    left_mask = sides == "left"
-
-    right_top_vals = _top_nonzero_contrasts(contrasts[right_mask], top_n=top_n, round_decimals=round_decimals)
-    left_top_vals = _top_nonzero_contrasts(contrasts[left_mask], top_n=top_n, round_decimals=round_decimals)
-
-    tol = 10.0 ** (-int(round_decimals))
-    right_top_mask = np.zeros_like(right_mask, dtype=bool)
-    for val in right_top_vals:
-        right_top_mask |= np.isclose(contrasts, float(val), atol=tol)
-    right_top_mask &= right_mask
-
-    left_top_mask = np.zeros_like(left_mask, dtype=bool)
-    for val in left_top_vals:
-        left_top_mask |= np.isclose(contrasts, float(val), atol=tol)
-    left_top_mask &= left_mask
-
-    return {
-        "passive_top2_right_times": np.sort(times[right_top_mask]),
-        "passive_top2_left_times": np.sort(times[left_top_mask]),
-        "passive_top2_right_values": right_top_vals,
-        "passive_top2_left_values": left_top_vals,
-    }
+def _has_passive_auditory_part(passive_auditory_events):
+    counts = _passive_auditory_event_counts(passive_auditory_events)
+    return int(sum(counts.values())) > 0, counts
 
 
 def _build_event_session(event_times, event_name):
@@ -626,45 +345,6 @@ def _build_corr_heatmap_fig(corr_mat, n_mat, names, title, template):
     return fig
 
 
-def _attach_delay_columns_from_reference(df_res, target_event_name, ref_event_name):
-    if (
-        df_res is None
-        or ref_event_name is None
-        or str(target_event_name) == str(ref_event_name)
-    ):
-        return df_res
-    if not isinstance(df_res, pd.DataFrame) or df_res.empty:
-        return df_res
-
-    col_pairs = [
-        (
-            ana_utils.delay_column_name(target_event_name),
-            ana_utils.delay_column_name(ref_event_name),
-        ),
-        (
-            ana_utils.delay_split_column_name(target_event_name, "odd"),
-            ana_utils.delay_split_column_name(ref_event_name, "odd"),
-        ),
-        (
-            ana_utils.delay_split_column_name(target_event_name, "even"),
-            ana_utils.delay_split_column_name(ref_event_name, "even"),
-        ),
-    ]
-
-    updates = {}
-    for target_col, ref_col in col_pairs:
-        if target_col not in df_res.columns and ref_col in df_res.columns:
-            updates[target_col] = df_res[ref_col]
-
-    if not updates:
-        return df_res
-
-    df_res_out = df_res.copy()
-    for col_name, col_values in updates.items():
-        df_res_out[col_name] = col_values
-    return df_res_out
-
-
 def _build_multi_event_population_panel(
     event_specs,
     event_sessions,
@@ -676,9 +356,6 @@ def _build_multi_event_population_panel(
     plot_config,
     sort_mode,
     region_name,
-    pid=None,
-    sort_mode_by_event=None,
-    delay_reference_event_by_name=None,
     df_coupling=None,
     df_coupling_task=None,
     df_coupling_iti=None,
@@ -717,35 +394,20 @@ def _build_multi_event_population_panel(
         pop_window_post = float(cfg.get("POP_WINDOW_POST", 0.15))
         cfg["POP_WINDOW_PRE"] = pop_window_pre
         cfg["POP_WINDOW_POST"] = pop_window_post
-        if isinstance(sort_mode_by_event, dict) and event_name in sort_mode_by_event:
-            sort_mode_event = str(sort_mode_by_event[event_name])
-        else:
-            sort_mode_event = sort_mode
-
-        if isinstance(delay_reference_event_by_name, dict):
-            delay_ref_event = delay_reference_event_by_name.get(event_name, None)
-        else:
-            delay_ref_event = None
-        df_res_event = _attach_delay_columns_from_reference(
-            df_res,
-            target_event_name=event_name,
-            ref_event_name=delay_ref_event,
-        )
-
         fig_event = plot_population_sorted_plotly(
             event_session,
             spikes,
             clusters,
             plot_cluster_ids,
             plot_cluster_acronyms,
-            df_res_event,
+            df_res,
             cfg,
             df_coupling=df_coupling,
             df_coupling_task=df_coupling_task,
             df_coupling_iti=df_coupling_iti,
             df_firing_rate=df_firing_rate,
             region_acronyms=[region_name],
-            sort_mode=sort_mode_event,
+            sort_mode=sort_mode,
         )
         if fig_event is None or len(fig_event.data) == 0:
             continue
@@ -785,11 +447,8 @@ def _build_multi_event_population_panel(
         fig_panel.update_xaxes(range=[-pop_window_pre, pop_window_post], row=row, col=col)
         fig_panel.update_yaxes(autorange="reversed", row=row, col=col)
 
-    title_text = f"Response Analysis (Region {region_name})"
-    if pid is not None:
-        title_text = f"{title_text} | PID {pid}"
     fig_panel.update_layout(
-        title=title_text,
+        title=f"Response Analysis (Region {region_name})",
         width=1500,
         height=350 * n_rows + 140,
         template=plot_config.get("PLOTLY_TEMPLATE", "plotly_white"),
@@ -803,8 +462,7 @@ _set_plotly_renderer(PLOTLY_RENDERER)
 
 
 # %% PID and ONE session loading
-PID = "27bac116-ea57-4512-ad35-714a62d259cd"  # None for selection
-TARGET_REGION = "VISp"
+PID = "1a276285-8b0e-4cc9-9f0a-a3a002978724" # None for selection  # Example: "3282a590-8688-44fc-9811-cdf8b80d9a80"
 ONE_PREFERRED_MODE = "remote"  # "local" or "remote"
 ALLOW_REMOTE_FALLBACK = True
 
@@ -851,21 +509,6 @@ print(f"EID: {eid}")
 cluster_ids, cid_to_idx = build_cluster_id_map(clusters)
 cluster_acronyms_calc = map_acronyms(clusters, br, "Beryl")
 cluster_acronyms_plot = np.asarray(cluster_acronyms_calc).astype(str)
-target_region_mask = np.asarray(
-    [str(acr).startswith(str(TARGET_REGION)) for acr in cluster_acronyms_plot],
-    dtype=bool,
-)
-target_region_cluster_ids = np.asarray(cluster_ids)[target_region_mask]
-target_region_cluster_id_set = set(int(cid) for cid in target_region_cluster_ids.tolist())
-target_region_cid_to_idx = {
-    int(cid): cid_to_idx[int(cid)]
-    for cid in target_region_cluster_ids
-    if int(cid) in cid_to_idx
-}
-if target_region_cluster_ids.size == 0:
-    raise RuntimeError(
-        f"No clusters from region '{TARGET_REGION}' were found for PID {pid} (EID {eid})."
-    )
 
 try:
     one_local = init_one(ibl_cache, mode="local")
@@ -876,50 +519,36 @@ try:
 except Exception:
     one_remote = None
 
-visual_TR, _ = load_task_replay_datasets(
+visual_TR, auditory_TR = load_task_replay_datasets(
     eid,
     one_local,
     one_remote,
     allow_remote=ALLOW_REMOTE_FALLBACK,
 )
-passive_visual_times_raw, passive_visual_contrasts_raw = extract_passive_times_and_contrast(visual_TR)
-has_passive_visual, passive_visual_counts = _has_passive_visual_part(
-    passive_visual_times_raw,
-    passive_visual_contrasts_raw,
+passive_event_times = build_passive_event_times(visual_TR, auditory_TR)
+passive_auditory_events = build_passive_auditory_event_times(auditory_TR)
+has_passive_auditory, passive_auditory_counts = _has_passive_auditory_part(
+    passive_auditory_events
 )
 print(
-    "Passive visual events (contrast>0):",
-    passive_visual_counts,
+    "Passive auditory events:",
+    passive_auditory_counts,
 )
-if not has_passive_visual:
+if not has_passive_auditory:
     raise RuntimeError(
-        f"Selected PID {pid} (EID {eid}) has no non-zero passive visual events. "
-        "Choose a PID that includes passiveGabor data."
+        f"Selected PID {pid} (EID {eid}) has no passive auditory events. "
+        "Choose a PID that includes passiveStims data."
     )
-
-passive_visual_times = np.asarray(passive_visual_times_raw, dtype=float).reshape(-1)
-passive_visual_contrasts = np.asarray(passive_visual_contrasts_raw, dtype=float).reshape(-1)
-if passive_visual_contrasts.shape[0] != passive_visual_times.shape[0]:
-    passive_visual_contrasts = np.ones_like(passive_visual_times, dtype=float)
-passive_visual_mask = (
-    np.isfinite(passive_visual_times)
-    & np.isfinite(passive_visual_contrasts)
-    & (passive_visual_contrasts > 0)
-)
-passive_visual_times = passive_visual_times[passive_visual_mask]
-passive_visual_contrasts = passive_visual_contrasts[passive_visual_mask]
-if passive_visual_times.size > 0:
-    _passive_order = np.argsort(passive_visual_times)
-    passive_visual_times = passive_visual_times[_passive_order]
-    passive_visual_contrasts = passive_visual_contrasts[_passive_order]
-
-passive_event_times = {"passive_visual": passive_visual_times}
 
 
 # %% CONFIG (analysis + plotting)
 DELAY_EVENT_NAMES = [
     "stimOn_times",
-    "passive_visual_times",
+    "feedback_correct_times",
+    "feedback_incorrect_times",
+    "passive_tone_times",
+    "passive_noise_times",
+    "passive_valve_times",
 ]
 
 CONFIG_CALC = {
@@ -932,15 +561,22 @@ CONFIG_CALC = {
     "DELAY_UNITS": "ms",
     "FULL_CONTRAST_VALUES": (1.0, 100.0),
     "DELAY_WINDOWS": {
-        "stimOn_times": (0.01, 0.2),
-        "passive_visual_times": (0.01, 0.2),
+        "stimOn_times": (0.0, 0.1),
+        "firstMovement_times": (-0.1, 0.2),
+        "response_times": (-0.1, 0.2),
+        "feedback_times": (-0.1, 0.2),
+        "feedback_correct_times": (0.0, 0.1),
+        "feedback_incorrect_times": (0.0, 0.1),
+        "passive_tone_times": (0.0, 0.1),
+        "passive_noise_times": (0.0, 0.1),
+        "passive_valve_times": (0.0, 0.1),
     },
     "BIN_SIZE": 0.005,
     "BASELINE_PRE": 0.2,
     "PSTH_WINDOW_START": -1.0,
     "PSTH_WINDOW_END": 1.0,
-    "RESPONSIVE_WINDOW_START": 0.01,
-    "RESPONSIVE_WINDOW_END": 0.2,
+    "RESPONSIVE_WINDOW_START": 0.02,
+    "RESPONSIVE_WINDOW_END": 0.35,
     # If True, responsiveness/sign are computed on baseline z-scored PSTHs.
     "RESPONSIVE_USE_ZSCORE": True,
     # "smooth" (default) uses smoothed PSTH for z-scoring; "raw" uses unsmoothed.
@@ -963,7 +599,7 @@ CONFIG_PLOT = {
     "ATLAS_MAPPING": "Beryl",
     "PLOT_ONLY_GOOD_UNITS": False,
     "PLOT_EVENT": "stimOn_times",
-    "PLOT_REGIONS": [TARGET_REGION],
+    "PLOT_REGIONS": ["SSp-m"],  # requested default
     "RASTER_WINDOW_PRE": 1,
     "RASTER_WINDOW_POST": 2,
     "RASTER_ALIGN_TO_EVENT": True,
@@ -997,12 +633,17 @@ GENERAL_RASTER_START = 4543  # defaults to first spike time
 GENERAL_RASTER_END = 4549  # defaults to +10s from start
 GENERAL_RASTER_SORT = "Spont stPR Delay"
 
-HEATMAP_SORT = "Own Event Delay" # "Own Event Delay"
+# HEATMAP_SORT = "Spont stPR Delay" 
+HEATMAP_SORT =  "Own Event Delay"
 
 RASTER_SORT_MAP = {
     "Default (Depth)": "depth",
     "Delay to Stim On": "delay:stimOn_times",
-    "Delay to Passive Visual": "delay:passive_visual_times",
+    "Delay to Feedback Correct": "delay:feedback_correct_times",
+    "Delay to Feedback Incorrect": "delay:feedback_incorrect_times",
+    "Delay to Passive Tone": "delay:passive_tone_times",
+    "Delay to Passive Valve": "delay:passive_valve_times",
+    "Delay to Passive Noise": "delay:passive_noise_times",
     "Task stPR Delay": "task",
     "Task stPR Strength": "task_strength",
     "Task stPR Max": "task_max",
@@ -1019,7 +660,11 @@ HEATMAP_SORT_MAP = {
     "Own Event Delay": "delay",
     "Default (Depth)": "depth",
     "Delay to Stim On": "delay:stimOn_times",
-    "Delay to Passive Visual": "delay:passive_visual_times",
+    "Delay to Feedback Correct": "delay:feedback_correct_times",
+    "Delay to Feedback Incorrect": "delay:feedback_incorrect_times",
+    "Delay to Passive Tone": "delay:passive_tone_times",
+    "Delay to Passive Valve": "delay:passive_valve_times",
+    "Delay to Passive Noise": "delay:passive_noise_times",
     "Task stPR Delay": "task",
     "Task stPR Strength": "task_strength",
     "ITI stPR Delay": "iti",
@@ -1045,8 +690,7 @@ pio.templates.default = plot_config["PLOTLY_TEMPLATE"]
 # %% Calculations (delays + stPR). No dashboard cache loading.
 events_by_name, contrasts_by_name, trial_idx_by_name = _build_delay_event_inputs(
     sl,
-    passive_visual_times,
-    passive_visual_contrasts,
+    passive_auditory_events,
 )
 print("Delay event counts:", {k: len(v) for k, v in events_by_name.items()})
 
@@ -1058,15 +702,17 @@ df_res = ana_utils.calculate_event_delays(
     cluster_acronyms_calc,
     events_by_name,
     delay_config,
-    target_region_cid_to_idx,
+    cid_to_idx,
     contrasts_by_name=contrasts_by_name,
     trial_idx_by_name=trial_idx_by_name,
     include_splits=True,
-    output_path=path_data_processed / f"{pid}_passive_visual_delay_results.csv",
+    output_path=path_data_processed / f"{pid}_passive_auditory_delay_results.csv",
 )
 
 passive_delay_cols = [
-    ana_utils.delay_column_name("passive_visual_times"),
+    ana_utils.delay_column_name("passive_tone_times"),
+    ana_utils.delay_column_name("passive_noise_times"),
+    ana_utils.delay_column_name("passive_valve_times"),
 ]
 for col in passive_delay_cols:
     if col not in df_res.columns:
@@ -1082,10 +728,6 @@ calc_cluster_ids = _select_cluster_ids_by_label(
     cluster_ids,
     clusters,
     label_min=calc_label_min,
-)
-calc_cluster_ids = np.asarray(
-    [cid for cid in calc_cluster_ids if int(cid) in target_region_cluster_id_set],
-    dtype=np.asarray(cluster_ids).dtype,
 )
 
 spont_intervals = _load_spontaneous_intervals(one, eid) if CONFIG_CALC.get("CALC_SPONT", True) else None
@@ -1246,10 +888,7 @@ plot_cluster_ids = _select_cluster_ids_by_label(
     clusters,
     label_min=PLOT_LABEL_MIN,
 )
-plot_cluster_ids = np.asarray(
-    [cid for cid in plot_cluster_ids if int(cid) in target_region_cluster_id_set],
-    dtype=np.asarray(cluster_ids).dtype,
-)
+plot_cluster_ids = np.asarray(plot_cluster_ids)
 plot_cluster_acronyms = np.asarray(
     [cluster_acronyms_plot[cid_to_idx[int(cid)]] for cid in plot_cluster_ids],
     dtype=str,
@@ -1286,7 +925,7 @@ if df_coupling_iti_plot is not None:
 # %% Trial raster (specific trial, 04-style)
 trial_sort_metric = RASTER_SORT_MAP.get(TRIAL_RASTER_SORT, "depth")
 n_trials = len(sl.trials["stimOn_times"])
-trial_idx = 328 # int(np.clip(int(TRIAL_INDEX), 0, max(0, n_trials - 1)))
+trial_idx = int(np.clip(int(TRIAL_INDEX), 0, max(0, n_trials - 1)))
 display(_build_trial_table(sl.trials, trial_idx))
 
 fig_trial = plot_trial_raster_plotly(
@@ -1323,6 +962,9 @@ t_end = min(max_t, t_end)
 
 passive_event_styles = {
     "passive_visual": ("Passive Visual", "#17becf", "dot"),
+    "passive_valve": ("Passive Valve", "#17becf", "solid"),
+    "passive_tone": ("Passive Tone", "#bcbd22", "dash"),
+    "passive_noise": ("Passive Noise", "#8c564b", "dashdot"),
 }
 
 fig_general = plot_time_window_raster_plotly(
@@ -1347,19 +989,17 @@ fig_general = plot_time_window_raster_plotly(
 show_fig(fig_general)
 
 
-# %% Response heatmaps (task + passive visual)
+# %% Response heatmaps (6 events in one figure per selected region)
 heatmap_sort_mode = HEATMAP_SORT_MAP.get(HEATMAP_SORT, "delay")
 heatmap_plot_config = dict(plot_config)
-heatmap_plot_config["POP_WINDOW_PRE"] = 0.1
-heatmap_plot_config["POP_WINDOW_POST"] = 0.2
-heatmap_plot_config["POP_NORMALIZE"] = False
-heatmap_plot_config["POP_ZSCORE"] = True
+heatmap_plot_config["POP_NORMALIZE"] = True
+heatmap_plot_config["POP_ZSCORE"] = False
 heatmap_plot_config["POP_ZSCORE_SOURCE"] = str(
     CONFIG_CALC.get("RESPONSIVE_ZSCORE_SOURCE", "smooth")
 ).strip().lower()
 heatmap_plot_config["POP_BASELINE_PRE"] = float(CONFIG_CALC.get("BASELINE_PRE", 0.2))
-heatmap_plot_config["POP_ZMIN"] = -6.0
-heatmap_plot_config["POP_ZMAX"] = 6.0
+heatmap_plot_config["POP_ZMIN"] = 0
+heatmap_plot_config["POP_ZMAX"] = 1
 heatmap_plot_config["POP_SPLIT_AROUSAL_WHISK"] = bool(
     plot_config.get(
         "HEATMAP_GROUP_BY_RESPONSE_SIGN",
@@ -1370,110 +1010,25 @@ heatmap_plot_config["POP_SPLIT_GROUP_ANY_EVENT"] = True
 heatmap_plot_config["POP_AROUSAL_GROUP_COL"] = ana_utils.response_sign_column_name("stimOn_times")
 heatmap_plot_config["POP_GROUP_COL_BY_EVENT"] = {
     "stimOn_times": ana_utils.response_sign_column_name("stimOn_times"),
-    "stimOn_times_task_all_right": ana_utils.response_sign_column_name("stimOn_times"),
-    "stimOn_times_task_all_left": ana_utils.response_sign_column_name("stimOn_times"),
-    "stimOn_times_task_top2_right": ana_utils.response_sign_column_name("stimOn_times"),
-    "stimOn_times_task_top2_left": ana_utils.response_sign_column_name("stimOn_times"),
-    "stimOn_times_task_zero_lr": ana_utils.response_sign_column_name("stimOn_times"),
-    "passive_visual_times": ana_utils.response_sign_column_name("passive_visual_times"),
-    "passive_visual_top2_right_times": ana_utils.response_sign_column_name("passive_visual_times"),
-    "passive_visual_top2_left_times": ana_utils.response_sign_column_name("passive_visual_times"),
+    "feedback_correct_times": ana_utils.response_sign_column_name("feedback_correct_times"),
+    "feedback_incorrect_times": ana_utils.response_sign_column_name("feedback_incorrect_times"),
+    "passive_tone_times": ana_utils.response_sign_column_name("passive_tone_times"),
+    "passive_valve_times": ana_utils.response_sign_column_name("passive_valve_times"),
+    "passive_noise_times": ana_utils.response_sign_column_name("passive_noise_times"),
 }
-task_heatmap_events = _select_task_response_heatmap_events(sl, top_n=2, round_decimals=6)
-passive_heatmap_events = _select_passive_response_heatmap_events(visual_TR, top_n=2, round_decimals=6)
-
 heatmap_event_specs = [
-    ("Task: all trials (Stim On)", "stimOn_times"),
-    (
-        "Task: all contrasts, right only",
-        "stimOn_times_task_all_right",
-    ),
-    (
-        "Task: all contrasts, left only",
-        "stimOn_times_task_all_left",
-    ),
-    (
-        "Task: top 2 contrasts, right only",
-        "stimOn_times_task_top2_right",
-    ),
-    (
-        "Task: top 2 contrasts, left only",
-        "stimOn_times_task_top2_left",
-    ),
-    (
-        "Task: zero contrast, both left/right",
-        "stimOn_times_task_zero_lr",
-    ),
-    (
-        "Passive: all non-zero contrasts",
-        "passive_visual_times",
-    ),
-    (
-        "Passive: top 2 contrasts, right only",
-        "passive_visual_top2_right_times",
-    ),
-    (
-        "Passive: top 2 contrasts, left only",
-        "passive_visual_top2_left_times",
-    ),
+    ("Stim On", "stimOn_times"),
+    ("Feedback Correct", "feedback_correct_times"),
+    ("Feedback Incorrect", "feedback_incorrect_times"),
+    ("Passive Tone", "passive_tone_times"),
+    ("Passive Valve", "passive_valve_times"),
+    ("Passive Noise", "passive_noise_times"),
 ]
-
-heatmap_event_times = {
-    "stimOn_times": events_by_name.get("stimOn_times", np.array([], dtype=float)),
-    "passive_visual_times": events_by_name.get("passive_visual_times", np.array([], dtype=float)),
-    "stimOn_times_task_all_right": task_heatmap_events["task_all_right_times"],
-    "stimOn_times_task_all_left": task_heatmap_events["task_all_left_times"],
-    "stimOn_times_task_top2_right": task_heatmap_events["task_top2_right_times"],
-    "stimOn_times_task_top2_left": task_heatmap_events["task_top2_left_times"],
-    "passive_visual_top2_right_times": passive_heatmap_events["passive_top2_right_times"],
-    "passive_visual_top2_left_times": passive_heatmap_events["passive_top2_left_times"],
-    "stimOn_times_task_zero_lr": task_heatmap_events["task_zero_lr_times"],
-}
-
-heatmap_sort_mode_by_event = {
-    "passive_visual_times": "delay:stimOn_times",
-    "stimOn_times_task_all_right": "delay:stimOn_times",
-    "stimOn_times_task_all_left": "delay:stimOn_times",
-    "stimOn_times_task_top2_right": "delay:stimOn_times",
-    "stimOn_times_task_top2_left": "delay:stimOn_times",
-    "passive_visual_top2_right_times": "delay:stimOn_times",
-    "passive_visual_top2_left_times": "delay:stimOn_times",
-    "stimOn_times_task_zero_lr": "delay:stimOn_times",
-}
-
-heatmap_delay_reference_by_event = {
-    "stimOn_times_task_all_right": "stimOn_times",
-    "stimOn_times_task_all_left": "stimOn_times",
-    "stimOn_times_task_top2_right": "stimOn_times",
-    "stimOn_times_task_top2_left": "stimOn_times",
-    "stimOn_times_task_zero_lr": "stimOn_times",
-    "passive_visual_top2_right_times": "passive_visual_times",
-    "passive_visual_top2_left_times": "passive_visual_times",
-}
-
-print(
-    "Heatmap subsets:",
-    {
-        "task_all_right_contrasts": task_heatmap_events["task_all_right_values"].tolist(),
-        "task_all_right_n": int(task_heatmap_events["task_all_right_times"].size),
-        "task_all_left_contrasts": task_heatmap_events["task_all_left_values"].tolist(),
-        "task_all_left_n": int(task_heatmap_events["task_all_left_times"].size),
-        "task_top2_right_contrasts": task_heatmap_events["task_top2_right_values"].tolist(),
-        "task_top2_right_n": int(task_heatmap_events["task_top2_right_times"].size),
-        "task_top2_left_contrasts": task_heatmap_events["task_top2_left_values"].tolist(),
-        "task_top2_left_n": int(task_heatmap_events["task_top2_left_times"].size),
-        "passive_top2_right_contrasts": passive_heatmap_events["passive_top2_right_values"].tolist(),
-        "passive_top2_right_n": int(passive_heatmap_events["passive_top2_right_times"].size),
-        "passive_top2_left_contrasts": passive_heatmap_events["passive_top2_left_values"].tolist(),
-        "passive_top2_left_n": int(passive_heatmap_events["passive_top2_left_times"].size),
-        "task_zero_lr_n": int(task_heatmap_events["task_zero_lr_times"].size),
-    },
-)
 
 event_sessions = {}
 for _label, event_name in heatmap_event_specs:
     event_sessions[event_name] = _build_event_session(
-        heatmap_event_times.get(event_name, np.array([])),
+        events_by_name.get(event_name, np.array([])),
         event_name,
     )
 
@@ -1504,9 +1059,6 @@ else:
             heatmap_plot_config,
             sort_mode=heatmap_sort_mode,
             region_name=region_name,
-            pid=pid,
-            sort_mode_by_event=heatmap_sort_mode_by_event,
-            delay_reference_event_by_name=heatmap_delay_reference_by_event,
             df_coupling=df_coupling_plot,
             df_coupling_task=df_coupling_task_plot,
             df_coupling_iti=df_coupling_iti_plot,
@@ -1524,11 +1076,39 @@ CORR_VARIABLE_SPECS = [
         "v2": "delay_stimOn_times_even",
     },
     {
-        "key": "delay_passive_visual",
-        "name": "Delay (Passive Visual)",
+        "key": "delay_feedback_correct",
+        "name": "Delay (Feedback Correct)",
         "df": "df_res",
-        "v1": "delay_passive_visual_times_odd",
-        "v2": "delay_passive_visual_times_even",
+        "v1": "delay_feedback_correct_times_odd",
+        "v2": "delay_feedback_correct_times_even",
+    },
+    {
+        "key": "delay_feedback_incorrect",
+        "name": "Delay (Feedback Incorrect)",
+        "df": "df_res",
+        "v1": "delay_feedback_incorrect_times_odd",
+        "v2": "delay_feedback_incorrect_times_even",
+    },
+    {
+        "key": "delay_passive_tone",
+        "name": "Delay (Passive Tone)",
+        "df": "df_res",
+        "v1": "delay_passive_tone_times_odd",
+        "v2": "delay_passive_tone_times_even",
+    },
+    {
+        "key": "delay_passive_noise",
+        "name": "Delay (Passive Noise)",
+        "df": "df_res",
+        "v1": "delay_passive_noise_times_odd",
+        "v2": "delay_passive_noise_times_even",
+    },
+    {
+        "key": "delay_passive_valve",
+        "name": "Delay (Passive Valve)",
+        "df": "df_res",
+        "v1": "delay_passive_valve_times_odd",
+        "v2": "delay_passive_valve_times_even",
     },
     {
         "key": "stpr_delay_spont",
@@ -1993,9 +1573,9 @@ else:
             show_fig(fig_corr)
 
 
-# %% All PIDs with VISp
-# %% All PIDs with VISp: discover PIDs using the 03-style region search
-ALL_PID_TARGET_REGION = TARGET_REGION
+# %% All PIDs with AUDp
+# %% All PIDs with AUDp: discover PIDs using the 03-style region search
+ALL_PID_TARGET_REGION = "AUDp"
 ALL_PID_TAG = "2025_Q3_IBL_et_al_BWM"
 _all_pid_label_min_raw = CONFIG_CALC.get("CALC_LABEL_MIN", 0.5)
 ALL_PID_LABEL_MIN = 0.5 if _all_pid_label_min_raw is None else float(_all_pid_label_min_raw)
@@ -2031,7 +1611,7 @@ def _get_pids_for_regions_like_03(one_client, regions, tag):
     return list(dict.fromkeys(all_pids))
 
 
-def _pid_has_passive_visual_part(pid_value):
+def _pid_has_passive_auditory_part(pid_value):
     eid_pid = None
     last_pid2eid_error = None
     for one_client in (one, one_remote, one_local):
@@ -2046,27 +1626,22 @@ def _pid_has_passive_visual_part(pid_value):
     if eid_pid is None:
         return (
             False,
-            {"visual_nonzero": 0},
+            {"tone": 0, "noise": 0, "valve": 0},
             f"pid2eid failed: {last_pid2eid_error}",
         )
 
     try:
-        visual_tr_pid, _ = load_task_replay_datasets(
+        _visual_tr_pid, auditory_tr_pid = load_task_replay_datasets(
             eid_pid,
             one_local,
             one_remote,
             allow_remote=ALLOW_REMOTE_FALLBACK,
         )
-        passive_visual_times_pid, passive_visual_contrasts_pid = extract_passive_times_and_contrast(
-            visual_tr_pid
-        )
-        has_passive, counts = _has_passive_visual_part(
-            passive_visual_times_pid,
-            passive_visual_contrasts_pid,
-        )
+        passive_auditory_events_pid = build_passive_auditory_event_times(auditory_tr_pid)
+        has_passive, counts = _has_passive_auditory_part(passive_auditory_events_pid)
         return has_passive, counts, None
     except Exception as exc:
-        return False, {"visual_nonzero": 0}, str(exc)
+        return False, {"tone": 0, "noise": 0, "valve": 0}, str(exc)
 
 
 pid_query_one = one_remote if "one_remote" in globals() and one_remote is not None else one
@@ -2090,7 +1665,7 @@ all_region_pids = []
 pids_without_passive = []
 passive_check_failures = []
 for pid_value in candidate_region_pids:
-    has_passive, passive_counts, err_msg = _pid_has_passive_visual_part(pid_value)
+    has_passive, passive_counts, err_msg = _pid_has_passive_auditory_part(pid_value)
     if err_msg is not None:
         passive_check_failures.append({"pid": pid_value, "error": err_msg})
         continue
@@ -2100,21 +1675,23 @@ for pid_value in candidate_region_pids:
         pids_without_passive.append(
             {
                 "pid": pid_value,
-                "visual_nonzero_events": passive_counts.get("visual_nonzero", 0),
+                "tone_events": passive_counts.get("tone", 0),
+                "noise_events": passive_counts.get("noise", 0),
+                "valve_events": passive_counts.get("valve", 0),
             }
         )
 print(
-    f"PIDs with passive visual data: {len(all_region_pids)}/{len(candidate_region_pids)}."
+    f"PIDs with passive auditory data: {len(all_region_pids)}/{len(candidate_region_pids)}."
 )
 if pids_without_passive:
-    print(f"Skipped PIDs without passive visual events: {len(pids_without_passive)}")
+    print(f"Skipped PIDs without passive auditory events: {len(pids_without_passive)}")
     display(pd.DataFrame(pids_without_passive).head(20))
 if passive_check_failures:
     print(f"PIDs skipped due to passive-data check errors: {len(passive_check_failures)}")
     display(pd.DataFrame(passive_check_failures).head(20))
 
 
-# %% All PIDs with VISp: per-PID calculations, region filter, and merge neurons
+# %% All PIDs with AUDp: per-PID calculations, region filter, and merge neurons
 def _compute_region_units_for_pid(pid_value, region_prefix, label_min):
     ssl_pid, spikes_pid, clusters_pid, sl_pid = load_session_data(
         pid_value,
@@ -2129,25 +1706,19 @@ def _compute_region_units_for_pid(pid_value, region_prefix, label_min):
     if eid_pid is None:
         eid_pid, _ = one.pid2eid(pid_value)
 
-    visual_tr_pid, _ = load_task_replay_datasets(
+    visual_tr_pid, auditory_tr_pid = load_task_replay_datasets(
         eid_pid,
         one_local,
         one_remote,
         allow_remote=ALLOW_REMOTE_FALLBACK,
     )
-    passive_visual_times_pid, passive_visual_contrasts_pid = extract_passive_times_and_contrast(
-        visual_tr_pid
-    )
-    has_passive_pid, _passive_counts_pid = _has_passive_visual_part(
-        passive_visual_times_pid,
-        passive_visual_contrasts_pid,
-    )
+    passive_auditory_events_pid = build_passive_auditory_event_times(auditory_tr_pid)
+    has_passive_pid, _passive_counts_pid = _has_passive_auditory_part(passive_auditory_events_pid)
     if not has_passive_pid:
         return pd.DataFrame()
     events_by_name_pid, contrasts_by_name_pid, trial_idx_by_name_pid = _build_delay_event_inputs(
         sl_pid,
-        passive_visual_times_pid,
-        passive_visual_contrasts_pid,
+        passive_auditory_events_pid,
     )
 
     cluster_ids_pid, cid_to_idx_pid = build_cluster_id_map(clusters_pid)
@@ -2184,25 +1755,22 @@ def _compute_region_units_for_pid(pid_value, region_prefix, label_min):
 
     delay_config_pid = dict(CONFIG_CALC)
     delay_config_pid["EVENT_NAMES"] = list(DELAY_EVENT_NAMES)
-    region_cid_to_idx_pid = {
-        int(cid): cid_to_idx_pid[int(cid)]
-        for cid in region_cluster_ids
-        if int(cid) in cid_to_idx_pid
-    }
     df_res_pid = ana_utils.calculate_event_delays(
         spikes_pid,
         clusters_pid,
         cluster_acronyms_pid,
         events_by_name_pid,
         delay_config_pid,
-        region_cid_to_idx_pid,
+        cid_to_idx_pid,
         contrasts_by_name=contrasts_by_name_pid,
         trial_idx_by_name=trial_idx_by_name_pid,
         include_splits=True,
-        output_path=path_data_processed / f"{pid_value}_passive_visual_delay_results.csv",
+        output_path=path_data_processed / f"{pid_value}_passive_auditory_delay_results.csv",
     )
     passive_delay_cols_pid = [
-        ana_utils.delay_column_name("passive_visual_times"),
+        ana_utils.delay_column_name("passive_tone_times"),
+        ana_utils.delay_column_name("passive_noise_times"),
+        ana_utils.delay_column_name("passive_valve_times"),
     ]
     for col in passive_delay_cols_pid:
         if col not in df_res_pid.columns:
@@ -2447,7 +2015,7 @@ if all_pid_failures:
     display(fail_df.head(20))
 
 
-# %% All PIDs with VISp: correlation matrices for all combined neurons
+# %% All PIDs with AUDp: correlation matrices for all combined neurons
 if all_region_units.empty:
     print("No combined neurons available for correlation matrices.")
 else:
@@ -2583,7 +2151,7 @@ else:
         show_fig(fig_s_all)
 
 
-# %% All PIDs with VISp: variable correlation scatter for all combined neurons
+# %% All PIDs with AUDp: variable correlation scatter for all combined neurons
 if all_region_units.empty:
     print("No combined neurons available for variable correlation scatter.")
 else:
@@ -2758,15 +2326,19 @@ else:
             show_fig(fig_corr_all)
 
 
-# %% All PIDs with VISp: most variable visual-delay neurons vs stPR delay sign
+# %% All PIDs with AUDp: most variable auditory-delay neurons vs stPR delay sign
 if all_region_units.empty:
-    print("No combined neurons available for visual variability analysis.")
+    print("No combined neurons available for auditory variability analysis.")
 else:
     delay_cols_active = [
         "Delay (Stim On)",
+        "Delay (Feedback Correct)",
+        "Delay (Feedback Incorrect)",
     ]
     delay_cols_passive = [
-        "Delay (Passive Visual)",
+        "Delay (Passive Tone)",
+        "Delay (Passive Noise)",
+        "Delay (Passive Valve)",
     ]
     delay_cols_all = delay_cols_active + delay_cols_passive
     stpr_delay_cols = [
@@ -2856,7 +2428,7 @@ else:
             top_pct = int(round((1.0 - TOP_QUANTILE) * 100))
 
             print(
-                "Delay columns used for visual variability: "
+                "Delay columns used for auditory variability: "
                 + ", ".join(available_delay_cols)
             )
             print(
@@ -2947,7 +2519,7 @@ else:
                 )
                 fig_pos_frac.update_layout(
                     title=(
-                        f"Positive stPR Delay Fraction | Most Variable Visual-Delay Neurons "
+                        f"Positive stPR Delay Fraction | Most Variable Auditory-Delay Neurons "
                         f"(Region {ALL_PID_TARGET_REGION})"
                     ),
                     barmode="group",
@@ -3043,7 +2615,7 @@ else:
 
                 fig_scatter.update_layout(
                     title=(
-                        "Visual-Delay Variability vs stPR Delay "
+                        "Auditory-Delay Variability vs stPR Delay "
                         f"| Region {ALL_PID_TARGET_REGION}"
                     ),
                     template=plot_config.get("PLOTLY_TEMPLATE", "plotly_white"),
@@ -3055,15 +2627,19 @@ else:
                 show_fig(fig_scatter)
 
 
-# %% All PIDs with VISp: most variable visual-delay neurons vs stPR strength sign
+# %% All PIDs with AUDp: most variable auditory-delay neurons vs stPR strength sign
 if all_region_units.empty:
-    print("No combined neurons available for visual variability vs stPR strength analysis.")
+    print("No combined neurons available for auditory variability vs stPR strength analysis.")
 else:
     delay_cols_active_strength = [
         "Delay (Stim On)",
+        "Delay (Feedback Correct)",
+        "Delay (Feedback Incorrect)",
     ]
     delay_cols_passive_strength = [
-        "Delay (Passive Visual)",
+        "Delay (Passive Tone)",
+        "Delay (Passive Noise)",
+        "Delay (Passive Valve)",
     ]
     delay_cols_all_strength = delay_cols_active_strength + delay_cols_passive_strength
     stpr_strength_cols = [
@@ -3167,7 +2743,7 @@ else:
             top_pct_strength = int(round((1.0 - TOP_QUANTILE_STRENGTH) * 100))
 
             print(
-                "Delay columns used for visual variability: "
+                "Delay columns used for auditory variability: "
                 + ", ".join(available_delay_cols_strength)
             )
             print(
@@ -3268,7 +2844,7 @@ else:
                 )
                 fig_pos_frac_strength.update_layout(
                     title=(
-                        "Positive stPR Strength Fraction | Most Variable Visual-Delay Neurons "
+                        "Positive stPR Strength Fraction | Most Variable Auditory-Delay Neurons "
                         f"(Region {ALL_PID_TARGET_REGION})"
                     ),
                     barmode="group",
@@ -3372,7 +2948,7 @@ else:
 
                 fig_scatter_strength.update_layout(
                     title=(
-                        "Visual-Delay Variability vs stPR Strength "
+                        "Auditory-Delay Variability vs stPR Strength "
                         f"| Region {ALL_PID_TARGET_REGION}"
                     ),
                     template=plot_config.get("PLOTLY_TEMPLATE", "plotly_white"),
@@ -3391,1004 +2967,3 @@ else:
 
 
 # %% End of notebook
-
-# %% Soloist/Choister hypothesis: split-safe role setup
-SOLOIST_Q_LOW = 0.33
-SOLOIST_Q_HIGH = 0.67
-ROLE_ORDER = ["Soloist", "Intermediate", "Choister"]
-
-
-def _quantile_role_labels(values, q_low=SOLOIST_Q_LOW, q_high=SOLOIST_Q_HIGH):
-    arr = np.asarray(values, dtype=float)
-    out = np.full(arr.shape, np.nan, dtype=object)
-    finite_mask = np.isfinite(arr)
-    if finite_mask.sum() == 0:
-        return out
-
-    finite_vals = arr[finite_mask]
-    ql = float(np.nanquantile(finite_vals, q_low))
-    qh = float(np.nanquantile(finite_vals, q_high))
-
-    role_vals = np.full(finite_vals.shape, "Intermediate", dtype=object)
-    if np.isfinite(ql) and np.isfinite(qh) and qh > ql:
-        role_vals[finite_vals <= ql] = "Soloist"
-        role_vals[finite_vals >= qh] = "Choister"
-    else:
-        ranks = pd.Series(finite_vals).rank(method="average", pct=True).to_numpy(dtype=float)
-        role_vals[ranks <= q_low] = "Soloist"
-        role_vals[ranks >= q_high] = "Choister"
-
-    out[finite_mask] = role_vals
-    return out
-
-
-ROLE_COLS = {
-    "spont_h1": "__stpr_strength_spont_h1",
-    "spont_h2": "__stpr_strength_spont_h2",
-    "task_h1": "__stpr_strength_task_h1",
-    "task_h2": "__stpr_strength_task_h2",
-    "iti_h1": "__stpr_strength_iti_h1",
-    "iti_h2": "__stpr_strength_iti_h2",
-}
-
-if all_region_units.empty:
-    print("No combined neurons available for soloist/choister analysis.")
-else:
-    missing_role_cols = [col for col in ROLE_COLS.values() if col not in all_region_units.columns]
-    if missing_role_cols:
-        print("Missing split-half stPR strength columns:", missing_role_cols)
-    else:
-        keep_cols = ["unit_id", "pid", "cluster_id", "region", *ROLE_COLS.values()]
-        df_roles = all_region_units[keep_cols].copy()
-
-        # Role assignment from spontaneous H1 (defining split), then evaluate on H2.
-        df_roles["role_spont_h1"] = _quantile_role_labels(df_roles[ROLE_COLS["spont_h1"]])
-        df_roles["role_spont_h2"] = _quantile_role_labels(df_roles[ROLE_COLS["spont_h2"]])
-        df_roles["role_task_h2"] = _quantile_role_labels(df_roles[ROLE_COLS["task_h2"]])
-        df_roles["role_iti_h2"] = _quantile_role_labels(df_roles[ROLE_COLS["iti_h2"]])
-
-        role_to_idx = {"Soloist": 0, "Intermediate": 1, "Choister": 2}
-        src_idx = np.asarray([role_to_idx.get(v, np.nan) for v in df_roles["role_spont_h1"]], dtype=float)
-        task_idx = np.asarray([role_to_idx.get(v, np.nan) for v in df_roles["role_task_h2"]], dtype=float)
-        iti_idx = np.asarray([role_to_idx.get(v, np.nan) for v in df_roles["role_iti_h2"]], dtype=float)
-        df_roles["role_shift_task_h2_vs_spont_h1"] = task_idx - src_idx
-        df_roles["role_shift_iti_h2_vs_spont_h1"] = iti_idx - src_idx
-
-        print(
-            "Role quantile cutoffs (Spont H1): "
-            f"q{int(SOLOIST_Q_LOW * 100)} / q{int(SOLOIST_Q_HIGH * 100)} "
-            f"| n={len(df_roles)} neurons | PIDs={df_roles['pid'].nunique()}"
-        )
-        print("Role counts from Spont H1:")
-        print(df_roles["role_spont_h1"].value_counts(dropna=False))
-        display(
-            df_roles[
-                [
-                    "unit_id",
-                    "pid",
-                    "region",
-                    ROLE_COLS["spont_h1"],
-                    ROLE_COLS["spont_h2"],
-                    ROLE_COLS["task_h2"],
-                    ROLE_COLS["iti_h2"],
-                    "role_spont_h1",
-                    "role_task_h2",
-                    "role_iti_h2",
-                    "role_shift_task_h2_vs_spont_h1",
-                    "role_shift_iti_h2_vs_spont_h1",
-                ]
-            ]
-            .head(20)
-            .reset_index(drop=True)
-        )
-
-
-# %% Soloist/Choister transitions: Spont role (H1) -> Task/ITI role (H2)
-def _transition_count_and_fraction(df, src_col, dst_col, order):
-    tmp = df[[src_col, dst_col]].dropna().copy()
-    if tmp.empty:
-        return None, None
-    ct = pd.crosstab(tmp[src_col], tmp[dst_col]).reindex(index=order, columns=order, fill_value=0)
-    row_sums = ct.sum(axis=1).replace(0, np.nan)
-    frac = ct.div(row_sums, axis=0)
-    return ct, frac
-
-
-if "df_roles" not in globals() or df_roles.empty:
-    print("No role table available for transition analysis.")
-else:
-    transitions = [
-        ("Task", "role_task_h2"),
-        ("ITI", "role_iti_h2"),
-    ]
-    fig_trans = make_subplots(
-        rows=1,
-        cols=len(transitions),
-        subplot_titles=[
-            "Spont H1 -> Task H2 role transition",
-            "Spont H1 -> ITI H2 role transition",
-        ],
-        horizontal_spacing=0.12,
-    )
-
-    for col_idx, (label, dst_col) in enumerate(transitions, start=1):
-        ct, frac = _transition_count_and_fraction(df_roles, "role_spont_h1", dst_col, ROLE_ORDER)
-        if ct is None or frac is None:
-            continue
-
-        z = frac.to_numpy(dtype=float)
-        text = np.empty(z.shape, dtype=object)
-        for i in range(z.shape[0]):
-            for j in range(z.shape[1]):
-                pct_val = z[i, j]
-                n_cell = int(ct.iat[i, j])
-                pct_text = "nan" if not np.isfinite(pct_val) else f"{100.0 * pct_val:.1f}%"
-                text[i, j] = f"{pct_text}<br>(n={n_cell})"
-
-        fig_trans.add_trace(
-            go.Heatmap(
-                z=z,
-                x=ROLE_ORDER,
-                y=ROLE_ORDER,
-                zmin=0,
-                zmax=1,
-                colorscale="YlGnBu",
-                text=text,
-                texttemplate="%{text}",
-                hovertemplate="From=%{y}<br>To=%{x}<br>%{text}<extra></extra>",
-                showscale=(col_idx == len(transitions)),
-                colorbar=dict(title="Row fraction", tickformat=".0%") if col_idx == len(transitions) else None,
-            ),
-            row=1,
-            col=col_idx,
-        )
-        fig_trans.update_xaxes(title_text=f"{label} role (H2)", row=1, col=col_idx)
-        fig_trans.update_yaxes(title_text="Spont role (H1)", row=1, col=col_idx)
-
-        print(f"{label} role transition counts (rows: Spont H1, cols: {label} H2):")
-        display(ct)
-
-    fig_trans.update_layout(
-        title=(
-            f"Soloist/Choister Transitions | Region {ALL_PID_TARGET_REGION} | "
-            "Split-safe (roles from Spont H1, evaluated on H2)"
-        ),
-        template=plot_config.get("PLOTLY_TEMPLATE", "plotly_white"),
-        width=max(980, 520 * len(transitions)),
-        height=500,
-        margin=dict(l=70, r=40, t=90, b=70),
-    )
-    show_fig(fig_trans)
-
-
-# %% Soloist/Choister trend plots: quantile trend + grouped distributions
-def _finite_quantile(vals, q):
-    arr = np.asarray(vals, dtype=float)
-    arr = arr[np.isfinite(arr)]
-    if arr.size == 0:
-        return np.nan
-    return float(np.nanquantile(arr, q))
-
-
-if "df_roles" not in globals() or df_roles.empty:
-    print("No role table available for trend plots.")
-else:
-    role_color_map = {
-        "Soloist": "#1f77b4",
-        "Intermediate": "#7f7f7f",
-        "Choister": "#d62728",
-    }
-    metric_specs = [
-        (ROLE_COLS["spont_h2"], "Spont strength (H2)", "#2ca02c"),
-        (ROLE_COLS["task_h2"], "Task strength (H2)", "#1f77b4"),
-        (ROLE_COLS["iti_h2"], "ITI strength (H2)", "#ff7f0e"),
-    ]
-
-    trend_df = df_roles[
-        [
-            "unit_id",
-            "pid",
-            "role_spont_h1",
-            ROLE_COLS["spont_h1"],
-            ROLE_COLS["spont_h2"],
-            ROLE_COLS["task_h2"],
-            ROLE_COLS["iti_h2"],
-        ]
-    ].copy()
-    trend_df = trend_df[np.isfinite(trend_df[ROLE_COLS["spont_h1"]].to_numpy(dtype=float))].copy()
-
-    unique_x = np.unique(np.round(trend_df[ROLE_COLS["spont_h1"]].to_numpy(dtype=float), 12))
-    n_bins = int(np.clip(min(10, len(unique_x)), 3, 10))
-    trend_df["spont_h1_bin"] = pd.qcut(
-        trend_df[ROLE_COLS["spont_h1"]],
-        q=n_bins,
-        duplicates="drop",
-    )
-
-    summary = (
-        trend_df.groupby("spont_h1_bin", observed=False)
-        .apply(
-            lambda g: pd.Series(
-                {
-                    "x_center": float(np.nanmedian(g[ROLE_COLS["spont_h1"]].to_numpy(dtype=float))),
-                    "n": int(len(g)),
-                    "spont_med": float(np.nanmedian(g[ROLE_COLS["spont_h2"]].to_numpy(dtype=float))),
-                    "spont_q25": _finite_quantile(g[ROLE_COLS["spont_h2"]], 0.25),
-                    "spont_q75": _finite_quantile(g[ROLE_COLS["spont_h2"]], 0.75),
-                    "task_med": float(np.nanmedian(g[ROLE_COLS["task_h2"]].to_numpy(dtype=float))),
-                    "task_q25": _finite_quantile(g[ROLE_COLS["task_h2"]], 0.25),
-                    "task_q75": _finite_quantile(g[ROLE_COLS["task_h2"]], 0.75),
-                    "iti_med": float(np.nanmedian(g[ROLE_COLS["iti_h2"]].to_numpy(dtype=float))),
-                    "iti_q25": _finite_quantile(g[ROLE_COLS["iti_h2"]], 0.25),
-                    "iti_q75": _finite_quantile(g[ROLE_COLS["iti_h2"]], 0.75),
-                }
-            )
-        )
-        .reset_index(drop=True)
-        .sort_values("x_center")
-        .reset_index(drop=True)
-    )
-    display(summary)
-
-    fig_trend = go.Figure()
-    for col_key, label, color in metric_specs:
-        key = (
-            "spont"
-            if col_key == ROLE_COLS["spont_h2"]
-            else ("task" if col_key == ROLE_COLS["task_h2"] else "iti")
-        )
-        x_vals = summary["x_center"].to_numpy(dtype=float)
-        y_med = summary[f"{key}_med"].to_numpy(dtype=float)
-        y_q25 = summary[f"{key}_q25"].to_numpy(dtype=float)
-        y_q75 = summary[f"{key}_q75"].to_numpy(dtype=float)
-        n_vals = summary["n"].to_numpy(dtype=int)
-        valid = np.isfinite(x_vals) & np.isfinite(y_med)
-        if not np.any(valid):
-            continue
-        fig_trend.add_trace(
-            go.Scatter(
-                x=x_vals[valid],
-                y=y_med[valid],
-                mode="lines+markers",
-                name=label,
-                line=dict(color=color, width=3),
-                marker=dict(size=8),
-                error_y=dict(
-                    type="data",
-                    visible=True,
-                    array=(y_q75 - y_med)[valid],
-                    arrayminus=(y_med - y_q25)[valid],
-                ),
-                customdata=n_vals[valid].reshape(-1, 1),
-                hovertemplate=(
-                    "Spont H1 bin center: %{x:.3f}<br>"
-                    "Median strength: %{y:.3f}<br>"
-                    "Bin n: %{customdata[0]}<extra></extra>"
-                ),
-            )
-        )
-
-    fig_trend.update_layout(
-        title=(
-            f"Strength Trends Across Spont-H1 Quantiles | Region {ALL_PID_TARGET_REGION} "
-            "| median with IQR"
-        ),
-        template=plot_config.get("PLOTLY_TEMPLATE", "plotly_white"),
-        width=980,
-        height=520,
-        margin=dict(l=70, r=40, t=90, b=70),
-        xaxis_title="Spont stPR strength (H1) quantile-bin center",
-        yaxis_title="stPR strength (H2)",
-    )
-    show_fig(fig_trend)
-
-    fig_box = go.Figure()
-    for col_key, label, color in metric_specs:
-        box_df = df_roles[["role_spont_h1", col_key]].copy()
-        box_df = box_df[
-            box_df["role_spont_h1"].isin(ROLE_ORDER)
-            & np.isfinite(box_df[col_key].to_numpy(dtype=float))
-        ].copy()
-        if box_df.empty:
-            continue
-        fig_box.add_trace(
-            go.Box(
-                x=box_df["role_spont_h1"],
-                y=box_df[col_key].to_numpy(dtype=float),
-                name=label,
-                marker_color=color,
-                boxmean="sd",
-                jitter=0.2,
-                pointpos=0,
-                marker=dict(size=4, opacity=0.35),
-                hovertemplate=(
-                    "Spont-H1 role: %{x}<br>"
-                    "Strength: %{y:.3f}<extra></extra>"
-                ),
-            )
-        )
-
-    fig_box.update_layout(
-        title=(
-            f"Group Distributions by Spont-H1 Role | Region {ALL_PID_TARGET_REGION} "
-            "| Split-safe evaluation on H2"
-        ),
-        template=plot_config.get("PLOTLY_TEMPLATE", "plotly_white"),
-        width=980,
-        height=520,
-        margin=dict(l=70, r=40, t=90, b=70),
-        xaxis=dict(
-            title="Role from Spont H1",
-            categoryorder="array",
-            categoryarray=ROLE_ORDER,
-        ),
-        yaxis=dict(title="stPR strength (H2)"),
-    )
-    show_fig(fig_box)
-
-
-# %% Nonlinearity test: linear vs monotonic (isotonic) fits
-def _aggregate_unique_xy(x, y):
-    order = np.argsort(x)
-    x_sorted = np.asarray(x, dtype=float)[order]
-    y_sorted = np.asarray(y, dtype=float)[order]
-    x_unique, inv = np.unique(x_sorted, return_inverse=True)
-    y_sum = np.zeros(len(x_unique), dtype=float)
-    w_sum = np.zeros(len(x_unique), dtype=float)
-    np.add.at(y_sum, inv, y_sorted)
-    np.add.at(w_sum, inv, 1.0)
-    y_mean = y_sum / np.maximum(w_sum, 1.0)
-    return x_unique, y_mean, w_sum
-
-
-def _pav_increasing(y, w):
-    y = np.asarray(y, dtype=float)
-    w = np.asarray(w, dtype=float)
-    if y.size == 0:
-        return y
-
-    levels = []
-    weights = []
-    lengths = []
-    for idx in range(y.size):
-        levels.append(float(y[idx]))
-        weights.append(float(w[idx]))
-        lengths.append(1)
-        while len(levels) >= 2 and levels[-2] > levels[-1]:
-            new_weight = weights[-2] + weights[-1]
-            new_level = (
-                levels[-2] * weights[-2] + levels[-1] * weights[-1]
-            ) / new_weight
-            levels[-2] = float(new_level)
-            weights[-2] = float(new_weight)
-            lengths[-2] = lengths[-2] + lengths[-1]
-            levels.pop()
-            weights.pop()
-            lengths.pop()
-
-    y_iso = np.empty(y.size, dtype=float)
-    start = 0
-    for level_val, length_val in zip(levels, lengths):
-        end = start + int(length_val)
-        y_iso[start:end] = float(level_val)
-        start = end
-    return y_iso
-
-
-def _fit_isotonic_increasing(x, y):
-    x_unique, y_mean, w_sum = _aggregate_unique_xy(x, y)
-    y_iso = _pav_increasing(y_mean, w_sum)
-    return x_unique, y_iso
-
-
-def _predict_isotonic(x_new, x_unique, y_iso):
-    if len(x_unique) == 0:
-        return np.full_like(np.asarray(x_new, dtype=float), np.nan, dtype=float)
-    return np.interp(
-        np.asarray(x_new, dtype=float),
-        np.asarray(x_unique, dtype=float),
-        np.asarray(y_iso, dtype=float),
-        left=float(y_iso[0]),
-        right=float(y_iso[-1]),
-    )
-
-
-def _r2_np(y_true, y_pred):
-    y_true = np.asarray(y_true, dtype=float)
-    y_pred = np.asarray(y_pred, dtype=float)
-    mask = np.isfinite(y_true) & np.isfinite(y_pred)
-    if int(mask.sum()) < 2:
-        return np.nan
-    yt = y_true[mask]
-    yp = y_pred[mask]
-    ss_res = float(np.sum((yt - yp) ** 2))
-    ss_tot = float(np.sum((yt - np.mean(yt)) ** 2))
-    if ss_tot <= 0:
-        return np.nan
-    return 1.0 - (ss_res / ss_tot)
-
-
-def _mae_np(y_true, y_pred):
-    y_true = np.asarray(y_true, dtype=float)
-    y_pred = np.asarray(y_pred, dtype=float)
-    mask = np.isfinite(y_true) & np.isfinite(y_pred)
-    if int(mask.sum()) < 1:
-        return np.nan
-    return float(np.mean(np.abs(y_true[mask] - y_pred[mask])))
-
-
-def _cv_linear_vs_isotonic(x, y, n_splits=5, seed=0):
-    x = np.asarray(x, dtype=float)
-    y = np.asarray(y, dtype=float)
-    mask = np.isfinite(x) & np.isfinite(y)
-    x = x[mask]
-    y = y[mask]
-    n = len(x)
-    if n < 12:
-        return pd.DataFrame()
-
-    n_splits = int(min(max(3, n_splits), n))
-    rng = np.random.default_rng(seed)
-    idx_perm = rng.permutation(n)
-    folds = np.array_split(idx_perm, n_splits)
-
-    rows = []
-    for fold_idx in range(len(folds)):
-        test_idx = folds[fold_idx]
-        if len(test_idx) == 0:
-            continue
-        train_mask = np.ones(n, dtype=bool)
-        train_mask[test_idx] = False
-        if int(train_mask.sum()) < 3:
-            continue
-
-        x_train = x[train_mask]
-        y_train = y[train_mask]
-        x_test = x[test_idx]
-        y_test = y[test_idx]
-        if np.nanstd(x_train) <= 0:
-            continue
-
-        slope, intercept = np.polyfit(x_train, y_train, 1)
-        y_pred_lin = slope * x_test + intercept
-
-        x_unique, y_iso = _fit_isotonic_increasing(x_train, y_train)
-        y_pred_iso = _predict_isotonic(x_test, x_unique, y_iso)
-
-        rows.append(
-            {
-                "fold": fold_idx,
-                "n_train": int(train_mask.sum()),
-                "n_test": int(len(test_idx)),
-                "r2_linear": _r2_np(y_test, y_pred_lin),
-                "r2_isotonic": _r2_np(y_test, y_pred_iso),
-                "mae_linear": _mae_np(y_test, y_pred_lin),
-                "mae_isotonic": _mae_np(y_test, y_pred_iso),
-            }
-        )
-    return pd.DataFrame(rows)
-
-
-if "df_roles" not in globals() or df_roles.empty:
-    print("No role table available for nonlinear-fit analysis.")
-else:
-    x_col = ROLE_COLS["spont_h1"]
-    fit_specs = [
-        ("Task", ROLE_COLS["task_h2"]),
-        ("ITI", ROLE_COLS["iti_h2"]),
-    ]
-    role_color_map = {
-        "Soloist": "#1f77b4",
-        "Intermediate": "#7f7f7f",
-        "Choister": "#d62728",
-    }
-
-    fit_summary_rows = []
-    fig_fit = make_subplots(
-        rows=1,
-        cols=len(fit_specs),
-        subplot_titles=[f"Spont H1 vs {label} H2" for label, _ in fit_specs],
-        horizontal_spacing=0.1,
-    )
-
-    for col_idx, (label, y_col) in enumerate(fit_specs, start=1):
-        pair_df = df_roles[[x_col, y_col, "role_spont_h1"]].copy()
-        finite_mask = np.isfinite(pair_df[x_col].to_numpy(dtype=float)) & np.isfinite(
-            pair_df[y_col].to_numpy(dtype=float)
-        )
-        pair_df = pair_df.loc[finite_mask].reset_index(drop=True)
-        if pair_df.empty:
-            continue
-
-        x_vals = pair_df[x_col].to_numpy(dtype=float)
-        y_vals = pair_df[y_col].to_numpy(dtype=float)
-        r_p, n_p = _pearsonr_with_n(x_vals, y_vals, min_n=3)
-        r_s, n_s = _spearmanr_with_n(x_vals, y_vals, min_n=3)
-
-        cv_df = _cv_linear_vs_isotonic(x_vals, y_vals, n_splits=5, seed=41 + col_idx)
-        cv_r2_lin = float(np.nanmean(cv_df["r2_linear"])) if not cv_df.empty else np.nan
-        cv_r2_iso = float(np.nanmean(cv_df["r2_isotonic"])) if not cv_df.empty else np.nan
-        cv_mae_lin = float(np.nanmean(cv_df["mae_linear"])) if not cv_df.empty else np.nan
-        cv_mae_iso = float(np.nanmean(cv_df["mae_isotonic"])) if not cv_df.empty else np.nan
-
-        fit_summary_rows.append(
-            {
-                "target": f"{label} H2",
-                "n": int(len(pair_df)),
-                "pearson_r": r_p,
-                "spearman_rho": r_s,
-                "cv_r2_linear": cv_r2_lin,
-                "cv_r2_isotonic": cv_r2_iso,
-                "cv_r2_gain_iso_minus_linear": cv_r2_iso - cv_r2_lin
-                if np.isfinite(cv_r2_lin) and np.isfinite(cv_r2_iso)
-                else np.nan,
-                "cv_mae_linear": cv_mae_lin,
-                "cv_mae_isotonic": cv_mae_iso,
-                "cv_mae_gain_linear_minus_iso": cv_mae_lin - cv_mae_iso
-                if np.isfinite(cv_mae_lin) and np.isfinite(cv_mae_iso)
-                else np.nan,
-            }
-        )
-
-        for role_name in ROLE_ORDER:
-            role_df = pair_df[pair_df["role_spont_h1"] == role_name].copy()
-            if role_df.empty:
-                continue
-            fig_fit.add_trace(
-                go.Scatter(
-                    x=role_df[x_col].to_numpy(dtype=float),
-                    y=role_df[y_col].to_numpy(dtype=float),
-                    mode="markers",
-                    name=role_name,
-                    legendgroup=role_name,
-                    showlegend=(col_idx == 1),
-                    marker=dict(
-                        size=6,
-                        opacity=0.45,
-                        color=role_color_map.get(role_name, "gray"),
-                    ),
-                    hovertemplate=(
-                        "Role (Spont H1): %{fullData.name}<br>"
-                        "Spont H1 strength: %{x:.3f}<br>"
-                        f"{label} H2 strength: %{{y:.3f}}<extra></extra>"
-                    ),
-                ),
-                row=1,
-                col=col_idx,
-            )
-
-        x_line = np.linspace(float(np.nanmin(x_vals)), float(np.nanmax(x_vals)), 300)
-        slope, intercept = np.polyfit(x_vals, y_vals, 1)
-        y_line_lin = slope * x_line + intercept
-        x_unique, y_iso = _fit_isotonic_increasing(x_vals, y_vals)
-        y_line_iso = _predict_isotonic(x_line, x_unique, y_iso)
-
-        fig_fit.add_trace(
-            go.Scatter(
-                x=x_line,
-                y=y_line_lin,
-                mode="lines",
-                name="Linear fit",
-                legendgroup=f"fit_{label}",
-                showlegend=(col_idx == 1),
-                line=dict(color="black", width=2),
-                hovertemplate="Linear fit<extra></extra>",
-            ),
-            row=1,
-            col=col_idx,
-        )
-        fig_fit.add_trace(
-            go.Scatter(
-                x=x_line,
-                y=y_line_iso,
-                mode="lines",
-                name="Monotonic fit (isotonic)",
-                legendgroup=f"fit_{label}",
-                showlegend=(col_idx == 1),
-                line=dict(color="#d62728", width=2, dash="dash"),
-                hovertemplate="Monotonic (isotonic) fit<extra></extra>",
-            ),
-            row=1,
-            col=col_idx,
-        )
-
-        x_ref = "x domain" if col_idx == 1 else f"x{col_idx} domain"
-        y_ref = "y domain" if col_idx == 1 else f"y{col_idx} domain"
-        fig_fit.add_annotation(
-            x=0.99,
-            y=0.99,
-            xref=x_ref,
-            yref=y_ref,
-            xanchor="right",
-            yanchor="top",
-            showarrow=False,
-            align="left",
-            bordercolor="rgba(120,120,120,0.6)",
-            borderwidth=1,
-            bgcolor="rgba(255,255,255,0.9)",
-            text=(
-                f"Pearson r={_format_corr_value(r_p)} (n={n_p})<br>"
-                f"Spearman rho={_format_corr_value(r_s)} (n={n_s})<br>"
-                f"CV R2: lin={_format_corr_value(cv_r2_lin)}, iso={_format_corr_value(cv_r2_iso)}"
-            ),
-        )
-        fig_fit.update_xaxes(title_text="Spont stPR strength (H1)", row=1, col=col_idx)
-        fig_fit.update_yaxes(title_text=f"{label} stPR strength (H2)", row=1, col=col_idx)
-
-    fit_summary_df = pd.DataFrame(fit_summary_rows)
-    if fit_summary_df.empty:
-        print("Not enough data to compute nonlinear-fit comparison.")
-    else:
-        print("Linear vs monotonic fit summary (cross-validated):")
-        display(fit_summary_df)
-
-    fig_fit.update_layout(
-        title=(
-            f"Nonlinearity Check (Split-safe) | Region {ALL_PID_TARGET_REGION} "
-            "| Spont H1 predicts Task/ITI H2"
-        ),
-        template=plot_config.get("PLOTLY_TEMPLATE", "plotly_white"),
-        width=max(980, 560 * len(fit_specs)),
-        height=560,
-        margin=dict(l=70, r=40, t=90, b=90),
-        legend=dict(
-            orientation="h",
-            yanchor="top",
-            y=-0.2,
-            xanchor="left",
-            x=0,
-        ),
-    )
-    show_fig(fig_fit)
-
-
-# %% Soloist/Choister within-group correlations (H2 evaluation)
-if "df_roles" not in globals() or df_roles.empty:
-    print("No role table available for within-group correlation analysis.")
-else:
-    within_rows = []
-    for role_name in ROLE_ORDER:
-        role_df = df_roles[df_roles["role_spont_h1"] == role_name].copy()
-        if role_df.empty:
-            continue
-
-        x_eval = role_df[ROLE_COLS["spont_h2"]].to_numpy(dtype=float)
-        y_task_eval = role_df[ROLE_COLS["task_h2"]].to_numpy(dtype=float)
-        y_iti_eval = role_df[ROLE_COLS["iti_h2"]].to_numpy(dtype=float)
-
-        r_p_task, n_p_task = _pearsonr_with_n(x_eval, y_task_eval, min_n=3)
-        r_s_task, n_s_task = _spearmanr_with_n(x_eval, y_task_eval, min_n=3)
-        r_p_iti, n_p_iti = _pearsonr_with_n(x_eval, y_iti_eval, min_n=3)
-        r_s_iti, n_s_iti = _spearmanr_with_n(x_eval, y_iti_eval, min_n=3)
-
-        within_rows.append(
-            {
-                "role_from_spont_h1": role_name,
-                "n_role_units": int(len(role_df)),
-                "Task_H2_vs_Spont_H2_pearson": r_p_task,
-                "Task_H2_vs_Spont_H2_spearman": r_s_task,
-                "Task_pair_n_pearson": int(n_p_task),
-                "Task_pair_n_spearman": int(n_s_task),
-                "ITI_H2_vs_Spont_H2_pearson": r_p_iti,
-                "ITI_H2_vs_Spont_H2_spearman": r_s_iti,
-                "ITI_pair_n_pearson": int(n_p_iti),
-                "ITI_pair_n_spearman": int(n_s_iti),
-                "median_role_shift_task_h2_vs_spont_h1": float(
-                    np.nanmedian(role_df["role_shift_task_h2_vs_spont_h1"].to_numpy(dtype=float))
-                ),
-                "median_role_shift_iti_h2_vs_spont_h1": float(
-                    np.nanmedian(role_df["role_shift_iti_h2_vs_spont_h1"].to_numpy(dtype=float))
-                ),
-            }
-        )
-
-    within_df = pd.DataFrame(within_rows)
-    if within_df.empty:
-        print("No within-group summary available.")
-    else:
-        display(within_df)
-
-
-# %% Conclusion plot candidate: Task vs Spont by role (group-wise linear fits + unity)
-if "df_roles" not in globals() or df_roles.empty:
-    print("No role table available for Task-vs-Spont group plot.")
-else:
-    x_col_plot = ROLE_COLS["spont_h2"]
-    y_col_plot = ROLE_COLS["task_h2"]
-    role_color_map = {
-        "Soloist": "#1f77b4",
-        "Intermediate": "#7f7f7f",
-        "Choister": "#d62728",
-    }
-
-    plot_df_role = df_roles[
-        [
-            "unit_id",
-            "pid",
-            "cluster_id",
-            "region",
-            "role_spont_h1",
-            x_col_plot,
-            y_col_plot,
-        ]
-    ].copy()
-    finite_mask_role = np.isfinite(plot_df_role[x_col_plot].to_numpy(dtype=float)) & np.isfinite(
-        plot_df_role[y_col_plot].to_numpy(dtype=float)
-    )
-    plot_df_role = plot_df_role.loc[finite_mask_role].copy()
-    plot_df_role = plot_df_role[plot_df_role["role_spont_h1"].isin(ROLE_ORDER)].copy()
-
-    if plot_df_role.empty:
-        print("No finite Task-vs-Spont values available for group-wise plot.")
-    else:
-        fig_group = go.Figure()
-        stats_rows = []
-
-        x_all = plot_df_role[x_col_plot].to_numpy(dtype=float)
-        y_all = plot_df_role[y_col_plot].to_numpy(dtype=float)
-        min_ref = float(np.nanmin([np.nanmin(x_all), np.nanmin(y_all)]))
-        max_ref = float(np.nanmax([np.nanmax(x_all), np.nanmax(y_all)]))
-
-        for role_name in ROLE_ORDER:
-            role_df = plot_df_role[plot_df_role["role_spont_h1"] == role_name].copy()
-            if role_df.empty:
-                continue
-
-            x_vals = role_df[x_col_plot].to_numpy(dtype=float)
-            y_vals = role_df[y_col_plot].to_numpy(dtype=float)
-            r_p, n_p = _pearsonr_with_n(x_vals, y_vals, min_n=3)
-            r_s, n_s = _spearmanr_with_n(x_vals, y_vals, min_n=3)
-
-            stats_rows.append(
-                {
-                    "role_from_spont_h1": role_name,
-                    "n_units": int(len(role_df)),
-                    "pearson_r_taskH2_vs_spontH2": r_p,
-                    "pearson_n": int(n_p),
-                    "spearman_rho_taskH2_vs_spontH2": r_s,
-                    "spearman_n": int(n_s),
-                }
-            )
-
-            customdata_role = np.column_stack(
-                [
-                    role_df["unit_id"].astype(str).to_numpy(),
-                    role_df["pid"].astype(str).to_numpy(),
-                    role_df["cluster_id"].astype(str).to_numpy(),
-                    role_df["region"].astype(str).to_numpy(),
-                ]
-            )
-            fig_group.add_trace(
-                go.Scatter(
-                    x=x_vals,
-                    y=y_vals,
-                    mode="markers",
-                    name=role_name,
-                    legendgroup=role_name,
-                    marker=dict(
-                        size=6,
-                        opacity=0.55,
-                        color=role_color_map.get(role_name, "gray"),
-                    ),
-                    customdata=customdata_role,
-                    hovertemplate=(
-                        "Role: %{fullData.name}<br>"
-                        "Unit: %{customdata[0]}<br>"
-                        "PID: %{customdata[1]}<br>"
-                        "Cluster ID: %{customdata[2]}<br>"
-                        "Region: %{customdata[3]}<br>"
-                        "Spont H2 strength: %{x:.3f}<br>"
-                        "Task H2 strength: %{y:.3f}<extra></extra>"
-                    ),
-                )
-            )
-
-            if len(role_df) >= 3 and np.nanstd(x_vals) > 0:
-                slope, intercept = np.polyfit(x_vals, y_vals, 1)
-                x_line = np.array([float(np.nanmin(x_vals)), float(np.nanmax(x_vals))], dtype=float)
-                y_line = slope * x_line + intercept
-                fig_group.add_trace(
-                    go.Scatter(
-                        x=x_line,
-                        y=y_line,
-                        mode="lines",
-                        name=f"{role_name} fit (y={slope:.2f}x+{intercept:.2f})",
-                        legendgroup=role_name,
-                        line=dict(
-                            color=role_color_map.get(role_name, "gray"),
-                            width=3,
-                        ),
-                        hovertemplate=f"{role_name} linear fit<extra></extra>",
-                    )
-                )
-
-        if np.isfinite(min_ref) and np.isfinite(max_ref) and max_ref > min_ref:
-            fig_group.add_trace(
-                go.Scatter(
-                    x=[min_ref, max_ref],
-                    y=[min_ref, max_ref],
-                    mode="lines",
-                    name="Unity line (y=x)",
-                    line=dict(color="black", width=2, dash="dash"),
-                    hovertemplate="Unity line (y=x)<extra></extra>",
-                )
-            )
-
-        stats_df = pd.DataFrame(stats_rows)
-        if not stats_df.empty:
-            display(stats_df)
-            annotation_lines = []
-            for _, row in stats_df.iterrows():
-                annotation_lines.append(
-                    f"{row['role_from_spont_h1']}: "
-                    f"r={_format_corr_value(row['pearson_r_taskH2_vs_spontH2'])}, "
-                    f"rho={_format_corr_value(row['spearman_rho_taskH2_vs_spontH2'])}, "
-                    f"n={int(row['n_units'])}"
-                )
-            fig_group.add_annotation(
-                x=0.99,
-                y=0.99,
-                xref="paper",
-                yref="paper",
-                xanchor="right",
-                yanchor="top",
-                showarrow=False,
-                align="left",
-                bordercolor="rgba(120,120,120,0.6)",
-                borderwidth=1,
-                bgcolor="rgba(255,255,255,0.9)",
-                text="<br>".join(annotation_lines),
-            )
-
-        fig_group.update_layout(
-            title=(
-                f"Task vs Spont Strength by Spont-H1 Role | Region {ALL_PID_TARGET_REGION} "
-                "| Split-safe evaluation on H2"
-            ),
-            template=plot_config.get("PLOTLY_TEMPLATE", "plotly_white"),
-            width=980,
-            height=620,
-            margin=dict(l=70, r=40, t=90, b=90),
-            xaxis_title="Spont stPR strength (H2)",
-            yaxis_title="Task stPR strength (H2)",
-            legend=dict(
-                orientation="h",
-                yanchor="top",
-                y=-0.2,
-                xanchor="left",
-                x=0,
-            ),
-        )
-        show_fig(fig_group)
-
-
-# %% Role-wise shift plot: histogram of Task(H2) - Spont(H2)
-if "df_roles" not in globals() or df_roles.empty:
-    print("No role table available for Task-Spont shift histogram.")
-else:
-    x_col_shift = ROLE_COLS["spont_h2"]
-    y_col_shift = ROLE_COLS["task_h2"]
-    role_color_map = {
-        "Soloist": "#1f77b4",
-        "Intermediate": "#7f7f7f",
-        "Choister": "#d62728",
-    }
-
-    shift_df = df_roles[
-        [
-            "unit_id",
-            "pid",
-            "cluster_id",
-            "region",
-            "role_spont_h1",
-            x_col_shift,
-            y_col_shift,
-        ]
-    ].copy()
-    finite_mask_shift = np.isfinite(shift_df[x_col_shift].to_numpy(dtype=float)) & np.isfinite(
-        shift_df[y_col_shift].to_numpy(dtype=float)
-    )
-    shift_df = shift_df.loc[finite_mask_shift].copy()
-    shift_df = shift_df[shift_df["role_spont_h1"].isin(ROLE_ORDER)].copy()
-
-    if shift_df.empty:
-        print("No finite Task-Spont shift values available.")
-    else:
-        shift_df["task_minus_spont_h2"] = (
-            shift_df[y_col_shift].to_numpy(dtype=float) - shift_df[x_col_shift].to_numpy(dtype=float)
-        )
-
-        # Common bins across roles for direct visual comparison.
-        shift_vals_all = shift_df["task_minus_spont_h2"].to_numpy(dtype=float)
-        lo = float(np.nanquantile(shift_vals_all, 0.005))
-        hi = float(np.nanquantile(shift_vals_all, 0.995))
-        if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
-            lo = float(np.nanmin(shift_vals_all))
-            hi = float(np.nanmax(shift_vals_all))
-        if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
-            lo, hi = -1.0, 1.0
-        bins = np.linspace(lo, hi, 40)
-
-        fig_shift = go.Figure()
-        stats_rows_shift = []
-        for role_name in ROLE_ORDER:
-            role_df = shift_df[shift_df["role_spont_h1"] == role_name].copy()
-            if role_df.empty:
-                continue
-
-            vals = role_df["task_minus_spont_h2"].to_numpy(dtype=float)
-            vals = vals[np.isfinite(vals)]
-            if vals.size == 0:
-                continue
-
-            stats_rows_shift.append(
-                {
-                    "role_from_spont_h1": role_name,
-                    "n_units": int(vals.size),
-                    "mean_task_minus_spont_h2": float(np.mean(vals)),
-                    "median_task_minus_spont_h2": float(np.median(vals)),
-                    "std_task_minus_spont_h2": float(np.std(vals)),
-                    "q25_task_minus_spont_h2": float(np.quantile(vals, 0.25)),
-                    "q75_task_minus_spont_h2": float(np.quantile(vals, 0.75)),
-                    "positive_fraction_task_minus_spont_h2": float(np.mean(vals > 0)),
-                }
-            )
-
-            fig_shift.add_trace(
-                go.Histogram(
-                    x=vals,
-                    xbins=dict(start=float(bins[0]), end=float(bins[-1]), size=float(bins[1] - bins[0])),
-                    histnorm="probability density",
-                    name=f"{role_name} (n={len(vals)})",
-                    marker_color=role_color_map.get(role_name, "gray"),
-                    opacity=0.45,
-                    hovertemplate=(
-                        f"Role: {role_name}<br>"
-                        "Task-Spont (H2): %{x:.3f}<br>"
-                        "Density: %{y:.4f}<extra></extra>"
-                    ),
-                )
-            )
-
-        stats_shift_df = pd.DataFrame(stats_rows_shift)
-        if not stats_shift_df.empty:
-            display(stats_shift_df)
-
-        fig_shift.add_vline(
-            x=0.0,
-            line=dict(color="black", width=2, dash="dash"),
-            annotation_text="No shift (Task=Spont)",
-            annotation_position="top right",
-        )
-
-        # Add median markers for each role to emphasize direction and magnitude of shift.
-        for _, row in stats_shift_df.iterrows():
-            role_name = str(row["role_from_spont_h1"])
-            med_val = float(row["median_task_minus_spont_h2"])
-            fig_shift.add_vline(
-                x=med_val,
-                line=dict(color=role_color_map.get(role_name, "gray"), width=2),
-                opacity=0.75,
-            )
-
-        fig_shift.update_layout(
-            title=(
-                f"Task-Spont Strength Shift by Spont-H1 Role | Region {ALL_PID_TARGET_REGION} "
-                "| Shift = Task(H2) - Spont(H2)"
-            ),
-            template=plot_config.get("PLOTLY_TEMPLATE", "plotly_white"),
-            width=980,
-            height=560,
-            margin=dict(l=70, r=40, t=90, b=90),
-            barmode="overlay",
-            xaxis_title="Task(H2) - Spont(H2) stPR strength",
-            yaxis_title="Density",
-            legend=dict(
-                orientation="h",
-                yanchor="top",
-                y=-0.2,
-                xanchor="left",
-                x=0,
-            ),
-        )
-        show_fig(fig_shift)

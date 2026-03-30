@@ -20,7 +20,7 @@ Use this flow from a fresh clone:
 
 1. Create and activate the conda environment.
 2. Install dashboard packages not pinned in the environment file.
-3. Configure processing scope in `notebooks/03_calc_dashboard.py`.
+3. Configure processing scope in `scripts/03_calc_dashboard.py`.
 4. Run `03_calc_dashboard.py` to build/update per-PID caches.
 5. Launch either the Streamlit dashboard or the lightweight local web dashboard.
 
@@ -32,8 +32,8 @@ From the repository root:
 conda env create -f environment.yml
 conda activate Seq2026
 pip install streamlit plotly plotly-resampler rastermap
-python notebooks/03_calc_dashboard.py
-streamlit run notebooks/04_dashboard.py
+python scripts/03_calc_dashboard.py
+streamlit run scripts/04_dashboard.py
 ```
 
 If you prefer the lightweight dashboard instead of Streamlit:
@@ -46,7 +46,7 @@ Open `http://127.0.0.1:8000`.
 
 ## Configure Processing Scope
 
-Before running the cache build script, adjust these constants in `notebooks/03_calc_dashboard.py`:
+Before running the cache build script, adjust these constants in `scripts/03_calc_dashboard.py`:
 
 - `COMPUTE_ALL`
 - `PIDS`
@@ -63,7 +63,7 @@ Selection priority in the script is:
 
 ## Pipeline Outputs
 
-Running `python notebooks/03_calc_dashboard.py` creates or updates:
+Running `python scripts/03_calc_dashboard.py` creates or updates:
 
 - `data/dashboard_cache/<pid>.pkl` (dashboard-ready cache per probe insertion)
 - `data/processed/<pid>_delay_results_dashboard.csv` (processed summary table)
@@ -77,7 +77,7 @@ The script is cache-aware and will reuse existing results when `config_calc` and
 ### Streamlit Dashboard
 
 ```bash
-streamlit run notebooks/04_dashboard.py
+streamlit run scripts/04_dashboard.py
 ```
 
 - Full interface for session-level and single-neuron exploration.
@@ -96,10 +96,10 @@ python web_dashboard/server.py
 
 ```text
 SeqProject2026/
-  notebooks/
+  scripts/
     03_calc_dashboard.py         # Main cache computation pipeline
     04_dashboard.py              # Full Streamlit dashboard
-    00-11 analysis notebooks     # Context-specific analyses
+    00-24 analysis scripts       # Context-specific analyses
   web_dashboard/
     server.py                    # Lightweight local HTTP dashboard
     static/                      # Frontend assets

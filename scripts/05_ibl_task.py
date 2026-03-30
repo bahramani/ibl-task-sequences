@@ -27,7 +27,7 @@ except Exception:  # pragma: no cover
 
 BASE_PATH = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BASE_PATH))
-sys.path.insert(0, str(Path.cwd().parent))  # if notebook is in /notebooks/
+sys.path.insert(0, str(Path.cwd().parent))  # if script is in /scripts/
 
 from utils.plotting_plotly import (  # noqa: E402
     plot_trial_raster_plotly,

@@ -11,7 +11,7 @@ BASE_PATH = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BASE_PATH))
 sys.path.insert(0, str(Path.cwd().parent))
 
-HELPER_SOURCE_PATH = BASE_PATH / "notebooks" / "22_ppseq_ibl.py"
+HELPER_SOURCE_PATH = BASE_PATH / "scripts" / "22_ppseq_ibl.py"
 
 
 # %% Config

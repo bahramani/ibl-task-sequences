@@ -13,7 +13,7 @@ except ImportError:  # pragma: no cover
     def tqdm(iterable, **kwargs):
         return iterable
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # if notebook is in /notebooks/
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # if script is in /scripts/
 
 from utils.io import (
     setup_paths,

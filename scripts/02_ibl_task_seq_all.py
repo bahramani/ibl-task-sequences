@@ -3,7 +3,7 @@ from pathlib import Path
 
 import sys
 from pathlib import Path
-sys.path.insert(0, str(Path.cwd().parent))  # if notebook is in /notebooks/
+sys.path.insert(0, str(Path.cwd().parent))  # if script is in /scripts/
 
 from utils.io import setup_paths, init_one, prepare_region_dirs, map_acronyms, load_session_data, build_cluster_id_map, load_pupil_data
 import utils.analysis as ana_utils

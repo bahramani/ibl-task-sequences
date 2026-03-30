@@ -23,7 +23,7 @@ except Exception:  # pragma: no cover
 
 BASE_PATH = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BASE_PATH))
-sys.path.insert(0, str(Path.cwd().parent))  # if notebook is in /notebooks/
+sys.path.insert(0, str(Path.cwd().parent))  # if script is in /scripts/
 
 from utils.io import setup_paths, init_one, load_session_data, build_cluster_id_map
 import utils.plotting_plotly as plotting_utils
