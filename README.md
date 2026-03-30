@@ -40,6 +40,16 @@ The scripts in this repository fall into three broad groups:
 | [17_ibl_seq_regions_dash.py](scripts/17_ibl_seq_regions_dash.py) | Region dashboard for cached sequence-comparison outputs from the `15/16` pipeline |
 | [20_packet_dashboard.py](scripts/20_packet_dashboard.py) | Interactive dashboard for the preliminary packet-detection pipeline |
 
+### Utility modules
+
+Most reusable functions live under `utils/`. Broadly:
+
+- [analysis.py](utils/analysis.py): core analysis functions for coupling, delays, responses, PSTHs, and split-half metrics
+- [io.py](utils/io.py): data loading, `ONE` access, atlas mapping, and session / cluster utilities
+- [plotting.py](utils/plotting.py): Matplotlib-based plotting helpers
+- [plotting_plotly.py](utils/plotting_plotly.py): Plotly-based plotting helpers used by the dashboards and browser figures
+- [packet_dashboard.py](utils/packet_dashboard.py): helpers specific to the packet-analysis cache and dashboard
+
 ## Environment Setup
 
 From the repository root:
@@ -143,10 +153,11 @@ The repository is strongly cache-driven. The main folders are:
 At the center of the project is the spike-triggered population rate (`stPR`):
 
 ```math
-\mathrm{stPR}_i(\tau) = \mathbb{E}\left[r_{\mathrm{pop},-i}(t + \tau) \mid \mathrm{spike}_i(t)\right]
+c_{i,\tau} = \frac{1}{\lVert f_i \rVert}\int f_i(t-\tau)\,
+\frac{\sum_{j \ne i}\left(f_j(t)-\mu_j\right)}{\sum_{j \ne i}\mu_j}\,dt
 ```
 
-where the population rate excludes neuron `i` itself.
+where `f_i` is the activity of neuron `i`, the summed term is the leave-one-out population activity, and `\mu_j` is the mean activity of neuron `j`.
 
 From this curve, the project uses two main per-neuron metrics:
 
