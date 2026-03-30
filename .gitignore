@@ -16,6 +16,7 @@ results/
 # Python
 __pycache__/
 *.pyc
+.tmp_*
 
 # OS
 .DS_Store
