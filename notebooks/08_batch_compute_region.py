@@ -1,5 +1,5 @@
 """
-Batch compute region dashboard metrics to be consumed by 09_dashboard_region_fast.py
+Batch compute region dashboard metrics to be consumed by 07_dashboard_region_fast.py
 
 Run this script directly to precalculate correlations and arousal statistics into Parquet files.
 """
@@ -88,7 +88,7 @@ def _build_corr_variables():
 def parse_args():
     parser = argparse.ArgumentParser(
         description=(
-            "Build region-summary cache tables consumed by 09_dashboard_region_fast.py."
+            "Build region-summary cache tables consumed by 07_dashboard_region_fast.py."
         )
     )
     parser.add_argument(

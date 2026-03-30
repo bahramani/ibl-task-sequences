@@ -29,7 +29,7 @@ from utils.io import (
 )
 import utils.analysis as ana_utils
 
-CALC_VERSION = "whisking-v1.0"
+CALC_VERSION = "whisking-v1.1"
 
 CONFIG_CALC = {
     "ATLAS_MAPPING": "Beryl",
@@ -133,6 +133,42 @@ CONFIG_PLOT = {
     "POP_NORMALIZE": True,
     "SORT_BY_SPONT": True,
 }
+
+AUDITORY_FEEDBACK_ACRONYMS = frozenset({"AUDp", "AUDv", "AUDd"})
+EVENT_RESPONSE_SPECS = (
+    {
+        "event_name": "stimOn_times",
+        "response_window": (0.02, 0.35),
+        "baseline_window": (-0.2, 0.0),
+    },
+    {
+        "event_name": "firstMovement_times",
+        "response_window": (-0.1, 0.2),
+        "baseline_window": (-0.3, -0.1),
+    },
+    {
+        "event_name": "feedback_times",
+        "response_window": (-0.1, 0.2),
+        "baseline_window": (-0.3, -0.1),
+    },
+    {
+        "event_name": "wh_brief_times_spont",
+        "response_window": (0.0, 0.4),
+        "baseline_window": (-0.2, 0.0),
+    },
+)
+AUDITORY_FEEDBACK_EVENT_SPECS = (
+    {
+        "event_name": "feedback_correct_times",
+        "response_window": (0.0, 0.1),
+        "baseline_window": (-0.2, 0.0),
+    },
+    {
+        "event_name": "feedback_incorrect_times",
+        "response_window": (0.0, 0.1),
+        "baseline_window": (-0.2, 0.0),
+    },
+)
 
 # Update this list with the PIDs you want to process, or leave as None to query by subject.
 COMPUTE_ALL = True  # If True, ignore PIDS/SUBJECT/REGIONS and process all insertions for TAG.
@@ -313,6 +349,381 @@ def _strict_good_cluster_ids(cluster_ids, labels, label_min, strict_gt=True):
     except (TypeError, ValueError):
         mask = labels == 1
     return np.asarray(cluster_ids)[mask]
+
+
+def _event_response_full_col(event_name):
+    return f"response_zmean_{event_name}"
+
+
+def _event_response_split_col(event_name, split_name):
+    return f"{_event_response_full_col(event_name)}_{split_name}"
+
+
+def _build_event_payloads_from_trial_df(trial_df, wh_events_by_period):
+    payloads = {}
+    if isinstance(trial_df, pd.DataFrame) and not trial_df.empty:
+        trial_idx = pd.to_numeric(trial_df.get("trial_idx"), errors="coerce").to_numpy(dtype=float)
+        trial_idx = np.where(np.isfinite(trial_idx), trial_idx, np.arange(len(trial_df), dtype=float)).astype(int)
+        contrast = None
+        if "contrast" in trial_df.columns:
+            contrast = pd.to_numeric(trial_df["contrast"], errors="coerce").to_numpy(dtype=float)
+
+        if {"stimOn_times", "contrast"}.issubset(trial_df.columns):
+            stim = pd.to_numeric(trial_df["stimOn_times"], errors="coerce").to_numpy(dtype=float)
+            stim_contrast = np.asarray(contrast, dtype=float)
+            mask = np.isfinite(stim) & np.isfinite(stim_contrast) & (stim_contrast > 0)
+            payloads["stimOn_times"] = {
+                "events": np.asarray(stim[mask], dtype=float),
+                "split_index": trial_idx[mask].astype(int),
+                "contrasts": np.asarray(stim_contrast[mask], dtype=float),
+            }
+
+        for event_name in ("firstMovement_times", "feedback_times"):
+            if event_name not in trial_df.columns:
+                continue
+            values = pd.to_numeric(trial_df[event_name], errors="coerce").to_numpy(dtype=float)
+            mask = np.isfinite(values)
+            payloads[event_name] = {
+                "events": np.asarray(values[mask], dtype=float),
+                "split_index": trial_idx[mask].astype(int),
+                "contrasts": (
+                    np.asarray(contrast[mask], dtype=float)
+                    if contrast is not None
+                    else np.ones(int(np.sum(mask)), dtype=float)
+                ),
+            }
+
+        if {"feedback_times", "correct_response"}.issubset(trial_df.columns):
+            feedback = pd.to_numeric(trial_df["feedback_times"], errors="coerce").to_numpy(dtype=float)
+            correct_response = trial_df["correct_response"]
+            correct_mask = np.isfinite(feedback) & correct_response.eq(True).to_numpy(dtype=bool)
+            incorrect_mask = np.isfinite(feedback) & correct_response.eq(False).to_numpy(dtype=bool)
+            for event_name, mask in (
+                ("feedback_correct_times", correct_mask),
+                ("feedback_incorrect_times", incorrect_mask),
+            ):
+                payloads[event_name] = {
+                    "events": np.asarray(feedback[mask], dtype=float),
+                    "split_index": trial_idx[mask].astype(int),
+                    "contrasts": (
+                        np.asarray(contrast[mask], dtype=float)
+                        if contrast is not None
+                        else np.ones(int(np.sum(mask)), dtype=float)
+                    ),
+                }
+
+    wh_events = np.asarray((wh_events_by_period or {}).get("wh_brief_times_spont", np.array([])), dtype=float)
+    wh_events = np.sort(wh_events[np.isfinite(wh_events)])
+    payloads["wh_brief_times_spont"] = {
+        "events": wh_events.astype(float),
+        "split_index": np.arange(wh_events.size, dtype=int),
+        "contrasts": np.ones(wh_events.size, dtype=float),
+    }
+    return payloads
+
+
+def _zscore_trace(arr, baseline_mask):
+    arr = np.asarray(arr, dtype=float).reshape(-1)
+    baseline_mask = np.asarray(baseline_mask, dtype=bool).reshape(-1)
+    if arr.size == 0 or baseline_mask.size != arr.size:
+        return np.full(arr.shape, np.nan, dtype=float)
+    ref = arr[baseline_mask]
+    ref = ref[np.isfinite(ref)]
+    if ref.size == 0:
+        return np.full(arr.shape, np.nan, dtype=float)
+    mu = float(np.mean(ref))
+    sd = float(np.std(ref))
+    if not np.isfinite(sd) or sd <= 0:
+        return np.full(arr.shape, np.nan, dtype=float)
+    return (arr - mu) / sd
+
+
+def _response_zmean_from_psth(psth_entry, bin_centers, baseline_window, response_window, zscore_source):
+    if psth_entry is None or bin_centers is None:
+        return np.nan
+    if zscore_source == "raw":
+        trace = np.asarray(psth_entry.get("fr_raw", np.array([])), dtype=float)
+    else:
+        smooth = psth_entry.get("fr_smooth", None)
+        trace = np.asarray(smooth, dtype=float) if smooth is not None else np.asarray(psth_entry.get("fr_raw", np.array([])), dtype=float)
+    centers = np.asarray(bin_centers, dtype=float)
+    if trace.size == 0 or centers.size != trace.size:
+        return np.nan
+    baseline_mask = (centers >= baseline_window[0]) & (centers < baseline_window[1])
+    response_mask = (centers >= response_window[0]) & (centers <= response_window[1])
+    if not np.any(response_mask):
+        return np.nan
+    ztrace = _zscore_trace(trace, baseline_mask=baseline_mask)
+    response_vals = ztrace[response_mask]
+    response_vals = response_vals[np.isfinite(response_vals)]
+    if response_vals.size == 0:
+        return np.nan
+    return float(np.mean(response_vals))
+
+
+def _compute_event_response_metrics(spikes, cluster_ids, events, split_index, config, spec, zscore_source):
+    n_units = int(cluster_ids.size)
+    full_vals = np.full(n_units, np.nan, dtype=float)
+    odd_vals = np.full(n_units, np.nan, dtype=float)
+    even_vals = np.full(n_units, np.nan, dtype=float)
+    min_trials = int(config.get("MIN_TRIALS", 10))
+    min_trials_split = int(config.get("MIN_TRIALS_SPLIT", 5))
+    if events.size < min_trials or n_units == 0:
+        return full_vals, odd_vals, even_vals
+
+    psth_kwargs = {
+        "window_start": float(config.get("PSTH_WINDOW_START", -1.0)),
+        "window_end": float(config.get("PSTH_WINDOW_END", 1.0)),
+        "bin_size": float(config.get("BIN_SIZE", 0.005)),
+        "smooth_sigma": float(config.get("SMOOTH_SIGMA", 1)),
+        "show_progress": False,
+        "desc": f"PSTH {spec['event_name']}",
+    }
+    psth_full, bin_centers_full = ana_utils.compute_psth_for_clusters(
+        spikes,
+        cluster_ids,
+        events,
+        **psth_kwargs,
+    )
+    for row_idx, cid in enumerate(cluster_ids):
+        full_vals[row_idx] = _response_zmean_from_psth(
+            psth_full.get(int(cid)),
+            bin_centers_full,
+            spec["baseline_window"],
+            spec["response_window"],
+            zscore_source=zscore_source,
+        )
+
+    odd_mask = (split_index % 2) == 1
+    even_mask = ~odd_mask
+    events_odd = events[odd_mask]
+    events_even = events[even_mask]
+    if events_odd.size < min_trials_split or events_even.size < min_trials_split:
+        return full_vals, odd_vals, even_vals
+
+    psth_odd, bin_centers_odd = ana_utils.compute_psth_for_clusters(spikes, cluster_ids, events_odd, **psth_kwargs)
+    psth_even, bin_centers_even = ana_utils.compute_psth_for_clusters(spikes, cluster_ids, events_even, **psth_kwargs)
+    for row_idx, cid in enumerate(cluster_ids):
+        cid_int = int(cid)
+        odd_vals[row_idx] = _response_zmean_from_psth(
+            psth_odd.get(cid_int),
+            bin_centers_odd,
+            spec["baseline_window"],
+            spec["response_window"],
+            zscore_source=zscore_source,
+        )
+        even_vals[row_idx] = _response_zmean_from_psth(
+            psth_even.get(cid_int),
+            bin_centers_even,
+            spec["baseline_window"],
+            spec["response_window"],
+            zscore_source=zscore_source,
+        )
+    return full_vals, odd_vals, even_vals
+
+
+def _apply_delay_units(arr, config):
+    out = np.asarray(arr, dtype=float).copy()
+    if str(config.get("DELAY_UNITS", "s")).lower().startswith("ms"):
+        out *= 1000.0
+    return out
+
+
+def _compute_event_split_delay_metrics(
+    spikes,
+    cluster_ids,
+    spike_times_by_cluster,
+    events,
+    split_index,
+    contrasts,
+    config,
+    event_name,
+):
+    n_units = int(cluster_ids.size)
+    full_vals = np.full(n_units, np.nan, dtype=float)
+    odd_vals = np.full(n_units, np.nan, dtype=float)
+    even_vals = np.full(n_units, np.nan, dtype=float)
+    min_trials = int(config.get("MIN_TRIALS", 10))
+    min_trials_split = int(config.get("MIN_TRIALS_SPLIT", 5))
+    if events.size < min_trials or n_units == 0:
+        return full_vals, odd_vals, even_vals
+
+    win_start, win_end = ana_utils.get_event_delay_window(config, event_name)
+    event_config = {
+        **config,
+        "RESPONSIVE_WINDOW_START": float(win_start),
+        "RESPONSIVE_WINDOW_END": float(win_end),
+    }
+    event_method = ana_utils.get_event_delay_method(config, event_name)
+    psth_kwargs = {
+        "window_start": float(config.get("PSTH_WINDOW_START", -1.0)),
+        "window_end": float(config.get("PSTH_WINDOW_END", 1.0)),
+        "bin_size": float(config.get("BIN_SIZE", 0.005)),
+        "smooth_sigma": float(config.get("SMOOTH_SIGMA", 1)),
+        "show_progress": False,
+        "desc": f"PSTH delay {event_name}",
+    }
+    psth_full, bin_centers_full = ana_utils.compute_psth_for_clusters(spikes, cluster_ids, events, **psth_kwargs)
+    for row_idx, cid in enumerate(cluster_ids):
+        cid_int = int(cid)
+        psth_entry = psth_full.get(cid_int)
+        delay, is_responsive = ana_utils.calculate_delay(
+            psth_entry.get("fr_raw") if psth_entry else None,
+            psth_entry.get("fr_smooth") if psth_entry else None,
+            bin_centers_full,
+            event_config,
+            method=event_method,
+            neuron_spikes=spike_times_by_cluster.get(cid_int, np.array([])),
+            event_times=events,
+            trial_contrasts=contrasts,
+            return_sign=False,
+        )
+        if is_responsive:
+            full_vals[row_idx] = delay
+
+    odd_mask = (split_index % 2) == 1
+    even_mask = ~odd_mask
+    events_odd = events[odd_mask]
+    events_even = events[even_mask]
+    if events_odd.size < min_trials_split or events_even.size < min_trials_split:
+        return _apply_delay_units(full_vals, config), odd_vals, even_vals
+
+    contrasts_odd = contrasts[odd_mask]
+    contrasts_even = contrasts[even_mask]
+    psth_odd, bin_centers_odd = ana_utils.compute_psth_for_clusters(spikes, cluster_ids, events_odd, **psth_kwargs)
+    psth_even, bin_centers_even = ana_utils.compute_psth_for_clusters(spikes, cluster_ids, events_even, **psth_kwargs)
+    for row_idx, cid in enumerate(cluster_ids):
+        cid_int = int(cid)
+        odd_entry = psth_odd.get(cid_int)
+        delay_odd, resp_odd = ana_utils.calculate_delay(
+            odd_entry.get("fr_raw") if odd_entry else None,
+            odd_entry.get("fr_smooth") if odd_entry else None,
+            bin_centers_odd,
+            event_config,
+            method=event_method,
+            neuron_spikes=spike_times_by_cluster.get(cid_int, np.array([])),
+            event_times=events_odd,
+            trial_contrasts=contrasts_odd,
+            return_sign=False,
+        )
+        if resp_odd:
+            odd_vals[row_idx] = delay_odd
+
+        even_entry = psth_even.get(cid_int)
+        delay_even, resp_even = ana_utils.calculate_delay(
+            even_entry.get("fr_raw") if even_entry else None,
+            even_entry.get("fr_smooth") if even_entry else None,
+            bin_centers_even,
+            event_config,
+            method=event_method,
+            neuron_spikes=spike_times_by_cluster.get(cid_int, np.array([])),
+            event_times=events_even,
+            trial_contrasts=contrasts_even,
+            return_sign=False,
+        )
+        if resp_even:
+            even_vals[row_idx] = delay_even
+
+    return (
+        _apply_delay_units(full_vals, config),
+        _apply_delay_units(odd_vals, config),
+        _apply_delay_units(even_vals, config),
+    )
+
+
+def _augment_df_res_with_event_response_metrics(df_res, spikes, trial_df, wh_events_by_period, config_calc):
+    if df_res is None or df_res.empty or "cluster_id" not in df_res.columns or "acronym" not in df_res.columns:
+        return df_res
+
+    df_res = df_res.copy()
+    cluster_ids = pd.to_numeric(df_res["cluster_id"], errors="coerce").to_numpy(dtype=float)
+    valid_cluster_mask = np.isfinite(cluster_ids)
+    df_res = df_res.loc[valid_cluster_mask].copy()
+    cluster_ids = cluster_ids[valid_cluster_mask].astype(int)
+    if cluster_ids.size == 0:
+        return df_res
+
+    config = dict(config_calc or {})
+    delay_windows = dict(config.get("DELAY_WINDOWS", {}) or {})
+    delay_windows.setdefault("feedback_correct_times", (0.0, 0.1))
+    delay_windows.setdefault("feedback_incorrect_times", (0.0, 0.1))
+    config["DELAY_WINDOWS"] = delay_windows
+
+    zscore_source = str(config.get("RESPONSIVE_ZSCORE_SOURCE", "smooth")).strip().lower()
+    if zscore_source not in {"raw", "smooth"}:
+        zscore_source = "smooth"
+
+    event_payloads = _build_event_payloads_from_trial_df(trial_df, wh_events_by_period)
+    for spec in EVENT_RESPONSE_SPECS:
+        payload = event_payloads.get(
+            spec["event_name"],
+            {"events": np.array([], dtype=float), "split_index": np.array([], dtype=int), "contrasts": np.array([], dtype=float)},
+        )
+        full_vals, odd_vals, even_vals = _compute_event_response_metrics(
+            spikes=spikes,
+            cluster_ids=cluster_ids,
+            events=np.asarray(payload["events"], dtype=float),
+            split_index=np.asarray(payload["split_index"], dtype=int),
+            config=config,
+            spec=spec,
+            zscore_source=zscore_source,
+        )
+        df_res[_event_response_full_col(spec["event_name"])] = full_vals
+        df_res[_event_response_split_col(spec["event_name"], "odd")] = odd_vals
+        df_res[_event_response_split_col(spec["event_name"], "even")] = even_vals
+
+    auditory_mask = df_res["acronym"].astype(str).isin(AUDITORY_FEEDBACK_ACRONYMS).to_numpy(dtype=bool)
+    for spec in AUDITORY_FEEDBACK_EVENT_SPECS:
+        df_res[_event_response_full_col(spec["event_name"])] = np.nan
+        df_res[_event_response_split_col(spec["event_name"], "odd")] = np.nan
+        df_res[_event_response_split_col(spec["event_name"], "even")] = np.nan
+        delay_col = ana_utils.delay_column_name(spec["event_name"])
+        delay_odd_col = ana_utils.delay_split_column_name(spec["event_name"], "odd")
+        delay_even_col = ana_utils.delay_split_column_name(spec["event_name"], "even")
+        df_res[delay_col] = np.nan
+        df_res[delay_odd_col] = np.nan
+        df_res[delay_even_col] = np.nan
+
+        if not np.any(auditory_mask):
+            continue
+
+        payload = event_payloads.get(
+            spec["event_name"],
+            {"events": np.array([], dtype=float), "split_index": np.array([], dtype=int), "contrasts": np.array([], dtype=float)},
+        )
+        auditory_cluster_ids = cluster_ids[auditory_mask]
+        spike_times_by_cluster = {
+            int(cid): spikes["times"][spikes["clusters"] == int(cid)]
+            for cid in auditory_cluster_ids
+        }
+        full_vals, odd_vals, even_vals = _compute_event_response_metrics(
+            spikes=spikes,
+            cluster_ids=auditory_cluster_ids,
+            events=np.asarray(payload["events"], dtype=float),
+            split_index=np.asarray(payload["split_index"], dtype=int),
+            config=config,
+            spec=spec,
+            zscore_source=zscore_source,
+        )
+        df_res.loc[auditory_mask, _event_response_full_col(spec["event_name"])] = full_vals
+        df_res.loc[auditory_mask, _event_response_split_col(spec["event_name"], "odd")] = odd_vals
+        df_res.loc[auditory_mask, _event_response_split_col(spec["event_name"], "even")] = even_vals
+
+        delay_full, delay_odd, delay_even = _compute_event_split_delay_metrics(
+            spikes=spikes,
+            cluster_ids=auditory_cluster_ids,
+            spike_times_by_cluster=spike_times_by_cluster,
+            events=np.asarray(payload["events"], dtype=float),
+            split_index=np.asarray(payload["split_index"], dtype=int),
+            contrasts=np.asarray(payload.get("contrasts", np.ones(len(payload["events"]), dtype=float)), dtype=float),
+            config=config,
+            event_name=spec["event_name"],
+        )
+        df_res.loc[auditory_mask, delay_col] = delay_full
+        df_res.loc[auditory_mask, delay_odd_col] = delay_odd
+        df_res.loc[auditory_mask, delay_even_col] = delay_even
+
+    return df_res.sort_values("cluster_id").reset_index(drop=True)
 
 
 def main():
@@ -912,6 +1323,17 @@ def main():
                     "response_times": sl.trials["response_times"].values,
                 }
             )
+
+            step = "event_response_metrics"
+            df_res = _augment_df_res_with_event_response_metrics(
+                df_res=df_res,
+                spikes=spikes,
+                trial_df=trial_df,
+                wh_events_by_period=wh_events_by_period,
+                config_calc=CONFIG_CALC,
+            )
+            if isinstance(df_res, pd.DataFrame):
+                df_res.to_csv(path_data_processed / f"{pid}_delay_results_dashboard.csv", index=False)
 
             step = "meta"
             meta = _fetch_session_metadata(one, eid)

@@ -654,6 +654,22 @@ def _format_delay_sort_label(event_or_col):
     return f"Delay ({text.title()})"
 
 
+def _response_metric_column_name(event_name):
+    return f"response_zmean_{event_name}"
+
+
+def _format_response_sort_label(event_or_col):
+    text = str(event_or_col)
+    if text.startswith("response_zmean_"):
+        text = text[len("response_zmean_") :]
+    if text.endswith("_times"):
+        text = text[: -len("_times")]
+    text = text.replace("_", " ").strip()
+    if not text:
+        text = str(event_or_col)
+    return f"Response ({text.title()})"
+
+
 def _resolve_custom_delay_sort(metric_key):
     key = (metric_key or "").strip()
     if not key:
@@ -676,6 +692,33 @@ def _resolve_custom_delay_sort(metric_key):
         else:
             col_name = delay_column_name(event_name)
             label = _format_delay_sort_label(event_name)
+        return col_name, label
+
+    return None, None
+
+
+def _resolve_custom_response_sort(metric_key):
+    key = (metric_key or "").strip()
+    if not key:
+        return None, None
+    key_lower = key.lower()
+
+    if key_lower.startswith("response_col:"):
+        col_name = key[len("response_col:") :].strip()
+        if not col_name:
+            return None, None
+        return col_name, _format_response_sort_label(col_name)
+
+    if key_lower.startswith("response:"):
+        event_name = key[len("response:") :].strip()
+        if not event_name:
+            return None, None
+        if event_name.startswith("response_zmean_"):
+            col_name = event_name
+            label = _format_response_sort_label(event_name)
+        else:
+            col_name = _response_metric_column_name(event_name)
+            label = _format_response_sort_label(event_name)
         return col_name, label
 
     return None, None
@@ -713,6 +756,7 @@ def _merge_metric(
         return df_units, sort_label
 
     custom_delay_col, custom_delay_label = _resolve_custom_delay_sort(metric_key_raw)
+    custom_response_col, custom_response_label = _resolve_custom_response_sort(metric_key_raw)
     if custom_delay_col is not None:
         if df_res is not None and custom_delay_col in df_res.columns:
             df_units = df_units.merge(
@@ -723,6 +767,19 @@ def _merge_metric(
                 how="left",
             )
             return df_units, custom_delay_label
+        df_units["sort_metric"] = df_units["depth"]
+        return df_units, "Depth"
+
+    if custom_response_col is not None:
+        if df_res is not None and custom_response_col in df_res.columns:
+            df_units = df_units.merge(
+                df_res[["cluster_id", custom_response_col]].rename(
+                    columns={custom_response_col: "sort_metric"}
+                ),
+                on="cluster_id",
+                how="left",
+            )
+            return df_units, custom_response_label
         df_units["sort_metric"] = df_units["depth"]
         return df_units, "Depth"
 
@@ -3316,6 +3373,7 @@ def plot_population_sorted_plotly(
     )
     use_prefix = bool(config_plot.get("PLOT_REGION_PREFIX_MATCH", False)) and region_from_config
     custom_delay_col, custom_delay_label = _resolve_custom_delay_sort(sort_mode)
+    custom_response_col, custom_response_label = _resolve_custom_response_sort(sort_mode)
 
     def _select_delay_sort_key(df_local):
         if "delay_odd" in df_local.columns and np.isfinite(df_local["delay_odd"]).any():
@@ -3381,7 +3439,25 @@ def plot_population_sorted_plotly(
         delay_sort_key, delay_sort_label = _select_delay_sort_key(df_region)
         group_boundaries = []
 
-        if custom_delay_col is not None:
+        if custom_response_col is not None:
+            if df_res is not None and custom_response_col in df_res.columns:
+                df_region = df_region.merge(
+                    df_res[["cluster_id", custom_response_col]].rename(
+                        columns={custom_response_col: "sort_metric"}
+                    ),
+                    on="cluster_id",
+                    how="left",
+                )
+                df_sorted = df_region.sort_values(
+                    by="sort_metric", ascending=sort_ascending, na_position="last"
+                )
+                sort_label = custom_response_label
+            else:
+                df_sorted = df_region.sort_values(
+                    by=delay_sort_key, ascending=sort_ascending, na_position="last"
+                )
+                sort_label = delay_sort_label
+        elif custom_delay_col is not None:
             if df_res is not None and custom_delay_col in df_res.columns:
                 df_region = df_region.merge(
                     df_res[["cluster_id", custom_delay_col]].rename(
