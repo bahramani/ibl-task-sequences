@@ -4,6 +4,7 @@ Batch compute region dashboard metrics to be consumed by 09_dashboard_region_fas
 Run this script directly to precalculate correlations and arousal statistics into Parquet files.
 """
 
+import argparse
 from pathlib import Path
 import pickle
 import numpy as np
@@ -42,9 +43,17 @@ CORR_VARIABLES = [
     {"name": "Firing Rate", "df": "df_firing_rate", "v1": "firing_rate_h1", "v2": "firing_rate_h2"},
     {"name": "Correlation to Whisking", "df": "df_arousal_corr", "v1": "arousal_corr_abs_h1", "v2": "arousal_corr_abs_h2"},
     {"name": "Delay to Stim On", "df": "df_res", "v1": "delay_stimOn_times_odd", "v2": "delay_stimOn_times_even"},
+    {"name": "Response to Stim On", "df": "df_res", "v1": "response_zmean_stimOn_times_odd", "v2": "response_zmean_stimOn_times_even"},
     {"name": "Delay to First Move", "df": "df_res", "v1": "delay_firstMovement_times_odd", "v2": "delay_firstMovement_times_even"},
+    {"name": "Response to First Move", "df": "df_res", "v1": "response_zmean_firstMovement_times_odd", "v2": "response_zmean_firstMovement_times_even"},
     {"name": "Delay to Feedback", "df": "df_res", "v1": "delay_feedback_times_odd", "v2": "delay_feedback_times_even"},
+    {"name": "Response to Feedback", "df": "df_res", "v1": "response_zmean_feedback_times_odd", "v2": "response_zmean_feedback_times_even"},
+    {"name": "Delay to Feedback (Correct Trials)", "df": "df_res", "v1": "delay_feedback_correct_times_odd", "v2": "delay_feedback_correct_times_even"},
+    {"name": "Delay to Feedback (Incorrect Trials)", "df": "df_res", "v1": "delay_feedback_incorrect_times_odd", "v2": "delay_feedback_incorrect_times_even"},
+    {"name": "Response to Feedback (Correct Trials)", "df": "df_res", "v1": "response_zmean_feedback_correct_times_odd", "v2": "response_zmean_feedback_correct_times_even"},
+    {"name": "Response to Feedback (Incorrect Trials)", "df": "df_res", "v1": "response_zmean_feedback_incorrect_times_odd", "v2": "response_zmean_feedback_incorrect_times_even"},
     {"name": "Delay to Whisking Events", "df": "df_res", "v1": "delay_wh_brief_times_spont_odd", "v2": "delay_wh_brief_times_spont_even"},
+    {"name": "Response to Whisking Events", "df": "df_res", "v1": "response_zmean_wh_brief_times_spont_odd", "v2": "response_zmean_wh_brief_times_spont_even"},
     {"name": "Delay to Passive Visual", "df": "df_res", "v1": "delay_passive_visual_times_odd", "v2": "delay_passive_visual_times_even"},
     {"name": "Delay to Passive Tone", "df": "df_res", "v1": "delay_passive_tone_times_odd", "v2": "delay_passive_tone_times_even"},
     {"name": "Delay to Passive Valve", "df": "df_res", "v1": "delay_passive_valve_times_odd", "v2": "delay_passive_valve_times_even"},
@@ -59,10 +68,46 @@ CORR_VARIABLES = [
     {"name": "Coupling Max (ITI)", "df": "df_coupling_iti", "v1": "coupling_max_odd", "v2": "coupling_max_even"},
     {"name": "Coupling Max (Task)", "df": "df_coupling_task", "v1": "coupling_max_odd", "v2": "coupling_max_even"},
 ]
+NEW_EVENT_RESPONSE_VARIABLES = {
+    "Response to Stim On",
+    "Response to First Move",
+    "Response to Feedback",
+    "Response to Whisking Events",
+    "Delay to Feedback (Correct Trials)",
+    "Delay to Feedback (Incorrect Trials)",
+    "Response to Feedback (Correct Trials)",
+    "Response to Feedback (Incorrect Trials)",
+}
+SPONT_COUPLING_STRENGTH_VAR = "Coupling Strength (Spont)"
 
 
 def _build_corr_variables():
     return [dict(spec) for spec in CORR_VARIABLES]
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description=(
+            "Build region-summary cache tables consumed by 09_dashboard_region_fast.py."
+        )
+    )
+    parser.add_argument(
+        "--append-missing-only",
+        action="store_true",
+        help=(
+            "Reuse existing dashboard-region outputs and only compute correlation rows "
+            "for variables missing from the saved summary cache."
+        ),
+    )
+    parser.add_argument(
+        "--focus-spont-strength-newvars",
+        action="store_true",
+        help=(
+            "Only compute the rows needed for Coupling Strength (Spont) versus the new "
+            "event-response variables, plus the diagonal reliability rows those plots need."
+        ),
+    )
+    return parser.parse_args()
 
 def _pearsonr_with_n(x, y, min_n=2):
     x = np.asarray(x, dtype=float)
@@ -214,6 +259,86 @@ def _extract_cluster_depths(cache, cluster_ids):
                 if arr is not None: return arr
     return None
 
+
+def _read_saved_output_table(stem):
+    pkl_path = OUTPUT_DIR / f"{stem}.pkl"
+    if pkl_path.exists():
+        return pd.read_pickle(pkl_path)
+    parquet_path = OUTPUT_DIR / f"{stem}.parquet"
+    if parquet_path.exists():
+        return pd.read_parquet(parquet_path)
+    return None
+
+
+def _load_existing_output_bundle():
+    df_corr = _read_saved_output_table("summary_correlations")
+    df_arousal = _read_saved_output_table("summary_arousal_fractions")
+    df_region = _read_saved_output_table("summary_region_counts")
+    df_pids = _read_saved_output_table("summary_pids")
+    label_min_text = "0.50 (batch minimum)"
+    meta_path = OUTPUT_DIR / "summary_metadata.pkl"
+    if meta_path.exists():
+        try:
+            with open(meta_path, "rb") as f:
+                meta = pickle.load(f)
+            label_min_text = str(meta.get("label_min_text", label_min_text))
+        except Exception:
+            pass
+    return {
+        "df_corr": df_corr,
+        "df_arousal": df_arousal,
+        "df_region": df_region,
+        "df_pids": df_pids,
+        "label_min_text": label_min_text,
+    }
+
+
+def _corr_record_key(good_only, use_stpr, avg_by_pid, arousal_group, region, var1, var2):
+    return (
+        bool(good_only),
+        bool(use_stpr),
+        bool(avg_by_pid),
+        str(arousal_group),
+        str(region),
+        str(var1),
+        str(var2),
+    )
+
+
+def _build_existing_corr_key_set(df_corr):
+    if df_corr is None or df_corr.empty:
+        return set()
+    required_cols = ["good_only", "use_good_stpr", "avg_by_pid", "arousal_group", "region", "var1", "var2"]
+    if not set(required_cols).issubset(df_corr.columns):
+        return set()
+    key_set = set()
+    for row in df_corr[required_cols].itertuples(index=False, name=None):
+        key_set.add(_corr_record_key(*row))
+    return key_set
+
+
+def _should_compute_pair(name_i, name_j, target_var_names=None, focus_source_var=None):
+    name_i = str(name_i)
+    name_j = str(name_j)
+    target_set = None if target_var_names is None else {str(v) for v in target_var_names}
+
+    if focus_source_var is not None:
+        focus_source = str(focus_source_var)
+        if name_i == name_j:
+            if name_i == focus_source:
+                return True
+            return target_set is None or name_i in target_set
+        return (
+            (name_i == focus_source and (target_set is None or name_j in target_set))
+            or (name_j == focus_source and (target_set is None or name_i in target_set))
+        )
+
+    if target_set is None:
+        return True
+    if name_i == name_j:
+        return name_i in target_set
+    return (name_i in target_set) or (name_j in target_set)
+
 def _build_arousal_lookup(df_res, region_lookup):
     if (df_res is None or df_res.empty or "pid" not in df_res.columns or "cluster_id" not in df_res.columns or "arousal_group" not in df_res.columns): return None
     if region_lookup is None or region_lookup.empty: return None
@@ -259,7 +384,7 @@ def _load_cache_tables(cache_dir):
     }
 
     print(f"Loading {len(cache_paths)} cache files...")
-    for path in tqdm(cache_paths):
+    for path in tqdm(cache_paths, desc="Load raw cache", unit="pid"):
         with open(path, "rb") as f:
             cache = pickle.load(f)
 
@@ -390,13 +515,87 @@ def _write_region_cache_outputs(df_corr, df_arousal_frac, df_region_summary, pid
             f,
         )
 
-def precompute_all_dashboards(write_outputs=True):
+def precompute_all_dashboards(
+    write_outputs=True,
+    append_missing_only=False,
+    focus_spont_strength_newvars=False,
+):
     print("Loading data from cache... This may take a moment.")
     neurons_df_raw, pid_summary, data_concat, spont_pids_list = _load_cache_tables(CACHE_DIR)
     spont_pids = set(spont_pids_list)
     print("Data loading completed.")
 
     corr_variables = _build_corr_variables()
+    label_min_text = "0.50 (batch minimum)"
+    existing_bundle = None
+    existing_corr = None
+    existing_corr_keys = set()
+    target_var_names = None
+    focus_source_var = None
+    reuse_existing_side_tables = False
+
+    if focus_spont_strength_newvars:
+        append_missing_only = True
+        focus_source_var = SPONT_COUPLING_STRENGTH_VAR
+        target_var_names = set(NEW_EVENT_RESPONSE_VARIABLES)
+
+    if append_missing_only:
+        existing_bundle = _load_existing_output_bundle()
+        existing_corr = existing_bundle.get("df_corr")
+        reuse_existing_side_tables = all(
+            isinstance(existing_bundle.get(key), pd.DataFrame)
+            for key in ("df_arousal", "df_region", "df_pids")
+        )
+        if isinstance(existing_corr, pd.DataFrame) and not existing_corr.empty:
+            existing_corr_keys = _build_existing_corr_key_set(existing_corr)
+            label_min_text = existing_bundle.get("label_min_text", label_min_text)
+            if focus_spont_strength_newvars:
+                target_var_names = set(
+                    name for name in NEW_EVENT_RESPONSE_VARIABLES
+                    if any(spec["name"] == name for spec in corr_variables)
+                )
+                print(
+                    "Focused mode: computing only rows for "
+                    f"{SPONT_COUPLING_STRENGTH_VAR} versus: "
+                    + ", ".join(sorted(target_var_names))
+                )
+            else:
+                existing_var_series = pd.concat(
+                    [
+                        existing_corr.get("var1", pd.Series(dtype=object)),
+                        existing_corr.get("var2", pd.Series(dtype=object)),
+                    ],
+                    ignore_index=True,
+                )
+                existing_var_names = set(existing_var_series.dropna().astype(str))
+                registry_var_names = [spec["name"] for spec in corr_variables]
+                missing_var_names = [name for name in registry_var_names if name not in existing_var_names]
+                if missing_var_names:
+                    target_var_names = set(missing_var_names)
+                    print(
+                        "Append-missing-only mode: computing rows involving missing variables: "
+                        + ", ".join(missing_var_names)
+                    )
+                else:
+                    print("Append-missing-only mode: no missing variables were found in saved outputs.")
+                    df_arousal_existing = existing_bundle.get("df_arousal")
+                    df_region_existing = existing_bundle.get("df_region")
+                    df_pids_existing = existing_bundle.get("df_pids")
+                    if existing_corr is None:
+                        existing_corr = pd.DataFrame()
+                    return (
+                        existing_corr,
+                        df_arousal_existing if isinstance(df_arousal_existing, pd.DataFrame) else pd.DataFrame(),
+                        df_region_existing if isinstance(df_region_existing, pd.DataFrame) else pd.DataFrame(),
+                        df_pids_existing if isinstance(df_pids_existing, pd.DataFrame) else pid_summary,
+                        label_min_text,
+                    )
+        else:
+            print("Append-missing-only mode requested, but no existing summary_correlations cache was found. Falling back to full recompute.")
+            append_missing_only = False
+            focus_spont_strength_newvars = False
+            target_var_names = None
+            focus_source_var = None
 
     # Label lookup
     label_lookup = _build_label_lookup(data_concat.get("df_res"))
@@ -415,7 +614,7 @@ def precompute_all_dashboards(write_outputs=True):
     total_iters = len(good_options) * len(stpr_options) * len(avg_options)
     
     print("Starting computations matrix generation...")
-    pbar = tqdm(total=total_iters, desc="Processing Toggles")
+    pbar = tqdm(total=total_iters, desc="Toggle Sets", unit="toggle")
     
     for good_only in good_options:
         if good_only and label_lookup is not None:
@@ -426,13 +625,14 @@ def precompute_all_dashboards(write_outputs=True):
             neurons_df_calc = neurons_df_raw
 
         # Save Region Counts
-        region_counts_tmp = (
-            neurons_df_calc["region"].value_counts().rename_axis("region").reset_index(name="n_neurons")
-        )
-        region_pid_counts_tmp = neurons_df_calc.groupby("region")["pid"].nunique().rename("n_pids").reset_index()
-        region_counts_tmp = region_counts_tmp.merge(region_pid_counts_tmp, on="region", how="left")
-        region_counts_tmp["good_only"] = good_only
-        region_summary_records.append(region_counts_tmp)
+        if not reuse_existing_side_tables:
+            region_counts_tmp = (
+                neurons_df_calc["region"].value_counts().rename_axis("region").reset_index(name="n_neurons")
+            )
+            region_pid_counts_tmp = neurons_df_calc.groupby("region")["pid"].nunique().rename("n_pids").reset_index()
+            region_counts_tmp = region_counts_tmp.merge(region_pid_counts_tmp, on="region", how="left")
+            region_counts_tmp["good_only"] = good_only
+            region_summary_records.append(region_counts_tmp)
 
         region_lookup_all = neurons_df_calc[["pid", "cluster_id", "region"]].drop_duplicates()
         df_arousal_split = _build_arousal_lookup(data_concat.get("df_res"), region_lookup_all)
@@ -450,12 +650,17 @@ def precompute_all_dashboards(write_outputs=True):
                    spec["v1"] in data_for_corr[spec["df"]].columns and
                    spec["v2"] in data_for_corr[spec["df"]].columns
             ]
+            if focus_source_var is not None and target_var_names is not None:
+                focus_allowed = set(target_var_names) | {focus_source_var}
+                available_specs = [spec for spec in available_specs if spec["name"] in focus_allowed]
             
             for avg_by_pid in avg_options:
+                toggle_text = f"good={int(good_only)} stpr={int(use_stpr)} avgpid={int(avg_by_pid)}"
+                pbar.set_postfix_str(toggle_text)
                 # ---------------------------------------------------------
                 # AROUSAL FRACTIONS EXPORT (Only depends on good_only and avg_by_pid)
                 # ---------------------------------------------------------
-                if df_arousal_split is not None and not df_arousal_split.empty and not use_stpr:
+                if (not reuse_existing_side_tables) and df_arousal_split is not None and not df_arousal_split.empty and not use_stpr:
                     # we only need to compute this once per (good_only, avg_by_pid)
                     if avg_by_pid:
                         df_pid = df_arousal_split.groupby(["region", "pid"])["arousal_group"].agg(
@@ -490,18 +695,31 @@ def precompute_all_dashboards(write_outputs=True):
                 # CORRELATIONS EXPORT (Depends on all toggles)
                 # ---------------------------------------------------------
                 groups_to_process = [("all", neurons_df_calc)]
-                if df_arousal_split is not None and not df_arousal_split.empty:
+                if (not focus_spont_strength_newvars) and df_arousal_split is not None and not df_arousal_split.empty:
                     groups_to_process.append(("arousal_plus", df_arousal_split[df_arousal_split["arousal_group"] == "arousal_plus"]))
                     groups_to_process.append(("arousal_minus", df_arousal_split[df_arousal_split["arousal_group"] == "arousal_minus"]))
-                
+
+                group_region_specs = []
+                total_regions = 0
                 for group_name, df_group in groups_to_process:
-                    # Filter regions with >= MIN_NEURONS
                     region_counts_grp = df_group.groupby("region")["cluster_id"].nunique().reset_index(name="n_neurons")
                     eligible_regions = region_counts_grp[region_counts_grp["n_neurons"] >= MIN_NEURONS]["region"].tolist()
+                    group_region_specs.append((group_name, df_group, eligible_regions))
+                    total_regions += len(eligible_regions)
 
+                region_pbar = tqdm(
+                    total=total_regions,
+                    desc=f"Regions {toggle_text}",
+                    unit="region",
+                    leave=False,
+                )
+
+                for group_name, df_group, eligible_regions in group_region_specs:
                     for region in eligible_regions:
                         region_lookup = df_group[df_group["region"] == region][["pid", "cluster_id", "region"]].drop_duplicates()
-                        if region_lookup.empty: continue
+                        if region_lookup.empty:
+                            region_pbar.update(1)
+                            continue
                         
                         var_tables_all = {}
                         for spec in available_specs:
@@ -511,16 +729,43 @@ def precompute_all_dashboards(write_outputs=True):
                                 var_tables_all[spec["name"]] = df_var
                         
                         names = [s["name"] for s in available_specs if s["name"] in var_tables_all]
-                        if not names: continue
+                        if not names:
+                            region_pbar.update(1)
+                            continue
+                        if target_var_names is not None and not any(
+                            _should_compute_pair(name, name, target_var_names=target_var_names, focus_source_var=focus_source_var)
+                            or _should_compute_pair(name, focus_source_var, target_var_names=target_var_names, focus_source_var=focus_source_var)
+                            for name in names
+                        ):
+                            region_pbar.update(1)
+                            continue
                         
                         # Process based on avg_by_pid
                         if avg_by_pid:
                             pid_list = region_lookup["pid"].unique()
                             # Dict to hold pid values before averaging
-                            rel_vals = {name: [] for name in names}
-                            rel_s_vals = {name: [] for name in names}
-                            corr_vals = {(a, b): [] for a in names for b in names if a != b}
-                            corr_s_vals = {(a, b): [] for a in names for b in names if a != b}
+                            diag_names = [
+                                name for name in names
+                                if _should_compute_pair(
+                                    name,
+                                    name,
+                                    target_var_names=target_var_names,
+                                    focus_source_var=focus_source_var,
+                                )
+                            ]
+                            pair_keys = [
+                                (a, b) for a in names for b in names
+                                if a != b and _should_compute_pair(
+                                    a,
+                                    b,
+                                    target_var_names=target_var_names,
+                                    focus_source_var=focus_source_var,
+                                )
+                            ]
+                            rel_vals = {name: [] for name in diag_names}
+                            rel_s_vals = {name: [] for name in diag_names}
+                            corr_vals = {key: [] for key in pair_keys}
+                            corr_s_vals = {key: [] for key in pair_keys}
 
                             for pid in pid_list:
                                 region_pid = region_lookup[region_lookup["pid"] == pid]
@@ -538,7 +783,7 @@ def precompute_all_dashboards(write_outputs=True):
                                 
                                 for spec in available_specs:
                                     name = spec["name"]
-                                    if name not in names: continue
+                                    if name not in rel_vals: continue
                                     if _is_firing_rate_spec(spec):
                                         rel_vals[name].append(np.nan)
                                         rel_s_vals[name].append(np.nan)
@@ -563,7 +808,10 @@ def precompute_all_dashboards(write_outputs=True):
 
                                 for name_i in names:
                                     for name_j in names:
-                                        if name_i == name_j: continue
+                                        if name_i == name_j:
+                                            continue
+                                        if (name_i, name_j) not in corr_vals:
+                                            continue
                                         r_val, _ = _pearsonr_with_n(mean_wide[name_i], mean_wide[name_j])
                                         r_s, _ = _spearmanr_with_n(mean_wide[name_i], mean_wide[name_j])
                                         corr_vals[(name_i, name_j)].append(r_val)
@@ -571,6 +819,16 @@ def precompute_all_dashboards(write_outputs=True):
 
                             for name_i in names:
                                 for name_j in names:
+                                    if not _should_compute_pair(
+                                        name_i,
+                                        name_j,
+                                        target_var_names=target_var_names,
+                                        focus_source_var=focus_source_var,
+                                    ):
+                                        continue
+                                    record_key = _corr_record_key(good_only, use_stpr, avg_by_pid, group_name, region, name_i, name_j)
+                                    if record_key in existing_corr_keys:
+                                        continue
                                     is_diag = (name_i == name_j)
                                     if is_diag:
                                         r_val, n_val = _mean_with_count(rel_vals[name_i])
@@ -599,7 +857,15 @@ def precompute_all_dashboards(write_outputs=True):
                             reliability_s_n = {}
                             for spec in available_specs:
                                 name = spec["name"]
-                                if name not in names: continue
+                                if name not in names:
+                                    continue
+                                if not _should_compute_pair(
+                                    name,
+                                    name,
+                                    target_var_names=target_var_names,
+                                    focus_source_var=focus_source_var,
+                                ):
+                                    continue
                                 df_var = var_tables_all.get(name)
                                 if df_var is None or _is_firing_rate_spec(spec):
                                     reliability[name] = np.nan; reliability_n[name] = 0
@@ -620,6 +886,16 @@ def precompute_all_dashboards(write_outputs=True):
 
                             for name_i in names:
                                 for name_j in names:
+                                    if not _should_compute_pair(
+                                        name_i,
+                                        name_j,
+                                        target_var_names=target_var_names,
+                                        focus_source_var=focus_source_var,
+                                    ):
+                                        continue
+                                    record_key = _corr_record_key(good_only, use_stpr, avg_by_pid, group_name, region, name_i, name_j)
+                                    if record_key in existing_corr_keys:
+                                        continue
                                     is_diag = (name_i == name_j)
                                     if is_diag:
                                         r_val, n_val = reliability[name_i], reliability_n[name_i]
@@ -635,13 +911,33 @@ def precompute_all_dashboards(write_outputs=True):
                                         "pearson_r": r_val, "pearson_n": n_val,
                                         "spearman_rho": s_val, "spearman_n": sn_val,
                                     })
+                        region_pbar.update(1)
+                region_pbar.close()
                 pbar.update(1)
 
     pbar.close()
     print("Concatenating into DataFrames...")
-    df_corr = pd.DataFrame(corr_records)
-    df_arousal_frac = pd.concat(arousal_frac_records, ignore_index=True) if arousal_frac_records else pd.DataFrame()
-    df_region_summary = pd.concat(region_summary_records, ignore_index=True) if region_summary_records else pd.DataFrame()
+    df_corr_new = pd.DataFrame(corr_records)
+    if reuse_existing_side_tables and existing_bundle is not None:
+        df_arousal_frac = existing_bundle.get("df_arousal", pd.DataFrame())
+        df_region_summary = existing_bundle.get("df_region", pd.DataFrame())
+        pid_summary = existing_bundle.get("df_pids", pid_summary)
+    else:
+        df_arousal_frac = pd.concat(arousal_frac_records, ignore_index=True) if arousal_frac_records else pd.DataFrame()
+        df_region_summary = pd.concat(region_summary_records, ignore_index=True) if region_summary_records else pd.DataFrame()
+
+    if append_missing_only and isinstance(existing_corr, pd.DataFrame):
+        if df_corr_new.empty:
+            df_corr = existing_corr.copy()
+            print("No new correlation rows were generated.")
+        else:
+            df_corr = pd.concat([existing_corr, df_corr_new], ignore_index=True)
+            dedup_cols = ["good_only", "use_good_stpr", "avg_by_pid", "arousal_group", "region", "var1", "var2"]
+            df_corr = df_corr.drop_duplicates(subset=dedup_cols, keep="last")
+            df_corr = df_corr.sort_values(dedup_cols).reset_index(drop=True)
+            print(f"Added {len(df_corr_new):,} new correlation rows on top of {len(existing_corr):,} existing rows.")
+    else:
+        df_corr = df_corr_new
 
     if write_outputs:
         _write_region_cache_outputs(
@@ -654,7 +950,11 @@ def precompute_all_dashboards(write_outputs=True):
     else:
         print("Computed dashboard tables in memory (no parquet export).")
 
-    return df_corr, df_arousal_frac, df_region_summary, pid_summary, "0.50 (batch minimum)"
+    return df_corr, df_arousal_frac, df_region_summary, pid_summary, label_min_text
 
 if __name__ == "__main__":
-    precompute_all_dashboards()
+    args = parse_args()
+    precompute_all_dashboards(
+        append_missing_only=bool(args.append_missing_only),
+        focus_spont_strength_newvars=bool(args.focus_spont_strength_newvars),
+    )

@@ -31,6 +31,15 @@ from utils.packet_dashboard import (
 
 st.set_page_config(page_title="Packet Dashboard", layout="wide")
 
+DEFAULT_CLUSTER_METHODS = [
+    "raw_kmeans",
+    "normalized_kmeans",
+    "residual_kmeans",
+    "raw_pca_kmeans",
+    "normalized_pca_kmeans",
+    "residual_pca_kmeans",
+]
+
 
 @st.cache_data(show_spinner=False)
 def _load_packet_cache(pid):
@@ -129,24 +138,32 @@ with st.sidebar:
     pid = st.selectbox("PID", packet_pid_list, index=0)
     packet_cache = _load_packet_cache(pid)
     base_cache = _load_base_cache_data(pid)
-    shape_modes = list(packet_cache.get("packet_config", {}).get("SHAPE_MODES", ["raw", "normalized", "residual"]))
-    shape_mode = st.selectbox("Shape Mode", shape_modes, index=0)
     region_summary_df = packet_cache.get("region_summary_df", pd.DataFrame())
     region_options = region_summary_df["region"].astype(str).tolist() if not region_summary_df.empty else []
     if not region_options:
         st.error("No packet regions available in this cache.")
         st.stop()
     region = st.selectbox("Region", region_options, index=0)
+    region_bundle_sidebar = packet_cache["region_results"][region]
+    cluster_methods = list(packet_cache.get("packet_config", {}).get("CLUSTER_METHODS", DEFAULT_CLUSTER_METHODS))
+    cluster_methods_available = [
+        method
+        for method in cluster_methods
+        if region_bundle_sidebar.get("cluster_results", {}).get(method) is not None
+    ]
+    if not cluster_methods_available:
+        cluster_methods_available = cluster_methods
+    cluster_method = st.selectbox("Clustering Method", cluster_methods_available, index=0)
 
 region_bundle = packet_cache["region_results"][region]
-shape_result = region_bundle["shape_results"].get(shape_mode)
-if shape_result is None:
-    st.error(f"No clustering result available for region `{region}` in shape mode `{shape_mode}`.")
+cluster_result = region_bundle.get("cluster_results", {}).get(cluster_method)
+if cluster_result is None:
+    st.error(f"No clustering result available for region `{region}` with clustering method `{cluster_method}`.")
     st.stop()
 
 recording_length_s = packet_cache.get("meta", {}).get("recording_length_s")
 default_t_start, default_t_end = _default_window(region_bundle, recording_length_s)
-window_sig = f"{pid}|{region}|{shape_mode}"
+window_sig = f"{pid}|{region}|{cluster_method}"
 if st.session_state.get("packet_window_sig") != window_sig:
     st.session_state.packet_window_sig = window_sig
     st.session_state.packet_t_start = float(default_t_start)
@@ -201,6 +218,17 @@ with region_col:
 st.subheader("General Raster")
 try:
     spikes, clusters, sl, _ssl = _load_raw_session(pid)
+    raster_cluster_ids = np.asarray(region_bundle["packet_dataset"].get("cluster_ids", np.array([], dtype=int)), dtype=int)
+    raster_cluster_acronyms = np.asarray(
+        region_bundle["packet_dataset"].get("unit_table", pd.DataFrame()).get("acronym", pd.Series(dtype=str)),
+        dtype=str,
+    )
+    raster_config_plot = dict(packet_cache.get("config_plot", {}))
+    raster_config_plot["PLOT_ONLY_GOOD_UNITS"] = False
+    raster_config_plot["PLOT_LABEL_MIN"] = None
+    raster_config_plot["AVG_PSTH_ONLY_GOOD"] = False
+    raster_sort_metric = "spont"
+
     whisk_inputs = build_whisk_raster_overlay_inputs(
         df_wh=base_cache.get("df_wh"),
         wh_detect=base_cache.get("wh_detect"),
@@ -210,14 +238,14 @@ try:
     fig_raster = plot_time_window_raster_plotly(
         spikes,
         clusters,
-        packet_cache["cluster_ids"],
-        packet_cache["cluster_acronyms_plot"],
+        raster_cluster_ids,
+        raster_cluster_acronyms,
         sl,
-        packet_cache.get("config_plot", {}),
+        raster_config_plot,
         float(t_start),
         float(t_end),
-        region_acronyms=None,
-        sorting_metric=packet_cache.get("packet_config", {}).get("SORT_METRIC_KEY", "spont"),
+        region_acronyms=[region],
+        sorting_metric=raster_sort_metric,
         df_res=base_cache.get("df_res"),
         df_coupling=base_cache.get("df_coupling"),
         df_coupling_task=base_cache.get("df_coupling_task"),
@@ -236,10 +264,10 @@ try:
     region_y0, region_y1 = get_region_raster_y_bounds(
         region,
         clusters,
-        packet_cache["cluster_ids"],
-        packet_cache["cluster_acronyms_plot"],
-        packet_cache.get("config_plot", {}),
-        packet_cache.get("packet_config", {}).get("SORT_METRIC_KEY", "spont"),
+        raster_cluster_ids,
+        raster_cluster_acronyms,
+        raster_config_plot,
+        raster_sort_metric,
         df_res=base_cache.get("df_res"),
         df_coupling=base_cache.get("df_coupling"),
         df_coupling_task=base_cache.get("df_coupling_task"),
@@ -247,7 +275,7 @@ try:
     )
     fig_raster = add_packet_cluster_markers_to_raster(
         fig_raster,
-        shape_result["packet_plot_df"],
+        cluster_result["packet_plot_df"],
         float(t_start),
         float(t_end),
         packet_window_s=region_bundle["packet_dataset"].get("packet_window_s"),
@@ -270,12 +298,12 @@ st.subheader("Template and Cluster Heatmaps")
 heat_col1, heat_col2 = st.columns(2)
 with heat_col1:
     st.plotly_chart(
-        build_cluster_heatmap_figure(region_bundle, shape_mode=shape_mode, normalized_space=False, template=plot_template),
+        build_cluster_heatmap_figure(region_bundle, cluster_method=cluster_method, normalized_space=False, template=plot_template),
         use_container_width=True,
     )
 with heat_col2:
     st.plotly_chart(
-        build_cluster_heatmap_figure(region_bundle, shape_mode=shape_mode, normalized_space=True, template=plot_template),
+        build_cluster_heatmap_figure(region_bundle, cluster_method=cluster_method, normalized_space=True, template=plot_template),
         use_container_width=True,
     )
 
@@ -298,14 +326,14 @@ if trials is None:
     trials = base_cache.get("trials")
 fig_psth = build_packet_psth_figure(
     np.asarray(region_bundle["packet_dataset"]["packet_times"], dtype=float),
-    np.asarray(shape_result["cluster_labels"], dtype=int),
+    np.asarray(cluster_result["cluster_labels"], dtype=int),
     trials,
     packet_cache.get("wh_events_by_period", {}),
     packet_cache.get("packet_config", {}).get("WHISK_EVENT_CONTEXT", "all"),
     packet_cache.get("config_plot", {}),
-    title=f"Region {region} | {shape_mode} | Packet Cluster PSTHs",
+    title=f"Region {region} | {cluster_method} | Packet Cluster PSTHs",
     cluster_name_prefix="Cluster",
     template=plot_template,
-    precomputed=shape_result.get("packet_psth"),
+    precomputed=cluster_result.get("packet_psth"),
 )
 st.plotly_chart(fig_psth, use_container_width=True)

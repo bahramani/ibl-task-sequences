@@ -30,7 +30,7 @@ BASE_PATH = Path(__file__).resolve().parents[1]
 BASE_CACHE_DIR = BASE_PATH / "data" / "dashboard_cache"
 PACKET_CACHE_DIR = BASE_PATH / "data" / "packet_dashboard_cache"
 
-PACKET_DASHBOARD_VERSION = "packet-dashboard-v1.1"
+PACKET_DASHBOARD_VERSION = "packet-dashboard-v3.0"
 
 DEFAULT_PACKET_CONFIG = {
     "TEMPLATE_SOURCE": "spont",
@@ -46,6 +46,7 @@ DEFAULT_PACKET_CONFIG = {
     "PACKET_THRESHOLD": 2.0,
     "MIN_PACKET_GAP_S": 0.1,
     "LABEL_MIN": 0.5,
+    "TARGET_REGION": None,
     "SORT_METRIC_KEY": "spont",
     "PACKET_PERIOD_MIN_OVERLAP_S": 0.05,
     "FEATURES_MAIN": [
@@ -55,17 +56,22 @@ DEFAULT_PACKET_CONFIG = {
         "t_com",
         "relative_rank_order",
         "temporal_width",
+        "other_unit_mean_activity_at_t_com",
+        "packet_rate_over_recording_rate",
     ],
-    "SHAPE_MODES": ["raw", "normalized", "residual"],
+    "CLUSTER_METHODS": [
+        "raw_kmeans",
+        "normalized_kmeans",
+        "residual_kmeans",
+        "raw_pca_kmeans",
+        "normalized_pca_kmeans",
+        "residual_pca_kmeans",
+    ],
     "CLUSTER_MIN_K": 2,
     "CLUSTER_MAX_K": 6,
     "KMEANS_N_INIT": 20,
     "KMEANS_MAX_ITER": 100,
     "PCA_COMPONENTS": 6,
-    "UMAP_PRE_PCA_COMPONENTS": 10,
-    "UMAP_NEIGHBORS": 20,
-    "UMAP_MIN_DIST": 0.2,
-    "UMAP_RANDOM_STATE": 0,
     "WHISK_EVENT_CONTEXT": "all",
 }
 
@@ -79,6 +85,8 @@ PACKET_FEATURE_LABELS = {
     "t_com": "Spike COM",
     "relative_rank_order": "Relative rank order",
     "temporal_width": "Temporal width",
+    "other_unit_mean_activity_at_t_com": "Other-unit mean activity at own COM",
+    "packet_rate_over_recording_rate": "Packet mean rate / recording rate",
     "coupling_strength": "Coupling strength",
     "coupling_delay_ms": "Coupling delay (ms)",
     "packet_score": "Packet score (z)",
@@ -94,9 +102,25 @@ PACKET_FEATURE_ALIASES = {
     "template dot": "template_dot",
     "packet fraction": "packet_fraction",
     "relative rank order": "relative_rank_order",
+    "other unit mean activity at own com": "other_unit_mean_activity_at_t_com",
+    "packet mean rate / recording rate": "packet_rate_over_recording_rate",
+    "packet rate over recording rate": "packet_rate_over_recording_rate",
     "coupling delay": "coupling_delay_ms",
     "coupling strength": "coupling_strength",
 }
+
+PACKET_CLUSTER_METHOD_SPECS = {
+    "raw_kmeans": {"shape_mode": "raw", "use_pca": False},
+    "normalized_kmeans": {"shape_mode": "normalized", "use_pca": False},
+    "residual_kmeans": {"shape_mode": "residual", "use_pca": False},
+    "raw_pca_kmeans": {"shape_mode": "raw", "use_pca": True},
+    "normalized_pca_kmeans": {"shape_mode": "normalized", "use_pca": True},
+    "residual_pca_kmeans": {"shape_mode": "residual", "use_pca": True},
+}
+PACKET_CLUSTER_METHOD_ALIASES = {
+    "pca_kmeans": "raw_pca_kmeans",
+}
+DEFAULT_PACKET_CLUSTER_METHOD = DEFAULT_PACKET_CONFIG["CLUSTER_METHODS"][0]
 
 
 def list_available_pids(cache_dir=BASE_CACHE_DIR):
@@ -902,7 +926,9 @@ def compute_main_packet_feature_tables(packet_dataset, df_tpl_for_merge, spike_t
     packet_context = np.asarray(packet_dataset["packet_context"], dtype=object)
     packet_tensor = np.asarray(packet_dataset["packet_tensor"], dtype=float)
     template_matrix = np.asarray(packet_dataset["template_matrix"], dtype=float)
+    rel_bin_centers = np.asarray(packet_dataset["rel_bin_centers"], dtype=float)
     rel_bin_edges = np.asarray(packet_dataset["rel_bin_edges"], dtype=float)
+    packet_window_s = float(packet_dataset.get("packet_window_s", np.nan))
     cluster_ids_region = np.asarray(packet_dataset["cluster_ids"], dtype=int)
     unit_table = packet_dataset["unit_table"][["cluster_id", "acronym"]].copy()
 
@@ -930,6 +956,8 @@ def compute_main_packet_feature_tables(packet_dataset, df_tpl_for_merge, spike_t
         t_first_spike = np.full(n_units, np.nan, dtype=float)
         relative_rank_order = np.full(n_units, np.nan, dtype=float)
         temporal_width = np.full(n_units, np.nan, dtype=float)
+        other_unit_mean_activity_at_t_com = np.full(n_units, np.nan, dtype=float)
+        packet_rate_over_recording_rate = np.full(n_units, np.nan, dtype=float)
 
         for unit_idx, cid in enumerate(cluster_ids_region):
             cid = int(cid)
@@ -954,6 +982,30 @@ def compute_main_packet_feature_tables(packet_dataset, df_tpl_for_merge, spike_t
             t_first_spike[unit_idx] = float(np.min(spikes_rel))
             t_com[unit_idx] = float(np.mean(spikes_rel))
             temporal_width[unit_idx] = float(np.std(spikes_rel)) if n_spikes > 1 else 0.0
+
+            baseline_rate_hz = float(baseline_rates_hz.get(cid, np.nan))
+            if np.isfinite(baseline_rate_hz) and baseline_rate_hz > 0 and np.isfinite(packet_window_s) and packet_window_s > 0:
+                packet_mean_rate_hz = float(n_spikes) / float(packet_window_s)
+                packet_rate_over_recording_rate[unit_idx] = packet_mean_rate_hz / baseline_rate_hz
+
+        if n_units >= 2 and rel_bin_centers.size > 0:
+            for unit_idx in range(n_units):
+                if not np.isfinite(t_com[unit_idx]):
+                    continue
+                t_com_val = float(np.clip(float(t_com[unit_idx]), float(rel_bin_centers[0]), float(rel_bin_centers[-1])))
+                interp_vals = np.array(
+                    [
+                        float(np.interp(t_com_val, rel_bin_centers, np.nan_to_num(packet_tensor[pkt_idx, other_idx], nan=0.0)))
+                        for other_idx in range(n_units)
+                    ],
+                    dtype=float,
+                )
+                other_mask = np.ones(n_units, dtype=bool)
+                other_mask[unit_idx] = False
+                other_vals = interp_vals[other_mask]
+                valid_other = np.isfinite(other_vals)
+                if np.any(valid_other):
+                    other_unit_mean_activity_at_t_com[unit_idx] = float(np.mean(other_vals[valid_other]))
 
         total_packet_spikes = float(np.sum(spike_count))
         if total_packet_spikes > 0:
@@ -984,6 +1036,8 @@ def compute_main_packet_feature_tables(packet_dataset, df_tpl_for_merge, spike_t
                     "t_com": float(t_com[unit_idx]),
                     "relative_rank_order": float(relative_rank_order[unit_idx]),
                     "temporal_width": float(temporal_width[unit_idx]),
+                    "other_unit_mean_activity_at_t_com": float(other_unit_mean_activity_at_t_com[unit_idx]),
+                    "packet_rate_over_recording_rate": float(packet_rate_over_recording_rate[unit_idx]),
                 }
             )
 
@@ -1169,34 +1223,6 @@ def _compute_matrix_pca(matrix, n_components=6):
     }
 
 
-def compute_umap_embedding(
-    matrix,
-    pre_pca_components=10,
-    n_neighbors=20,
-    min_dist=0.2,
-    random_state=0,
-):
-    x = np.asarray(matrix, dtype=float)
-    if x.ndim != 2 or x.shape[0] < 2 or x.shape[1] == 0:
-        return None
-    try:
-        import umap
-    except Exception:
-        return None
-    umap_input = x
-    if int(pre_pca_components) > 0 and x.shape[1] > int(pre_pca_components):
-        pca = _compute_matrix_pca(x, n_components=min(int(pre_pca_components), x.shape[0], x.shape[1]))
-        umap_input = np.asarray(pca["scores"], dtype=float)
-    reducer = umap.UMAP(
-        n_components=2,
-        n_neighbors=int(n_neighbors),
-        min_dist=float(min_dist),
-        metric="euclidean",
-        random_state=int(random_state),
-    )
-    return np.asarray(reducer.fit_transform(umap_input), dtype=float)
-
-
 def _residualize_matrix_against_scalar(matrix, scalar):
     x = np.asarray(matrix, dtype=float)
     scalar = np.asarray(scalar, dtype=float).reshape(-1)
@@ -1211,42 +1237,66 @@ def _transform_packet_size(packet_size):
     return np.log1p(packet_size)
 
 
-def prepare_feature_cluster_matrix(feature_df, packet_summary_df, packet_dataset, feature_names, shape_mode):
+def _filter_column_labels(column_labels, keep_mask):
+    return [label for label, keep in zip(column_labels, np.asarray(keep_mask, dtype=bool)) if keep]
+
+
+def prepare_feature_cluster_inputs(feature_df, packet_summary_df, packet_dataset, feature_names):
     raw_matrix, raw_columns = _build_packet_feature_matrix(feature_df, packet_dataset, feature_names, normalized=False)
     normalized_matrix, normalized_columns = _build_packet_feature_matrix(feature_df, packet_dataset, feature_names, normalized=True)
     raw_std, raw_keep = _standardize_matrix(raw_matrix)
     normalized_std, normalized_keep = _standardize_matrix(normalized_matrix)
     packet_size = pd.to_numeric(packet_summary_df["packet_size"], errors="coerce").to_numpy(dtype=float)
     size_covariate = _transform_packet_size(packet_size)
-    residual_std = _residualize_matrix_against_scalar(raw_std, size_covariate)
-    residual_std, residual_keep = _standardize_matrix(residual_std)
 
-    shape_mode = str(shape_mode).strip().lower()
-    if shape_mode == "raw":
-        return {
+    raw_labels = _filter_column_labels(raw_columns, raw_keep)
+    normalized_labels = _filter_column_labels(normalized_columns, normalized_keep)
+
+    residual_base = _residualize_matrix_against_scalar(raw_std, size_covariate)
+    residual_std, residual_keep = _standardize_matrix(residual_base)
+    residual_labels = [
+        f"{label} | size residual"
+        for label, keep in zip(raw_labels, np.asarray(residual_keep, dtype=bool))
+        if keep
+    ]
+
+    by_shape = {
+        "raw": {
+            "shape_mode": "raw",
             "cluster_matrix": raw_std.astype(np.float32),
-            "column_labels": [label for label, keep in zip(raw_columns, raw_keep) if keep],
-            "packet_size": packet_size.astype(np.float32),
-            "size_covariate": size_covariate.astype(np.float32),
-            "shape_mode": shape_mode,
-        }
-    if shape_mode == "normalized":
-        return {
+            "column_labels": raw_labels,
+            "feature_space": "raw_standardized",
+        },
+        "normalized": {
+            "shape_mode": "normalized",
             "cluster_matrix": normalized_std.astype(np.float32),
-            "column_labels": [label for label, keep in zip(normalized_columns, normalized_keep) if keep],
-            "packet_size": packet_size.astype(np.float32),
-            "size_covariate": size_covariate.astype(np.float32),
-            "shape_mode": shape_mode,
-        }
-    if shape_mode == "residual":
-        return {
+            "column_labels": normalized_labels,
+            "feature_space": "normalized_standardized",
+        },
+        "residual": {
+            "shape_mode": "residual",
             "cluster_matrix": residual_std.astype(np.float32),
-            "column_labels": [f"{label} | size residual" for label, keep in zip(raw_columns, raw_keep) if keep],
-            "packet_size": packet_size.astype(np.float32),
-            "size_covariate": size_covariate.astype(np.float32),
-            "shape_mode": shape_mode,
-        }
-    raise ValueError(f"Unsupported shape mode: {shape_mode}")
+            "column_labels": residual_labels,
+            "feature_space": "raw_size_residual_standardized",
+        },
+    }
+    return {
+        "cluster_matrix": by_shape["raw"]["cluster_matrix"],
+        "column_labels": list(by_shape["raw"]["column_labels"]),
+        "packet_size": packet_size.astype(np.float32),
+        "size_covariate": size_covariate.astype(np.float32),
+        "feature_space": by_shape["raw"]["feature_space"],
+        "by_shape": by_shape,
+    }
+
+
+def _resolve_cluster_method_spec(cluster_method):
+    method_key = str(cluster_method).strip().lower()
+    method_key = PACKET_CLUSTER_METHOD_ALIASES.get(method_key, method_key)
+    spec = PACKET_CLUSTER_METHOD_SPECS.get(method_key)
+    if spec is None:
+        raise ValueError(f"Unsupported packet clustering method: {cluster_method}")
+    return method_key, dict(spec)
 
 
 def _kmeans_numpy(x, n_clusters, n_init=20, max_iter=100, random_state=0):
@@ -1389,6 +1439,162 @@ def _packet_overlap_mask(packet_windows, intervals, min_overlap_s):
     return mask
 
 
+def _resolve_target_regions(region_names, target_region):
+    ordered_regions = [str(region).strip() for region in region_names if str(region).strip()]
+    ordered_regions = list(dict.fromkeys(ordered_regions))
+    target_region = None if target_region is None else str(target_region).strip()
+    if not target_region:
+        return ordered_regions
+
+    exact_matches = [region for region in ordered_regions if region == target_region]
+    if exact_matches:
+        return exact_matches
+
+    prefix_matches = [region for region in ordered_regions if region.startswith(target_region)]
+    if prefix_matches:
+        return prefix_matches
+
+    raise RuntimeError(
+        f"Requested TARGET_REGION `{target_region}` was not found in packet regions: {ordered_regions}"
+    )
+
+
+def _packet_context_color_map():
+    return {
+        "task": "#1f77b4",
+        "spont": "#ff7f0e",
+        "iti": "#2ca02c",
+        "other": "#7f7f7f",
+        "overlap": "#9467bd",
+        "spont_whisking": "#bcbd22",
+        "spont_non_whisking": "#8c564b",
+    }
+
+
+def _show_region_pca_selection_figures(region, packet_summary_df, feature_embeddings_pca, shape_modes):
+    import matplotlib.pyplot as plt
+
+    context_values = packet_summary_df.get("context_split", packet_summary_df.get("packet_context", pd.Series(dtype=object)))
+    context_values = np.asarray(pd.Series(context_values).astype(str), dtype=object)
+    color_map = _packet_context_color_map()
+    figures = {}
+
+    for shape_mode in shape_modes:
+        pca_result = feature_embeddings_pca.get(shape_mode)
+        if pca_result is None:
+            continue
+        scores = np.asarray(pca_result["scores"], dtype=float)
+        explained = np.asarray(pca_result["explained_ratio"], dtype=float)
+        if scores.ndim != 2 or scores.shape[0] < 2 or scores.shape[1] == 0:
+            continue
+
+        x_vals = scores[:, 0]
+        y_vals = scores[:, 1] if scores.shape[1] >= 2 else np.zeros(scores.shape[0], dtype=float)
+        fig, ax = plt.subplots(figsize=(7.5, 6.0))
+        unique_contexts = [ctx for ctx in pd.unique(context_values).tolist() if isinstance(ctx, str) and ctx]
+        if unique_contexts:
+            for context_label in unique_contexts:
+                mask = context_values == context_label
+                if not np.any(mask):
+                    continue
+                ax.scatter(
+                    x_vals[mask],
+                    y_vals[mask],
+                    s=26,
+                    alpha=0.8,
+                    label=context_label,
+                    color=color_map.get(context_label, "#7f7f7f"),
+                    edgecolors="none",
+                )
+            ax.legend(loc="best", fontsize=8, frameon=False)
+        else:
+            ax.scatter(x_vals, y_vals, s=26, alpha=0.8, color="#1f77b4", edgecolors="none")
+
+        pc1_label = f"PC1 ({100.0 * explained[0]:.1f}% var)" if explained.size >= 1 else "PC1"
+        pc2_label = f"PC2 ({100.0 * explained[1]:.1f}% var)" if explained.size >= 2 else "PC2"
+        ax.set_xlabel(pc1_label)
+        ax.set_ylabel(pc2_label)
+        ax.set_title(f"Region {region} | {shape_mode} PCA feature space | packets={scores.shape[0]}")
+        ax.grid(alpha=0.2)
+        fig.tight_layout()
+        figures[shape_mode] = fig
+
+    if figures:
+        plt.ion()
+        plt.show(block=False)
+        plt.pause(0.1)
+    return plt, figures
+
+
+def _prompt_manual_pca_cluster_counts(region, packet_summary_df, feature_embeddings_pca, packet_config, requested_methods):
+    mode = str(packet_config.get("PCA_CLUSTER_K_SELECTION", "auto")).strip().lower()
+    if mode not in {"prompt", "interactive", "manual_prompt"}:
+        return {}
+
+    requested_methods = {
+        PACKET_CLUSTER_METHOD_ALIASES.get(str(method).strip().lower(), str(method).strip().lower())
+        for method in requested_methods
+    }
+    shape_modes = [
+        shape_mode
+        for shape_mode in ("raw", "normalized", "residual")
+        if f"{shape_mode}_pca_kmeans" in requested_methods
+    ]
+    if not shape_modes:
+        return {}
+
+    plt, figures = _show_region_pca_selection_figures(
+        region,
+        packet_summary_df,
+        feature_embeddings_pca,
+        shape_modes,
+    )
+    manual_counts = {}
+    try:
+        for shape_mode in shape_modes:
+            pca_result = feature_embeddings_pca.get(shape_mode)
+            if pca_result is None:
+                continue
+            scores = np.asarray(pca_result["scores"], dtype=float)
+            if scores.ndim != 2 or scores.shape[0] < 2 or scores.shape[1] == 0:
+                continue
+
+            k_upper = min(int(packet_config.get("CLUSTER_MAX_K", 6)), int(scores.shape[0]))
+            k_lower = max(1, int(packet_config.get("CLUSTER_MIN_K", 2)))
+            k_lower = min(k_lower, k_upper)
+            auto_k, _k_eval_df = choose_cluster_count(
+                scores,
+                k_min=max(2, k_lower),
+                k_max=max(2, k_upper),
+                n_init=int(packet_config.get("KMEANS_N_INIT", 20)),
+                max_iter=int(packet_config.get("KMEANS_MAX_ITER", 100)),
+                random_state=0,
+            )
+            default_k = int(auto_k) if auto_k is not None else int(k_lower)
+
+            while True:
+                response = input(
+                    f"Region {region} | {shape_mode} PCA clusters [{k_lower}-{k_upper}, Enter={default_k}]: "
+                ).strip()
+                if response == "":
+                    chosen_k = default_k
+                    break
+                if response.isdigit():
+                    chosen_k = int(response)
+                    if k_lower <= chosen_k <= k_upper:
+                        break
+                print(f"Please enter an integer between {k_lower} and {k_upper}.")
+
+            manual_counts[f"{shape_mode}_pca_kmeans"] = int(chosen_k)
+            print(f"Using {chosen_k} clusters for region {region} | {shape_mode} PCA clustering.")
+    finally:
+        if plt is not None:
+            for fig in figures.values():
+                plt.close(fig)
+
+    return manual_counts
+
+
 def annotate_packet_periods(packet_dataset, trials, wh_detect, min_overlap_s=0.05):
     packet_windows = np.asarray(packet_dataset.get("packet_windows", np.empty((0, 2))), dtype=float)
     packet_context = np.asarray(packet_dataset.get("packet_context", []), dtype=object)
@@ -1499,58 +1705,115 @@ def compute_region_packet_bundle(
     denom = np.where(packet_size > 0, packet_size, 1.0)
     packet_tensor_normalized = (packet_tensor_raw / denom[:, None, None]).astype(np.float32)
 
-    shape_results = {}
+    cluster_inputs = prepare_feature_cluster_inputs(
+        feature_df,
+        packet_summary_df,
+        packet_dataset,
+        MAIN_PACKET_FEATURES,
+    )
+    feature_embeddings_pca = {}
+    for shape_mode, shape_input in cluster_inputs["by_shape"].items():
+        shape_matrix = np.asarray(shape_input["cluster_matrix"], dtype=float)
+        if shape_matrix.shape[0] > 0 and shape_matrix.shape[1] > 0:
+            feature_embeddings_pca[shape_mode] = _compute_matrix_pca(
+                shape_matrix,
+                n_components=int(packet_config["PCA_COMPONENTS"]),
+            )
+        else:
+            feature_embeddings_pca[shape_mode] = None
+
+    requested_cluster_methods = list(packet_config.get("CLUSTER_METHODS", DEFAULT_PACKET_CONFIG["CLUSTER_METHODS"]))
+    manual_pca_cluster_counts = _prompt_manual_pca_cluster_counts(
+        region,
+        packet_summary_df,
+        feature_embeddings_pca,
+        packet_config,
+        requested_cluster_methods,
+    )
+
+    cluster_results = {}
     summary_row = {"region": region, "n_packets": int(len(packet_dataset["packet_times"]))}
-    for shape_mode in packet_config["SHAPE_MODES"]:
-        cluster_input = prepare_feature_cluster_matrix(
-            feature_df,
-            packet_summary_df,
-            packet_dataset,
-            MAIN_PACKET_FEATURES,
-            shape_mode,
-        )
-        cluster_matrix = np.asarray(cluster_input["cluster_matrix"], dtype=float)
-        if cluster_matrix.shape[0] < 2 or cluster_matrix.shape[1] == 0:
-            shape_results[shape_mode] = None
-            summary_row[f"n_clusters_{shape_mode}"] = 0
+    for cluster_method in requested_cluster_methods:
+        method_key, method_spec = _resolve_cluster_method_spec(cluster_method)
+        cluster_results[method_key] = None
+        summary_row[f"n_clusters_{method_key}"] = 0
+
+        shape_mode = method_spec["shape_mode"]
+        shape_input = cluster_inputs["by_shape"].get(shape_mode)
+        if shape_input is None:
             continue
-        chosen_k, k_eval_df = choose_cluster_count(
-            cluster_matrix,
+        shape_matrix = np.asarray(shape_input["cluster_matrix"], dtype=float)
+        if shape_matrix.shape[0] < 2 or shape_matrix.shape[1] == 0:
+            continue
+
+        shape_pca = feature_embeddings_pca.get(shape_mode)
+        if bool(method_spec["use_pca"]):
+            if shape_pca is None:
+                continue
+            cluster_space = np.asarray(shape_pca["scores"], dtype=float)
+            cluster_space_name = "PCA"
+        else:
+            cluster_space = shape_matrix
+            cluster_space_name = "All features"
+        if cluster_space.ndim != 2 or cluster_space.shape[0] < 2 or cluster_space.shape[1] == 0:
+            continue
+
+        auto_k, k_eval_df = choose_cluster_count(
+            cluster_space,
             k_min=int(packet_config["CLUSTER_MIN_K"]),
             k_max=int(packet_config["CLUSTER_MAX_K"]),
             n_init=int(packet_config["KMEANS_N_INIT"]),
             max_iter=int(packet_config["KMEANS_MAX_ITER"]),
             random_state=0,
         )
-        if chosen_k is None:
-            shape_results[shape_mode] = None
-            summary_row[f"n_clusters_{shape_mode}"] = 0
+        if auto_k is None:
             continue
+
+        manual_k = manual_pca_cluster_counts.get(method_key)
+        chosen_k = int(manual_k) if manual_k is not None else int(auto_k)
+
         cluster_labels, cluster_centroids = _kmeans_numpy(
-            cluster_matrix,
+            cluster_space,
             n_clusters=chosen_k,
             n_init=int(packet_config["KMEANS_N_INIT"]),
             max_iter=int(packet_config["KMEANS_MAX_ITER"]),
             random_state=0,
         )
-        cluster_pca = _compute_matrix_pca(cluster_matrix, n_components=int(packet_config["PCA_COMPONENTS"]))
+
         packet_plot_df = packet_summary_df.copy()
         packet_plot_df["cluster_label"] = cluster_labels
-        packet_plot_df["pc1"] = cluster_pca["scores"][:, 0] if cluster_pca["scores"].shape[1] >= 1 else np.zeros(cluster_matrix.shape[0], dtype=float)
-        packet_plot_df["pc2"] = cluster_pca["scores"][:, 1] if cluster_pca["scores"].shape[1] >= 2 else np.zeros(cluster_matrix.shape[0], dtype=float)
-        shape_results[shape_mode] = {
-            "cluster_input": {
-                "cluster_matrix": cluster_input["cluster_matrix"].astype(np.float32),
-                "column_labels": list(cluster_input["column_labels"]),
-                "packet_size": cluster_input["packet_size"].astype(np.float32),
-                "size_covariate": cluster_input["size_covariate"].astype(np.float32),
-                "shape_mode": cluster_input["shape_mode"],
-            },
+        if shape_pca is not None:
+            pca_scores = np.asarray(shape_pca["scores"], dtype=float)
+            packet_plot_df["pc1"] = (
+                pca_scores[:, 0] if pca_scores.shape[1] >= 1 else np.full(cluster_space.shape[0], np.nan, dtype=float)
+            )
+            packet_plot_df["pc2"] = (
+                pca_scores[:, 1] if pca_scores.shape[1] >= 2 else np.full(cluster_space.shape[0], np.nan, dtype=float)
+            )
+        else:
+            packet_plot_df["pc1"] = np.full(cluster_space.shape[0], np.nan, dtype=float)
+            packet_plot_df["pc2"] = np.full(cluster_space.shape[0], np.nan, dtype=float)
+
+        cluster_results[method_key] = {
+            "method": method_key,
+            "shape_mode": shape_mode,
+            "cluster_space_name": cluster_space_name,
             "n_clusters": int(chosen_k),
+            "noise_count": 0,
             "k_selection": k_eval_df.copy(),
+            "cluster_count_source": "manual" if manual_k is not None else "auto",
+            "suggested_k": int(auto_k),
             "cluster_labels": np.asarray(cluster_labels, dtype=int),
             "cluster_centroids": np.asarray(cluster_centroids, dtype=np.float32),
-            "cluster_pca": cluster_pca,
+            "embedding": (
+                {
+                    "name": "PCA",
+                    "scores": np.asarray(shape_pca["scores"], dtype=np.float32),
+                    "explained_ratio": np.asarray(shape_pca["explained_ratio"], dtype=np.float32),
+                }
+                if shape_pca is not None
+                else None
+            ),
             "packet_plot_df": packet_plot_df,
             "packet_psth": precompute_packet_psth_data(
                 np.asarray(packet_dataset["packet_times"], dtype=float),
@@ -1561,7 +1824,7 @@ def compute_region_packet_bundle(
                 config_plot,
             ),
         }
-        summary_row[f"n_clusters_{shape_mode}"] = int(chosen_k)
+        summary_row[f"n_clusters_{method_key}"] = int(chosen_k)
 
     return {
         "packet_dataset": packet_dataset,
@@ -1569,14 +1832,27 @@ def compute_region_packet_bundle(
         "neuron_summary_df": neuron_summary_df,
         "packet_summary_df": packet_summary_df,
         "feature_correlation_df": compute_feature_correlations(neuron_summary_df),
+        "cluster_input": {
+            "cluster_matrix": cluster_inputs["cluster_matrix"].astype(np.float32),
+            "column_labels": list(cluster_inputs["column_labels"]),
+            "packet_size": cluster_inputs["packet_size"].astype(np.float32),
+            "size_covariate": cluster_inputs["size_covariate"].astype(np.float32),
+            "feature_space": cluster_inputs["feature_space"],
+        },
+        "cluster_inputs": cluster_inputs["by_shape"],
+        "feature_embedding_pca": feature_embeddings_pca.get("raw"),
+        "feature_embeddings_pca": feature_embeddings_pca,
         "packet_tensor_normalized": packet_tensor_normalized,
-        "shape_results": shape_results,
+        "cluster_results": cluster_results,
         "summary_row": summary_row,
     }
 
 
 def compute_packet_dashboard_cache(pid, packet_config=None, packet_cache_dir=PACKET_CACHE_DIR):
-    packet_config = dict(DEFAULT_PACKET_CONFIG if packet_config is None else packet_config)
+    packet_config = {
+        **DEFAULT_PACKET_CONFIG,
+        **({} if packet_config is None else dict(packet_config)),
+    }
     base_cache = load_base_cache(pid)
 
     spikes = None
@@ -1629,6 +1905,15 @@ def compute_packet_dashboard_cache(pid, packet_config=None, packet_cache_dir=PAC
         packet_config["SORT_METRIC_KEY"],
     )
     region_order = df_units["acronym"].dropna().astype(str).unique().tolist()
+    selected_regions = _resolve_target_regions(
+        list(region_order_sorted) + list(region_order),
+        packet_config.get("TARGET_REGION"),
+    )
+    selected_region_set = set(selected_regions)
+    region_order_sorted = [region for region in region_order_sorted if str(region) in selected_region_set]
+    region_order = [region for region in region_order if str(region) in selected_region_set]
+    if not region_order or not region_order_sorted:
+        raise RuntimeError("No packet regions remain after applying TARGET_REGION filtering.")
 
     df_tpl_for_merge, spont_intervals, task_windows, iti_windows = build_template_source_table(
         spikes,
@@ -1736,6 +2021,44 @@ def cluster_palette():
     ]
 
 
+def _cluster_color(cluster_idx):
+    if int(cluster_idx) < 0:
+        return "#7f7f7f"
+    palette = cluster_palette()
+    return palette[int(cluster_idx) % len(palette)]
+
+
+def _cluster_display_name(cluster_idx, prefix="Cluster"):
+    cluster_idx = int(cluster_idx)
+    if cluster_idx < 0:
+        return "Noise"
+    return f"{prefix} {cluster_idx + 1}"
+
+
+def _sorted_cluster_labels(labels):
+    labels = [int(lbl) for lbl in np.unique(np.asarray(labels, dtype=int))]
+    non_noise = sorted(lbl for lbl in labels if lbl >= 0)
+    noise = [lbl for lbl in labels if lbl < 0]
+    return non_noise + noise
+
+
+def get_cluster_result(region_bundle, cluster_method=DEFAULT_PACKET_CLUSTER_METHOD):
+    cluster_results = region_bundle.get("cluster_results", {})
+    if not isinstance(cluster_results, dict) or not cluster_results:
+        return None
+    if cluster_method is None:
+        for method_key in DEFAULT_PACKET_CONFIG["CLUSTER_METHODS"]:
+            result = cluster_results.get(method_key)
+            if result is not None:
+                return result
+        for result in cluster_results.values():
+            if result is not None:
+                return result
+        return None
+    method_key = PACKET_CLUSTER_METHOD_ALIASES.get(str(cluster_method).strip().lower(), str(cluster_method).strip().lower())
+    return cluster_results.get(method_key)
+
+
 def get_region_raster_y_bounds(
     region,
     clusters,
@@ -1823,7 +2146,7 @@ def add_packet_cluster_markers_to_raster(
             cluster_val = getattr(row, cluster_col, np.nan)
             if not (np.isfinite(start_s) and np.isfinite(end_s) and np.isfinite(cluster_val)):
                 continue
-            color = palette[int(cluster_val) % len(palette)]
+            color = _cluster_color(int(cluster_val))
             fig.add_shape(
                 type="rect",
                 x0=start_s,
@@ -1836,7 +2159,7 @@ def add_packet_cluster_markers_to_raster(
                 row=1,
                 col=1,
             )
-    for cluster_idx in sorted(df_plot[cluster_col].dropna().astype(int).unique()):
+    for cluster_idx in _sorted_cluster_labels(df_plot[cluster_col].dropna().astype(int).to_numpy(dtype=int)):
         mask = pd.to_numeric(df_plot[cluster_col], errors="coerce").to_numpy(dtype=float) == float(cluster_idx)
         x_vals = pd.to_numeric(df_plot.loc[mask, "packet_peak_time_s"], errors="coerce").to_numpy(dtype=float)
         if x_vals.size == 0:
@@ -1848,12 +2171,12 @@ def add_packet_cluster_markers_to_raster(
                 y=np.full(x_vals.shape, y_top, dtype=float),
                 mode="markers",
                 marker=dict(
-                    color=palette[int(cluster_idx) % len(palette)],
+                    color=_cluster_color(int(cluster_idx)),
                     symbol="triangle-down-open",
                     size=13,
                     line=dict(width=2),
                 ),
-                name=f"Packet Cluster {int(cluster_idx) + 1}",
+                name=_cluster_display_name(int(cluster_idx), prefix="Packet Cluster"),
                 legendgroup=f"packet-cluster-{int(cluster_idx)}",
                 showlegend=True,
                 customdata=customdata,
@@ -1870,10 +2193,10 @@ def add_packet_cluster_markers_to_raster(
     return fig
 
 
-def build_packet_score_figure(region_bundle, t_start, t_end, shape_mode="raw", template="plotly_white"):
+def build_packet_score_figure(region_bundle, t_start, t_end, cluster_method=DEFAULT_PACKET_CLUSTER_METHOD, template="plotly_white"):
     dataset = region_bundle["packet_dataset"]
-    shape_result = region_bundle["shape_results"].get(shape_mode)
-    packet_plot_df = shape_result["packet_plot_df"] if shape_result is not None else region_bundle["packet_summary_df"]
+    cluster_result = get_cluster_result(region_bundle, cluster_method)
+    packet_plot_df = cluster_result["packet_plot_df"] if cluster_result is not None else region_bundle["packet_summary_df"]
     time_vals = np.asarray(dataset["detection_bin_centers"], dtype=float)
     score_vals = np.asarray(dataset["region_score_plot"], dtype=float)
     rate_vals = np.asarray(dataset["population_rate_hz"], dtype=float)
@@ -1896,14 +2219,13 @@ def build_packet_score_figure(region_bundle, t_start, t_end, shape_mode="raw", t
         col=1,
     )
     if packet_plot_df is not None and not packet_plot_df.empty:
-        palette = cluster_palette()
         pkt_keep = (
             pd.to_numeric(packet_plot_df["packet_peak_time_s"], errors="coerce").to_numpy(dtype=float) >= float(t_start)
         ) & (
             pd.to_numeric(packet_plot_df["packet_peak_time_s"], errors="coerce").to_numpy(dtype=float) <= float(t_end)
         )
         pkt_df = packet_plot_df.loc[pkt_keep].copy()
-        for cluster_idx in sorted(pkt_df["cluster_label"].dropna().astype(int).unique()):
+        for cluster_idx in _sorted_cluster_labels(pkt_df["cluster_label"].dropna().astype(int).to_numpy(dtype=int)):
             mask = pd.to_numeric(pkt_df["cluster_label"], errors="coerce").to_numpy(dtype=float) == float(cluster_idx)
             x_vals = pd.to_numeric(pkt_df.loc[mask, "packet_peak_time_s"], errors="coerce").to_numpy(dtype=float)
             y_vals = pd.to_numeric(pkt_df.loc[mask, "packet_score"], errors="coerce").to_numpy(dtype=float)
@@ -1912,8 +2234,8 @@ def build_packet_score_figure(region_bundle, t_start, t_end, shape_mode="raw", t
                     x=x_vals,
                     y=y_vals,
                     mode="markers",
-                    marker=dict(color=palette[int(cluster_idx) % len(palette)], size=10, symbol="diamond"),
-                    name=f"Cluster {int(cluster_idx) + 1}",
+                    marker=dict(color=_cluster_color(int(cluster_idx)), size=10, symbol="diamond"),
+                    name=_cluster_display_name(int(cluster_idx)),
                     legendgroup=f"cluster-{int(cluster_idx)}",
                     showlegend=True,
                 ),
@@ -1924,7 +2246,7 @@ def build_packet_score_figure(region_bundle, t_start, t_end, shape_mode="raw", t
     fig.update_yaxes(title_text="Avg PSTH (Hz)", row=2, col=1)
     fig.update_xaxes(title_text="Time in session (s)", row=2, col=1)
     fig.update_layout(
-        title=f"Region {dataset['region']} | {shape_mode} | Packet probability and population PSTH",
+        title=f"Region {dataset['region']} | {cluster_method} | Packet probability and population PSTH",
         template=template,
         height=620,
         margin=dict(l=70, r=40, t=90, b=60),
@@ -1954,12 +2276,12 @@ def _shared_row_zscore_matrices(matrices):
     return [(matrix - mean) / std for matrix in matrices]
 
 
-def build_cluster_heatmap_figure(region_bundle, shape_mode="raw", normalized_space=False, template="plotly_white"):
+def build_cluster_heatmap_figure(region_bundle, cluster_method=DEFAULT_PACKET_CLUSTER_METHOD, normalized_space=False, template="plotly_white"):
     dataset = region_bundle["packet_dataset"]
-    shape_result = region_bundle["shape_results"].get(shape_mode)
-    if shape_result is None:
+    cluster_result = get_cluster_result(region_bundle, cluster_method)
+    if cluster_result is None:
         return go.Figure()
-    cluster_labels = np.asarray(shape_result["cluster_labels"], dtype=int)
+    cluster_labels = np.asarray(cluster_result["cluster_labels"], dtype=int)
     packet_tensor_space = (
         np.asarray(region_bundle["packet_tensor_normalized"], dtype=float)
         if normalized_space
@@ -1984,7 +2306,7 @@ def build_cluster_heatmap_figure(region_bundle, shape_mode="raw", normalized_spa
     template_matrix = template_matrix[order_idx]
     packet_tensor_space = packet_tensor_space[:, order_idx, :]
     rel_bin_centers_ms = np.asarray(dataset["rel_bin_centers"], dtype=float) * 1000.0
-    unique_clusters = np.unique(cluster_labels)
+    unique_clusters = _sorted_cluster_labels(cluster_labels)
 
     matrices = [_row_zscore_matrix(template_matrix)]
     subplot_titles = ["Detection template"]
@@ -2001,7 +2323,7 @@ def build_cluster_heatmap_figure(region_bundle, shape_mode="raw", normalized_spa
         cluster_sizes,
     ):
         matrices.append(cluster_mean_z)
-        subplot_titles.append(f"Cluster {int(cluster_idx) + 1} mean packet (n={n_members})")
+        subplot_titles.append(f"{_cluster_display_name(int(cluster_idx))} mean packet (n={n_members})")
 
     finite_vals = np.concatenate([mat[np.isfinite(mat)] for mat in matrices if mat.size > 0])
     cmax = np.nanpercentile(np.abs(finite_vals), 98) if finite_vals.size > 0 else 1.0
@@ -2033,7 +2355,7 @@ def build_cluster_heatmap_figure(region_bundle, shape_mode="raw", normalized_spa
     fig.update_xaxes(title_text="Time from packet peak (ms)", row=len(matrices), col=1)
     fig.update_layout(
         title=(
-            f"Region {dataset['region']} | {shape_mode} clustering | "
+            f"Region {dataset['region']} | {cluster_method} clustering | "
             f"{'Size-normalized' if normalized_space else 'Raw'} packet heatmaps"
         ),
         template=template,
@@ -2103,16 +2425,15 @@ def build_embedding_figure(packet_plot_df, x_vals, y_vals, color_by="cluster", t
     y_vals = np.asarray(y_vals, dtype=float)
     fig = go.Figure()
     if color_by == "cluster":
-        palette = cluster_palette()
-        for cluster_idx in sorted(packet_plot_df["cluster_label"].dropna().astype(int).unique()):
+        for cluster_idx in _sorted_cluster_labels(packet_plot_df["cluster_label"].dropna().astype(int).to_numpy(dtype=int)):
             mask = pd.to_numeric(packet_plot_df["cluster_label"], errors="coerce").to_numpy(dtype=float) == float(cluster_idx)
             fig.add_trace(
                 go.Scatter(
                     x=x_vals[mask],
                     y=y_vals[mask],
                     mode="markers",
-                    marker=dict(color=palette[int(cluster_idx) % len(palette)], size=9, opacity=0.88),
-                    name=f"Cluster {int(cluster_idx) + 1} (n={int(np.sum(mask))})",
+                    marker=dict(color=_cluster_color(int(cluster_idx)), size=9, opacity=0.88),
+                    name=f"{_cluster_display_name(int(cluster_idx))} (n={int(np.sum(mask))})",
                     customdata=packet_plot_df.loc[mask, ["packet_idx", "packet_peak_time_s", "packet_context"]].to_numpy(),
                     hovertemplate="Packet %{customdata[0]}<br>Peak time %{customdata[1]:.3f}s<br>Context %{customdata[2]}<br>X %{x:.2f}<br>Y %{y:.2f}<extra></extra>",
                 )
@@ -2190,11 +2511,11 @@ def build_neuron_scatter(region_bundle, x_var, y_var, template="plotly_white"):
     return fig
 
 
-def build_packet_scatter(region_bundle, shape_mode, x_var, y_var, color_by="cluster", template="plotly_white"):
-    shape_result = region_bundle["shape_results"].get(shape_mode)
-    if shape_result is None:
+def build_packet_scatter(region_bundle, cluster_method, x_var, y_var, color_by="cluster", template="plotly_white"):
+    cluster_result = get_cluster_result(region_bundle, cluster_method)
+    if cluster_result is None:
         return go.Figure()
-    df_plot = shape_result["packet_plot_df"].copy()
+    df_plot = cluster_result["packet_plot_df"].copy()
     x_var = _resolve_feature_name(x_var)
     y_var = _resolve_feature_name(y_var)
     x_vals = pd.to_numeric(df_plot[x_var], errors="coerce").to_numpy(dtype=float)
@@ -2203,7 +2524,7 @@ def build_packet_scatter(region_bundle, shape_mode, x_var, y_var, color_by="clus
         x_vals = _display_feature_values(x_var, x_vals)
     if y_var in MAIN_PACKET_FEATURES:
         y_vals = _display_feature_values(y_var, y_vals)
-    title = f"Region {region_bundle['packet_dataset']['region']} | {shape_mode} | Packet scatter"
+    title = f"Region {region_bundle['packet_dataset']['region']} | {cluster_method} | Packet scatter"
     return build_embedding_figure(
         df_plot,
         x_vals,
@@ -2248,12 +2569,12 @@ def choose_default_neuron_id(region_bundle):
     return int(variance_df.iloc[best_idx]["cluster_id"])
 
 
-def build_single_neuron_scatter_matrix(region_bundle, shape_mode, cluster_id=None, template="plotly_white"):
-    shape_result = region_bundle["shape_results"].get(shape_mode)
-    if shape_result is None:
+def build_single_neuron_scatter_matrix(region_bundle, cluster_method, cluster_id=None, template="plotly_white"):
+    cluster_result = get_cluster_result(region_bundle, cluster_method)
+    if cluster_result is None:
         return go.Figure(), None
     feature_df = region_bundle["feature_df"].copy()
-    packet_cluster_lookup = shape_result["packet_plot_df"][["packet_idx", "cluster_label"]].drop_duplicates(subset=["packet_idx"])
+    packet_cluster_lookup = cluster_result["packet_plot_df"][["packet_idx", "cluster_label"]].drop_duplicates(subset=["packet_idx"])
     feature_df = feature_df.merge(packet_cluster_lookup, on="packet_idx", how="left")
     if cluster_id is None:
         cluster_id = choose_default_neuron_id(region_bundle)
@@ -2263,7 +2584,6 @@ def build_single_neuron_scatter_matrix(region_bundle, shape_mode, cluster_id=Non
     neuron_df = feature_df.loc[feature_df["cluster_id"] == int(cluster_id)].copy().sort_values("packet_idx")
     if neuron_df.empty:
         return go.Figure(), int(cluster_id)
-    palette = cluster_palette()
     n_features = len(MAIN_PACKET_FEATURES)
     display_col_map = {}
     display_labels = {}
@@ -2273,7 +2593,7 @@ def build_single_neuron_scatter_matrix(region_bundle, shape_mode, cluster_id=Non
         display_col_map[feat] = display_col
         display_labels[feat] = _display_feature_label(feat)
 
-    unique_packet_clusters = sorted(neuron_df["cluster_label"].dropna().astype(int).unique().tolist())
+    unique_packet_clusters = _sorted_cluster_labels(neuron_df["cluster_label"].dropna().astype(int).to_numpy(dtype=int))
     fig = make_subplots(
         rows=n_features,
         cols=n_features,
@@ -2294,10 +2614,10 @@ def build_single_neuron_scatter_matrix(region_bundle, shape_mode, cluster_id=Non
                     fig.add_trace(
                         go.Histogram(
                             x=x_vals[valid],
-                            marker=dict(color=palette[int(cluster_idx) % len(palette)]),
+                            marker=dict(color=_cluster_color(int(cluster_idx))),
                             opacity=0.55,
                             nbinsx=18,
-                            name=f"Packet Cluster {int(cluster_idx) + 1}",
+                            name=_cluster_display_name(int(cluster_idx), prefix="Packet Cluster"),
                             legendgroup=f"packet-cluster-{int(cluster_idx)}",
                             showlegend=(row_idx == 1 and col_idx == 1),
                             hovertemplate=f"{display_labels[x_feat]}<br>Value: %{{x:.3f}}<br>Count: %{{y}}<extra></extra>",
@@ -2319,8 +2639,8 @@ def build_single_neuron_scatter_matrix(region_bundle, shape_mode, cluster_id=Non
                             x=x_vals[valid],
                             y=y_vals[valid],
                             mode="markers",
-                            marker=dict(color=palette[int(cluster_idx) % len(palette)], size=7, opacity=0.78),
-                            name=f"Packet Cluster {int(cluster_idx) + 1}",
+                            marker=dict(color=_cluster_color(int(cluster_idx)), size=7, opacity=0.78),
+                            name=_cluster_display_name(int(cluster_idx), prefix="Packet Cluster"),
                             legendgroup=f"packet-cluster-{int(cluster_idx)}",
                             showlegend=False,
                             customdata=customdata,
@@ -2542,7 +2862,7 @@ def precompute_packet_psth_data(packet_times, cluster_labels, trials, wh_events_
     bin_size = config_plot.get("SINGLE_NEURON_BIN_SIZE", 0.05)
     smooth_sigma = config_plot.get("SINGLE_NEURON_SMOOTH_SIGMA", 1)
     valid_specs = _collect_packet_psth_specs(trials, wh_events_by_period, whisk_context_mode, config_plot)
-    unique_clusters = np.unique(cluster_labels)
+    unique_clusters = _sorted_cluster_labels(cluster_labels)
     cluster_ids_int = [int(cluster_idx) for cluster_idx in unique_clusters]
     cluster_counts = {int(cluster_idx): int(np.sum(cluster_labels == cluster_idx)) for cluster_idx in unique_clusters}
     panels = []
@@ -2608,7 +2928,6 @@ def build_packet_psth_figure(packet_times, cluster_labels, trials, wh_events_by_
     if not psth_data or not psth_data.get("panels"):
         return go.Figure()
 
-    palette = cluster_palette()
     fig = make_subplots(
         rows=5,
         cols=2,
@@ -2645,8 +2964,8 @@ def build_packet_psth_figure(packet_times, cluster_labels, trials, wh_events_by_
                     x=bin_centers,
                     y=firing_rate,
                     mode="lines",
-                    line=dict(color=palette[int(cluster_idx) % len(palette)], width=2),
-                    name=f"{cluster_name_prefix} {int(cluster_idx) + 1} (n={int(psth_data['cluster_counts'].get(int(cluster_idx), 0))})",
+                    line=dict(color=_cluster_color(int(cluster_idx)), width=2),
+                    name=f"{_cluster_display_name(int(cluster_idx), prefix=cluster_name_prefix)} (n={int(psth_data['cluster_counts'].get(int(cluster_idx), 0))})",
                     legendgroup=f"{cluster_name_prefix}-{int(cluster_idx)}",
                     showlegend=(not legend_drawn),
                 ),

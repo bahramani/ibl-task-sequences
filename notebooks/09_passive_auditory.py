@@ -462,7 +462,7 @@ _set_plotly_renderer(PLOTLY_RENDERER)
 
 
 # %% PID and ONE session loading
-PID = "3282a590-8688-44fc-9811-cdf8b80d9a80" # None for selection  # Example: "3282a590-8688-44fc-9811-cdf8b80d9a80"
+PID = "1a276285-8b0e-4cc9-9f0a-a3a002978724" # None for selection  # Example: "3282a590-8688-44fc-9811-cdf8b80d9a80"
 ONE_PREFERRED_MODE = "remote"  # "local" or "remote"
 ALLOW_REMOTE_FALLBACK = True
 
@@ -599,7 +599,7 @@ CONFIG_PLOT = {
     "ATLAS_MAPPING": "Beryl",
     "PLOT_ONLY_GOOD_UNITS": False,
     "PLOT_EVENT": "stimOn_times",
-    "PLOT_REGIONS": ["AUDp"],  # requested default
+    "PLOT_REGIONS": ["SSp-m"],  # requested default
     "RASTER_WINDOW_PRE": 1,
     "RASTER_WINDOW_POST": 2,
     "RASTER_ALIGN_TO_EVENT": True,
@@ -633,7 +633,8 @@ GENERAL_RASTER_START = 4543  # defaults to first spike time
 GENERAL_RASTER_END = 4549  # defaults to +10s from start
 GENERAL_RASTER_SORT = "Spont stPR Delay"
 
-HEATMAP_SORT = "Own Event Delay" # "Own Event Delay"
+# HEATMAP_SORT = "Spont stPR Delay" 
+HEATMAP_SORT =  "Own Event Delay"
 
 RASTER_SORT_MAP = {
     "Default (Depth)": "depth",
@@ -991,14 +992,14 @@ show_fig(fig_general)
 # %% Response heatmaps (6 events in one figure per selected region)
 heatmap_sort_mode = HEATMAP_SORT_MAP.get(HEATMAP_SORT, "delay")
 heatmap_plot_config = dict(plot_config)
-heatmap_plot_config["POP_NORMALIZE"] = False
-heatmap_plot_config["POP_ZSCORE"] = True
+heatmap_plot_config["POP_NORMALIZE"] = True
+heatmap_plot_config["POP_ZSCORE"] = False
 heatmap_plot_config["POP_ZSCORE_SOURCE"] = str(
     CONFIG_CALC.get("RESPONSIVE_ZSCORE_SOURCE", "smooth")
 ).strip().lower()
 heatmap_plot_config["POP_BASELINE_PRE"] = float(CONFIG_CALC.get("BASELINE_PRE", 0.2))
-heatmap_plot_config["POP_ZMIN"] = -10.0
-heatmap_plot_config["POP_ZMAX"] = 10.0
+heatmap_plot_config["POP_ZMIN"] = 0
+heatmap_plot_config["POP_ZMAX"] = 1
 heatmap_plot_config["POP_SPLIT_AROUSAL_WHISK"] = bool(
     plot_config.get(
         "HEATMAP_GROUP_BY_RESPONSE_SIGN",

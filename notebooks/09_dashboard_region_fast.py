@@ -149,6 +149,92 @@ def _build_region_colors(regions):
     return colors
 
 
+def _add_region_metadata(df, region_col="region"):
+    if not isinstance(df, pd.DataFrame):
+        return df
+
+    df_out = df.copy()
+    if df_out.empty or region_col not in df_out.columns:
+        return df_out
+
+    regions = df_out[region_col].astype(str)
+    allen_lookup = _get_allen_lookup() or {}
+    color_by_acr = allen_lookup.get("color_by_acr", {})
+    order_by_acr = allen_lookup.get("order_by_acr", {})
+    category_by_acr = allen_lookup.get("category_by_acr", {})
+
+    inferred_color = regions.map(color_by_acr)
+    if "allen_color" not in df_out.columns:
+        df_out["allen_color"] = inferred_color
+    else:
+        df_out["allen_color"] = df_out["allen_color"].where(df_out["allen_color"].notna(), inferred_color)
+
+    inferred_category = regions.map(category_by_acr).fillna("Unknown")
+    if "category" not in df_out.columns:
+        df_out["category"] = inferred_category
+    else:
+        df_out["category"] = df_out["category"].where(df_out["category"].notna(), inferred_category)
+    df_out["category"] = df_out["category"].fillna("Unknown")
+
+    inferred_order = pd.to_numeric(regions.map(order_by_acr), errors="coerce")
+    if "allen_order" not in df_out.columns:
+        df_out["allen_order"] = inferred_order
+    else:
+        existing_order = pd.to_numeric(df_out["allen_order"], errors="coerce")
+        df_out["allen_order"] = existing_order.where(existing_order.notna(), inferred_order)
+    df_out["allen_order"] = pd.to_numeric(df_out["allen_order"], errors="coerce").fillna(999999).astype(int)
+
+    category_rank = {cat: idx for idx, cat in enumerate(CANONICAL_CATEGORY_ORDER)}
+    inferred_rank = df_out["category"].map(category_rank)
+    if "category_rank" not in df_out.columns:
+        df_out["category_rank"] = inferred_rank
+    else:
+        existing_rank = pd.to_numeric(df_out["category_rank"], errors="coerce")
+        df_out["category_rank"] = existing_rank.where(existing_rank.notna(), inferred_rank)
+    df_out["category_rank"] = pd.to_numeric(df_out["category_rank"], errors="coerce").fillna(len(category_rank)).astype(int)
+    return df_out
+
+
+def _apply_region_scatter_filters(df_plot, region_meta_df, selected_categories=None):
+    if not isinstance(df_plot, pd.DataFrame):
+        return df_plot
+
+    df_out = df_plot.copy()
+    if df_out.empty or "region" not in df_out.columns:
+        return df_out
+
+    if isinstance(region_meta_df, pd.DataFrame) and not region_meta_df.empty:
+        meta_cols = [
+            col for col in ["region", "category", "allen_color", "allen_order", "category_rank"]
+            if col in region_meta_df.columns
+        ]
+        if meta_cols:
+            df_out = df_out.merge(
+                region_meta_df[meta_cols].drop_duplicates(subset=["region"]),
+                on="region",
+                how="left",
+                suffixes=("", "_meta"),
+            )
+            for col in meta_cols:
+                if col == "region":
+                    continue
+                meta_col = f"{col}_meta"
+                if meta_col not in df_out.columns:
+                    continue
+                if col in df_out.columns:
+                    df_out[col] = df_out[col].where(df_out[col].notna(), df_out[meta_col])
+                else:
+                    df_out[col] = df_out[meta_col]
+                df_out = df_out.drop(columns=[meta_col])
+
+    if selected_categories is not None:
+        if "category" not in df_out.columns:
+            df_out["category"] = "Unknown"
+        df_out = df_out[df_out["category"].isin(selected_categories)].copy()
+
+    return df_out
+
+
 def _show_table(df, width="stretch", max_rows=400):
     try:
         st.dataframe(df, width=width)
@@ -221,7 +307,40 @@ st.set_page_config(page_title="Region Dashboard (Fast)", layout="wide")
 BASE_PATH = Path(__file__).resolve().parents[1]
 CACHE_DIR = BASE_PATH / "data" / "dashboard_region_cache"
 RAW_CACHE_DIR = BASE_PATH / "data" / "dashboard_cache"
+SEQ_REGION_CACHE_DIR = BASE_PATH / "data" / "processed" / "16_ibl_seq_batch_comp"
 DEFAULT_LABEL_MIN = 0.59
+CANONICAL_CATEGORY_ORDER = [
+    "Isocortex",
+    "HPF",
+    "OLF",
+    "CTXsp",
+    "Striatum",
+    "Pallidum",
+    "Thal.",
+    "Hyp.",
+    "Midbrain",
+    "Pons",
+    "Medulla",
+    "Cereb.",
+    "Unknown",
+    "Other",
+]
+HIGHLIGHT_REGIONS = {
+    "VISp",
+    "MOs",
+    "CP",
+    "CA1",
+    "SCm",
+    "ZI",
+    "AUDp",
+    "GRN",
+    "PO",
+    "VPM",
+    "VISa",
+    "MOp",
+    "SSp-ul",
+    "SUB",
+}
 
 if str(BASE_PATH) not in sys.path:
     sys.path.insert(0, str(BASE_PATH))
@@ -231,9 +350,17 @@ CORR_VARIABLES = [
     {"name": "Firing Rate", "df": "df_firing_rate", "v1": "firing_rate_h1", "v2": "firing_rate_h2"},
     {"name": "Correlation to Whisking", "df": "df_arousal_corr", "v1": "arousal_corr_abs_h1", "v2": "arousal_corr_abs_h2"},
     {"name": "Delay to Stim On", "df": "df_res", "v1": "delay_stimOn_times_odd", "v2": "delay_stimOn_times_even"},
+    {"name": "Response to Stim On", "df": "df_res", "v1": "response_zmean_stimOn_times_odd", "v2": "response_zmean_stimOn_times_even"},
     {"name": "Delay to First Move", "df": "df_res", "v1": "delay_firstMovement_times_odd", "v2": "delay_firstMovement_times_even"},
+    {"name": "Response to First Move", "df": "df_res", "v1": "response_zmean_firstMovement_times_odd", "v2": "response_zmean_firstMovement_times_even"},
     {"name": "Delay to Feedback", "df": "df_res", "v1": "delay_feedback_times_odd", "v2": "delay_feedback_times_even"},
+    {"name": "Response to Feedback", "df": "df_res", "v1": "response_zmean_feedback_times_odd", "v2": "response_zmean_feedback_times_even"},
+    {"name": "Delay to Feedback (Correct Trials)", "df": "df_res", "v1": "delay_feedback_correct_times_odd", "v2": "delay_feedback_correct_times_even"},
+    {"name": "Delay to Feedback (Incorrect Trials)", "df": "df_res", "v1": "delay_feedback_incorrect_times_odd", "v2": "delay_feedback_incorrect_times_even"},
+    {"name": "Response to Feedback (Correct Trials)", "df": "df_res", "v1": "response_zmean_feedback_correct_times_odd", "v2": "response_zmean_feedback_correct_times_even"},
+    {"name": "Response to Feedback (Incorrect Trials)", "df": "df_res", "v1": "response_zmean_feedback_incorrect_times_odd", "v2": "response_zmean_feedback_incorrect_times_even"},
     {"name": "Delay to Whisking Events", "df": "df_res", "v1": "delay_wh_brief_times_spont_odd", "v2": "delay_wh_brief_times_spont_even"},
+    {"name": "Response to Whisking Events", "df": "df_res", "v1": "response_zmean_wh_brief_times_spont_odd", "v2": "response_zmean_wh_brief_times_spont_even"},
     {"name": "Delay to Passive Visual", "df": "df_res", "v1": "delay_passive_visual_times_odd", "v2": "delay_passive_visual_times_even"},
     {"name": "Delay to Passive Tone", "df": "df_res", "v1": "delay_passive_tone_times_odd", "v2": "delay_passive_tone_times_even"},
     {"name": "Delay to Passive Valve", "df": "df_res", "v1": "delay_passive_valve_times_odd", "v2": "delay_passive_valve_times_even"},
@@ -412,6 +539,608 @@ def _compute_axis_range(values, pad_frac=0.04):
     span = vmax - vmin
     pad = span * pad_frac
     return [vmin - pad, vmax + pad]
+
+
+def _apply_cartesian_grid(fig):
+    if fig is None:
+        return
+    if PLOTLY_TEMPLATE == "plotly_dark":
+        gridcolor = "rgba(148, 163, 184, 0.24)"
+    else:
+        gridcolor = "rgba(15, 23, 42, 0.12)"
+    fig.update_xaxes(showgrid=True, gridcolor=gridcolor)
+    fig.update_yaxes(showgrid=True, gridcolor=gridcolor)
+
+
+def _add_corr_rel_summary_annotation(fig, corr_values, rel_values):
+    corr_arr = np.asarray(corr_values, dtype=float)
+    rel_arr = np.asarray(rel_values, dtype=float)
+    corr_arr = corr_arr[np.isfinite(corr_arr)]
+    rel_arr = rel_arr[np.isfinite(rel_arr)]
+    if corr_arr.size == 0 or rel_arr.size == 0:
+        return
+
+    if PLOTLY_TEMPLATE == "plotly_dark":
+        bgcolor = "rgba(15, 23, 42, 0.82)"
+        bordercolor = "rgba(226, 232, 240, 0.55)"
+        font_color = "#f8fafc"
+    else:
+        bgcolor = "rgba(255, 255, 255, 0.88)"
+        bordercolor = "rgba(15, 23, 42, 0.25)"
+        font_color = "#0f172a"
+
+    fig.add_annotation(
+        x=0.02,
+        y=0.98,
+        xref="paper",
+        yref="paper",
+        xanchor="left",
+        yanchor="top",
+        align="left",
+        showarrow=False,
+        text=(
+            f"mean corr = {float(np.nanmean(corr_arr)):.3f}<br>"
+            f"mean rel = {float(np.nanmean(rel_arr)):.3f}"
+        ),
+        font=dict(size=12, color=font_color),
+        bordercolor=bordercolor,
+        borderwidth=1,
+        bgcolor=bgcolor,
+    )
+
+
+def _format_metric_value(value, n=None, prefix=""):
+    try:
+        value_num = float(value)
+    except Exception:
+        value_num = np.nan
+    if not np.isfinite(value_num):
+        metric_text = "nan"
+    else:
+        metric_text = f"{value_num:.3f}"
+    if n is None:
+        return f"{prefix}{metric_text}"
+    try:
+        n_val = int(n)
+    except Exception:
+        n_val = 0
+    return f"{prefix}{metric_text} (n={n_val})"
+
+
+def _select_preferred_metric(pearson_val, spearman_val):
+    try:
+        pearson_num = float(pearson_val)
+    except Exception:
+        pearson_num = np.nan
+    try:
+        spearman_num = float(spearman_val)
+    except Exception:
+        spearman_num = np.nan
+    p_ok = np.isfinite(pearson_num)
+    s_ok = np.isfinite(spearman_num)
+    if p_ok and s_ok:
+        if spearman_num > pearson_num:
+            return spearman_num, "Spearman"
+        return pearson_num, "Pearson"
+    if p_ok:
+        return pearson_num, "Pearson"
+    if s_ok:
+        return spearman_num, "Spearman"
+    return np.nan, "NA"
+
+
+def _safe_polyfit_line(x, y):
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    mask = np.isfinite(x) & np.isfinite(y)
+    if int(mask.sum()) < 2:
+        return np.nan, np.nan
+    x_fit = x[mask]
+    y_fit = y[mask]
+    if np.unique(x_fit).size < 2:
+        return np.nan, np.nan
+    try:
+        slope, intercept = np.polyfit(x_fit, y_fit, 1)
+        return float(slope), float(intercept)
+    except Exception:
+        return np.nan, np.nan
+
+
+@st.cache_data(show_spinner="Loading neuron-level region scatter data from raw cache...")
+def _compute_region_neuron_scatter_data(selected_region, var_x, var_y, good_only, use_good_stpr):
+    if not RAW_CACHE_DIR.exists():
+        return {
+            "points": pd.DataFrame(),
+            "pearson_corr": np.nan,
+            "pearson_corr_n": 0,
+            "spearman_corr": np.nan,
+            "spearman_corr_n": 0,
+            "pearson_rel_x": np.nan,
+            "pearson_rel_x_n": 0,
+            "spearman_rel_x": np.nan,
+            "spearman_rel_x_n": 0,
+            "pearson_rel_y": np.nan,
+            "pearson_rel_y_n": 0,
+            "spearman_rel_y": np.nan,
+            "spearman_rel_y_n": 0,
+        }
+
+    selected_region_norm = None if selected_region in (None, "") else str(selected_region)
+    if selected_region_norm is None:
+        return {
+            "points": pd.DataFrame(),
+            "pearson_corr": np.nan,
+            "pearson_corr_n": 0,
+            "spearman_corr": np.nan,
+            "spearman_corr_n": 0,
+            "pearson_rel_x": np.nan,
+            "pearson_rel_x_n": 0,
+            "spearman_rel_x": np.nan,
+            "spearman_rel_x_n": 0,
+            "pearson_rel_y": np.nan,
+            "pearson_rel_y_n": 0,
+            "spearman_rel_y": np.nan,
+            "spearman_rel_y_n": 0,
+        }
+
+    spec_map = {spec["name"]: spec for spec in _build_corr_variables()}
+    spec_x = spec_map.get(var_x)
+    spec_y = spec_map.get(var_y)
+    if spec_x is None or spec_y is None:
+        return {
+            "points": pd.DataFrame(),
+            "pearson_corr": np.nan,
+            "pearson_corr_n": 0,
+            "spearman_corr": np.nan,
+            "spearman_corr_n": 0,
+            "pearson_rel_x": np.nan,
+            "pearson_rel_x_n": 0,
+            "spearman_rel_x": np.nan,
+            "spearman_rel_x_n": 0,
+            "pearson_rel_y": np.nan,
+            "pearson_rel_y_n": 0,
+            "spearman_rel_y": np.nan,
+            "spearman_rel_y_n": 0,
+        }
+
+    point_frames = []
+    rel_x_frames = []
+    rel_y_frames = []
+    cache_paths = sorted(RAW_CACHE_DIR.glob("*.pkl"))
+    for path in cache_paths:
+        try:
+            with open(path, "rb") as f:
+                cache = pickle.load(f)
+        except Exception:
+            continue
+        if not isinstance(cache, dict):
+            continue
+
+        pid = str(cache.get("pid", path.stem))
+        config_calc = cache.get("config_calc")
+        if not isinstance(config_calc, dict):
+            config_calc = {}
+
+        df_res = cache.get("df_res")
+        if df_res is None or not isinstance(df_res, pd.DataFrame) or df_res.empty:
+            continue
+        if "cluster_id" not in df_res.columns:
+            continue
+        if "acronym" in df_res.columns:
+            region_col = "acronym"
+        elif "region" in df_res.columns:
+            region_col = "region"
+        else:
+            continue
+        if "label" not in df_res.columns:
+            continue
+
+        df_res_copy = df_res.copy()
+        df_res_copy["pid"] = pid
+        df_res_copy["cluster_id"] = pd.to_numeric(df_res_copy["cluster_id"], errors="coerce")
+        df_res_copy = df_res_copy[np.isfinite(df_res_copy["cluster_id"])].copy()
+        if df_res_copy.empty:
+            continue
+        df_res_copy["cluster_id"] = df_res_copy["cluster_id"].astype(int)
+
+        labels = pd.to_numeric(df_res_copy["label"], errors="coerce")
+        label_values = labels.to_numpy(dtype=float)
+        if good_only:
+            mask_keep = np.isfinite(label_values) & np.isclose(label_values, 1.0)
+        else:
+            try:
+                label_min = float(config_calc.get("CALC_LABEL_MIN", DEFAULT_LABEL_MIN))
+            except Exception:
+                label_min = float(DEFAULT_LABEL_MIN)
+            mask_keep = np.isfinite(label_values) & (label_values >= label_min)
+
+        df_units = df_res_copy.loc[mask_keep, ["pid", "cluster_id", region_col]].copy()
+        if df_units.empty:
+            continue
+        df_units["region"] = df_units[region_col].astype(str)
+        df_units = df_units[df_units["region"].astype(str) == selected_region_norm].copy()
+        if df_units.empty:
+            continue
+
+        table_name_x = spec_x.get("df")
+        table_name_y = spec_y.get("df")
+        needed_tables = {table_name_x, table_name_y}
+        table_data = {"df_res": df_res_copy}
+
+        if "df_coupling" in needed_tables:
+            table_data["df_coupling"] = _clean_table_with_pid(
+                cache.get("df_coupling_good" if use_good_stpr else "df_coupling"),
+                pid,
+            )
+        if "df_coupling_task" in needed_tables:
+            table_data["df_coupling_task"] = _clean_table_with_pid(
+                cache.get("df_coupling_task_good" if use_good_stpr else "df_coupling_task"),
+                pid,
+            )
+        if "df_coupling_iti" in needed_tables:
+            table_data["df_coupling_iti"] = _clean_table_with_pid(
+                cache.get("df_coupling_iti_good" if use_good_stpr else "df_coupling_iti"),
+                pid,
+            )
+        if "df_arousal_corr" in needed_tables:
+            if "arousal_corr_abs" in df_res_copy.columns:
+                df_ar = df_res_copy[["pid", "cluster_id", "arousal_corr_abs"]].copy()
+                df_ar["arousal_corr_abs_h1"] = pd.to_numeric(df_ar["arousal_corr_abs"], errors="coerce")
+                df_ar["arousal_corr_abs_h2"] = df_ar["arousal_corr_abs_h1"]
+                table_data["df_arousal_corr"] = df_ar[
+                    ["pid", "cluster_id", "arousal_corr_abs_h1", "arousal_corr_abs_h2"]
+                ]
+            else:
+                table_data["df_arousal_corr"] = None
+        if "df_firing_rate" in needed_tables:
+            cluster_ids = cache.get("cluster_ids")
+            cluster_fr = cache.get("cluster_firing_rate")
+            df_rate = None
+            if cluster_ids is not None and cluster_fr is not None:
+                cluster_ids_clean = pd.to_numeric(np.asarray(cluster_ids), errors="coerce")
+                cluster_fr = np.asarray(cluster_fr, dtype=float)
+                if len(cluster_ids_clean) == len(cluster_fr):
+                    df_rate = pd.DataFrame(
+                        {
+                            "pid": pid,
+                            "cluster_id": cluster_ids_clean,
+                            "firing_rate_h1": cluster_fr,
+                            "firing_rate_h2": cluster_fr,
+                        }
+                    )
+                    df_rate = df_rate[np.isfinite(df_rate["cluster_id"])].copy()
+                    if not df_rate.empty:
+                        df_rate["cluster_id"] = df_rate["cluster_id"].astype(int)
+                    else:
+                        df_rate = None
+            table_data["df_firing_rate"] = df_rate
+        if "df_depth" in needed_tables:
+            cluster_ids = cache.get("cluster_ids")
+            depths = _extract_cluster_depths(cache, cluster_ids)
+            df_depth = None
+            if cluster_ids is not None and depths is not None:
+                cluster_ids_clean = pd.to_numeric(np.asarray(cluster_ids), errors="coerce")
+                depths = np.asarray(depths, dtype=float)
+                if len(cluster_ids_clean) == len(depths):
+                    df_depth = pd.DataFrame(
+                        {
+                            "pid": pid,
+                            "cluster_id": cluster_ids_clean,
+                            "depth_h1": depths,
+                            "depth_h2": depths,
+                        }
+                    )
+                    df_depth = df_depth[np.isfinite(df_depth["cluster_id"])].copy()
+                    if not df_depth.empty:
+                        df_depth["cluster_id"] = df_depth["cluster_id"].astype(int)
+                    else:
+                        df_depth = None
+            table_data["df_depth"] = df_depth
+
+        has_spont = _has_spont_interval((cache.get("meta") or {}))
+        region_lookup = df_units[["pid", "cluster_id", "region"]].drop_duplicates()
+        rl_x = _filter_region_lookup_for_spec(region_lookup, spec_x, has_spont)
+        rl_y = _filter_region_lookup_for_spec(region_lookup, spec_y, has_spont)
+        if rl_x is None or rl_x.empty or rl_y is None or rl_y.empty:
+            continue
+
+        df_var_x = _build_variable_table(table_data.get(table_name_x), spec_x, rl_x)
+        df_var_y = _build_variable_table(table_data.get(table_name_y), spec_y, rl_y)
+        if df_var_x is None or df_var_x.empty or df_var_y is None or df_var_y.empty:
+            continue
+
+        point_df = region_lookup[["pid", "cluster_id", "region"]].drop_duplicates()
+        point_df = point_df.merge(
+            df_var_x[["pid", "cluster_id", "mean"]].rename(columns={"mean": "mean_x"}),
+            on=["pid", "cluster_id"],
+            how="inner",
+        )
+        point_df = point_df.merge(
+            df_var_y[["pid", "cluster_id", "mean"]].rename(columns={"mean": "mean_y"}),
+            on=["pid", "cluster_id"],
+            how="inner",
+        )
+        if not point_df.empty:
+            point_frames.append(point_df)
+
+        if not _is_firing_rate_spec(spec_x):
+            rel_x_frames.append(
+                df_var_x[["pid", "cluster_id", spec_x["v1"], spec_x["v2"]]].rename(
+                    columns={spec_x["v1"]: "v1", spec_x["v2"]: "v2"}
+                )
+            )
+        if not _is_firing_rate_spec(spec_y):
+            rel_y_frames.append(
+                df_var_y[["pid", "cluster_id", spec_y["v1"], spec_y["v2"]]].rename(
+                    columns={spec_y["v1"]: "v1", spec_y["v2"]: "v2"}
+                )
+            )
+
+    if point_frames:
+        df_points = pd.concat(point_frames, ignore_index=True)
+        df_points = df_points.drop_duplicates(subset=["pid", "cluster_id"]).copy()
+        df_points = df_points[
+            np.isfinite(pd.to_numeric(df_points["mean_x"], errors="coerce"))
+            & np.isfinite(pd.to_numeric(df_points["mean_y"], errors="coerce"))
+        ].copy()
+    else:
+        df_points = pd.DataFrame(columns=["pid", "cluster_id", "region", "mean_x", "mean_y"])
+
+    pearson_corr, pearson_corr_n = _pearsonr_with_n(
+        df_points.get("mean_x", pd.Series(dtype=float)),
+        df_points.get("mean_y", pd.Series(dtype=float)),
+    )
+    spearman_corr, spearman_corr_n = _spearmanr_with_n(
+        df_points.get("mean_x", pd.Series(dtype=float)),
+        df_points.get("mean_y", pd.Series(dtype=float)),
+    )
+
+    if rel_x_frames:
+        df_rel_x = pd.concat(rel_x_frames, ignore_index=True)
+        df_rel_x = df_rel_x.drop_duplicates(subset=["pid", "cluster_id"]).copy()
+        pearson_rel_x, pearson_rel_x_n = _pearsonr_with_n(df_rel_x["v1"], df_rel_x["v2"])
+        spearman_rel_x, spearman_rel_x_n = _spearmanr_with_n(df_rel_x["v1"], df_rel_x["v2"])
+    else:
+        pearson_rel_x, pearson_rel_x_n = np.nan, 0
+        spearman_rel_x, spearman_rel_x_n = np.nan, 0
+
+    if rel_y_frames:
+        df_rel_y = pd.concat(rel_y_frames, ignore_index=True)
+        df_rel_y = df_rel_y.drop_duplicates(subset=["pid", "cluster_id"]).copy()
+        pearson_rel_y, pearson_rel_y_n = _pearsonr_with_n(df_rel_y["v1"], df_rel_y["v2"])
+        spearman_rel_y, spearman_rel_y_n = _spearmanr_with_n(df_rel_y["v1"], df_rel_y["v2"])
+    else:
+        pearson_rel_y, pearson_rel_y_n = np.nan, 0
+        spearman_rel_y, spearman_rel_y_n = np.nan, 0
+
+    return {
+        "points": df_points.reset_index(drop=True),
+        "pearson_corr": pearson_corr,
+        "pearson_corr_n": int(pearson_corr_n),
+        "spearman_corr": spearman_corr,
+        "spearman_corr_n": int(spearman_corr_n),
+        "pearson_rel_x": pearson_rel_x,
+        "pearson_rel_x_n": int(pearson_rel_x_n),
+        "spearman_rel_x": spearman_rel_x,
+        "spearman_rel_x_n": int(spearman_rel_x_n),
+        "pearson_rel_y": pearson_rel_y,
+        "pearson_rel_y_n": int(pearson_rel_y_n),
+        "spearman_rel_y": spearman_rel_y,
+        "spearman_rel_y_n": int(spearman_rel_y_n),
+    }
+
+
+def _build_region_neuron_scatter(
+    selected_region,
+    var_x,
+    var_y,
+    good_only,
+    use_good_stpr,
+):
+    scatter_data = _compute_region_neuron_scatter_data(
+        selected_region,
+        var_x,
+        var_y,
+        bool(good_only),
+        bool(use_good_stpr),
+    )
+    df_points = scatter_data.get("points", pd.DataFrame()).copy()
+    if df_points.empty:
+        return None
+
+    region_color = _build_region_colors([selected_region]).get(selected_region, "#1f77b4")
+    x_vals = pd.to_numeric(df_points["mean_x"], errors="coerce").to_numpy(dtype=float)
+    y_vals = pd.to_numeric(df_points["mean_y"], errors="coerce").to_numpy(dtype=float)
+    df_points = df_points[np.isfinite(x_vals) & np.isfinite(y_vals)].copy()
+    if df_points.empty:
+        return None
+    x_vals = pd.to_numeric(df_points["mean_x"], errors="coerce").to_numpy(dtype=float)
+    y_vals = pd.to_numeric(df_points["mean_y"], errors="coerce").to_numpy(dtype=float)
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=x_vals,
+            y=y_vals,
+            mode="markers",
+            name=str(selected_region),
+            marker=dict(
+                size=8,
+                color=region_color,
+                opacity=0.78,
+                line=dict(color="rgba(0,0,0,0.25)", width=0.6),
+            ),
+            customdata=np.stack(
+                (
+                    df_points["pid"].astype(str).to_numpy(),
+                    df_points["cluster_id"].astype(str).to_numpy(),
+                ),
+                axis=-1,
+            ),
+            hovertemplate=(
+                "Region: "
+                + str(selected_region)
+                + "<br>PID: %{customdata[0]}<br>cluster_id: %{customdata[1]}<br>"
+                + f"{var_x}: "
+                + "%{x:.3f}<br>"
+                + f"{var_y}: "
+                + "%{y:.3f}<extra></extra>"
+            ),
+            showlegend=False,
+        )
+    )
+
+    x_range = _compute_axis_range(x_vals)
+    y_range = _compute_axis_range(y_vals)
+    if x_range is not None:
+        fig.update_xaxes(range=x_range)
+    if y_range is not None:
+        fig.update_yaxes(range=y_range)
+
+    combined_range = None
+    if x_range is not None and y_range is not None:
+        combined_range = [float(min(x_range[0], y_range[0])), float(max(x_range[1], y_range[1]))]
+    elif np.isfinite(x_vals).any() and np.isfinite(y_vals).any():
+        combined_range = _compute_axis_range(np.concatenate([x_vals, y_vals]))
+
+    if combined_range is not None:
+        fig.add_shape(
+            type="line",
+            x0=float(combined_range[0]),
+            y0=float(combined_range[0]),
+            x1=float(combined_range[1]),
+            y1=float(combined_range[1]),
+            line=dict(color="red", dash="dash", width=1.5),
+        )
+
+    slope, intercept = _safe_polyfit_line(x_vals, y_vals)
+    if np.isfinite(slope) and np.isfinite(intercept):
+        fit_x0 = float(np.nanmin(x_vals))
+        fit_x1 = float(np.nanmax(x_vals))
+        fit_y0 = float(slope * fit_x0 + intercept)
+        fit_y1 = float(slope * fit_x1 + intercept)
+        fig.add_trace(
+            go.Scatter(
+                x=[fit_x0, fit_x1],
+                y=[fit_y0, fit_y1],
+                mode="lines",
+                line=dict(color="black", dash="dash", width=1.8),
+                name="Fit",
+                hovertemplate="Fit<extra></extra>",
+                showlegend=False,
+            )
+        )
+
+    rel_x_best, rel_x_label = _select_preferred_metric(
+        scatter_data.get("pearson_rel_x", np.nan),
+        scatter_data.get("spearman_rel_x", np.nan),
+    )
+    rel_y_best, rel_y_label = _select_preferred_metric(
+        scatter_data.get("pearson_rel_y", np.nan),
+        scatter_data.get("spearman_rel_y", np.nan),
+    )
+
+    if PLOTLY_TEMPLATE == "plotly_dark":
+        bgcolor = "rgba(15, 23, 42, 0.82)"
+        bordercolor = "rgba(226, 232, 240, 0.55)"
+        font_color = "#f8fafc"
+    else:
+        bgcolor = "rgba(255, 255, 255, 0.9)"
+        bordercolor = "rgba(15, 23, 42, 0.25)"
+        font_color = "#0f172a"
+
+    fig.add_annotation(
+        x=0.02,
+        y=0.98,
+        xref="paper",
+        yref="paper",
+        xanchor="left",
+        yanchor="top",
+        align="left",
+        showarrow=False,
+        text=(
+            _format_metric_value(scatter_data.get("pearson_corr", np.nan), scatter_data.get("pearson_corr_n", 0), "Pearson r = ")
+            + "<br>"
+            + _format_metric_value(scatter_data.get("spearman_corr", np.nan), scatter_data.get("spearman_corr_n", 0), "Spearman rho = ")
+            + "<br>"
+            + _format_metric_value(rel_x_best, None, f"Rel {var_x} ({rel_x_label}) = ")
+            + "<br>"
+            + _format_metric_value(rel_y_best, None, f"Rel {var_y} ({rel_y_label}) = ")
+            + "<br>"
+            + f"Neurons = {int(len(df_points))}<br>"
+            + f"PIDs = {int(df_points['pid'].astype(str).nunique())}<br>"
+            + (
+                f"Fit: y = {slope:.3f}x {intercept:+.3f}"
+                if np.isfinite(slope) and np.isfinite(intercept)
+                else "Fit: unavailable"
+            )
+        ),
+        font=dict(size=12, color=font_color),
+        bordercolor=bordercolor,
+        borderwidth=1,
+        bgcolor=bgcolor,
+    )
+
+    fig.update_layout(
+        title=f"Neuron Scatter | Region {selected_region} | {var_x} vs {var_y}",
+        xaxis_title=str(var_x),
+        yaxis_title=str(var_y),
+        template=PLOTLY_TEMPLATE,
+        margin=dict(l=80, r=40, t=90, b=70),
+        height=620,
+    )
+    _apply_cartesian_grid(fig)
+    return fig
+
+
+def _read_saved_table_bundle(cache_dir, stem):
+    pkl_path = cache_dir / f"{stem}.pkl"
+    parquet_path = cache_dir / f"{stem}.parquet"
+    csv_path = cache_dir / f"{stem}.csv"
+    if pkl_path.exists():
+        return pd.read_pickle(pkl_path)
+    if parquet_path.exists():
+        try:
+            return pd.read_parquet(parquet_path)
+        except Exception:
+            pass
+    if csv_path.exists():
+        return pd.read_csv(csv_path)
+    raise FileNotFoundError(f"Could not find cached table for '{stem}'.")
+
+
+def _seq_diag_mask(df_pairs):
+    if df_pairs is None or df_pairs.empty or "is_diagonal" not in df_pairs.columns:
+        return np.zeros(0, dtype=bool)
+    series = df_pairs["is_diagonal"]
+    if pd.api.types.is_bool_dtype(series):
+        return series.fillna(False).to_numpy(dtype=bool)
+    return (
+        series.astype(str).str.strip().str.lower().isin(["true", "1", "yes"])
+    ).to_numpy(dtype=bool)
+
+
+def _extract_seq_diag_reliability(df_pairs, var_key, col_name):
+    if df_pairs is None or df_pairs.empty:
+        return pd.DataFrame(columns=["region", col_name])
+    required_cols = {"region", "var_x_key", "var_y_key", "pearson_r"}
+    if not required_cols.issubset(set(df_pairs.columns)):
+        return pd.DataFrame(columns=["region", col_name])
+
+    diag_mask = _seq_diag_mask(df_pairs)
+    if diag_mask.size != len(df_pairs):
+        return pd.DataFrame(columns=["region", col_name])
+
+    df_rel = df_pairs.loc[
+        diag_mask
+        & (df_pairs["var_x_key"].astype(str) == str(var_key))
+        & (df_pairs["var_y_key"].astype(str) == str(var_key)),
+        ["region", "pearson_r"],
+    ].copy()
+    if df_rel.empty:
+        return pd.DataFrame(columns=["region", col_name])
+    df_rel["region"] = df_rel["region"].astype(str)
+    return df_rel.rename(columns={"pearson_r": col_name})
 
 
 def _clean_table_with_pid(df, pid):
@@ -719,7 +1448,19 @@ def load_precomputed_data():
         return None, None, None, None, f"Pickle load failed: {pkl_err} | Parquet load failed: {e}"
 
 
+@st.cache_data(show_spinner=False)
+def load_seq_region_pair_data():
+    try:
+        df_pairs_pooled = _read_saved_table_bundle(SEQ_REGION_CACHE_DIR, "summary_region_pairs_pooled")
+        df_pairs_pidmean = _read_saved_table_bundle(SEQ_REGION_CACHE_DIR, "summary_region_pairs_pidmean")
+        df_region_counts_seq = _read_saved_table_bundle(SEQ_REGION_CACHE_DIR, "summary_region_counts")
+        return df_pairs_pooled, df_pairs_pidmean, df_region_counts_seq, None
+    except Exception as e:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), str(e)
+
+
 df_corr, df_arousal, df_region_counts, df_pids, label_min_text_or_err = load_precomputed_data()
+seq_region_pairs_pooled, seq_region_pairs_pidmean, seq_region_counts_seq, seq_region_err = load_seq_region_pair_data()
 
 plotly_dark_mode = st.toggle("Plotly dark mode", value=False)
 PLOTLY_TEMPLATE = "plotly_dark" if plotly_dark_mode else "plotly_white"
@@ -772,9 +1513,202 @@ _show_table(df_rc_filtered.drop(columns=["good_only"], errors='ignore'), width="
 
 
 # ==========================================
+# Whisking vs First-Move Reliability
+# ==========================================
+st.subheader("Whisking vs First-Move Reliability")
+seq_region_pair_table = (
+    seq_region_pairs_pidmean if avg_by_pid_toggle else seq_region_pairs_pooled
+).copy()
+df_spont_whisk_rel = _extract_seq_diag_reliability(
+    seq_region_pair_table,
+    "spont_whisk_event_delay",
+    "spont_whisk_rel",
+)
+df_first_move_rel_seq = _extract_seq_diag_reliability(
+    seq_region_pair_table,
+    "first_move_delay",
+    "first_move_rel",
+)
+
+df_whisk_move = df_spont_whisk_rel.merge(df_first_move_rel_seq, on="region", how="inner")
+if not df_whisk_move.empty:
+    df_seq_counts_local = seq_region_counts_seq.rename(
+        columns={"n_units_total": "n_neurons_seq"}
+    )
+    df_whisk_move = df_whisk_move.merge(
+        df_seq_counts_local[["region", "n_neurons_seq"]],
+        on="region",
+        how="left",
+    )
+    df_whisk_move = df_whisk_move.merge(
+        df_rc_filtered[["region", "n_neurons"]],
+        on="region",
+        how="left",
+    )
+    df_whisk_move["n_neurons_plot"] = pd.to_numeric(
+        df_whisk_move.get("n_neurons"), errors="coerce"
+    ).fillna(pd.to_numeric(df_whisk_move.get("n_neurons_seq"), errors="coerce"))
+    df_whisk_move = df_whisk_move[
+        np.isfinite(df_whisk_move["spont_whisk_rel"].to_numpy(dtype=float))
+        & np.isfinite(df_whisk_move["first_move_rel"].to_numpy(dtype=float))
+        & np.isfinite(df_whisk_move["n_neurons_plot"].to_numpy(dtype=float))
+    ].copy()
+
+if df_whisk_move.empty:
+    if seq_region_err:
+        st.info(
+            "Sequence-region reliability tables are unavailable for the whisking/first-move scatter: "
+            + str(seq_region_err)
+        )
+    else:
+        st.info("No finite spontaneous-whisk/first-move reliability pairs are available.")
+else:
+    region_colors_whisk_move = _build_region_colors(df_whisk_move["region"].astype(str).tolist())
+    marker_colors_whisk_move = [
+        region_colors_whisk_move.get(str(region), "whitesmoke")
+        for region in df_whisk_move["region"]
+    ]
+
+    fig_whisk_move = go.Figure()
+    fig_whisk_move.add_trace(
+        go.Scatter(
+            x=df_whisk_move["spont_whisk_rel"],
+            y=df_whisk_move["first_move_rel"],
+            mode="markers",
+            marker=dict(color=marker_colors_whisk_move, size=9),
+            showlegend=False,
+            customdata=np.stack(
+                (
+                    df_whisk_move["region"].astype(str),
+                    df_whisk_move["n_neurons_plot"].astype(int),
+                ),
+                axis=-1,
+            ),
+            hovertemplate=(
+                "Region: %{customdata[0]}<br>"
+                "Spont whisk rel: %{x:.2f}<br>"
+                "First-move rel: %{y:.2f}<br>"
+                "Neurons: %{customdata[1]}<extra></extra>"
+            ),
+        )
+    )
+
+    combined_range = _compute_axis_range(
+        np.concatenate(
+            [
+                df_whisk_move["spont_whisk_rel"].to_numpy(dtype=float),
+                df_whisk_move["first_move_rel"].to_numpy(dtype=float),
+            ]
+        )
+    )
+    if combined_range is not None:
+        fig_whisk_move.update_xaxes(range=combined_range)
+        fig_whisk_move.update_yaxes(range=combined_range)
+        line_min, line_max = float(combined_range[0]), float(combined_range[1])
+    else:
+        line_min = float(
+            np.nanmin(
+                np.concatenate(
+                    [
+                        df_whisk_move["spont_whisk_rel"].to_numpy(dtype=float),
+                        df_whisk_move["first_move_rel"].to_numpy(dtype=float),
+                    ]
+                )
+            )
+        )
+        line_max = float(
+            np.nanmax(
+                np.concatenate(
+                    [
+                        df_whisk_move["spont_whisk_rel"].to_numpy(dtype=float),
+                        df_whisk_move["first_move_rel"].to_numpy(dtype=float),
+                    ]
+                )
+            )
+        )
+
+    if np.isfinite(line_min) and np.isfinite(line_max) and line_min < line_max:
+        fig_whisk_move.add_shape(
+            type="line",
+            x0=line_min,
+            y0=line_min,
+            x1=line_max,
+            y1=line_max,
+            line=dict(color="red", dash="dash"),
+        )
+
+    avg_text = " (avg across PIDs)" if avg_by_pid_toggle else ""
+    fig_whisk_move.update_layout(
+        title=f"Spont Whisk Delay Reliability vs First-Move Delay Reliability{avg_text}",
+        xaxis_title="Spont Whisk Delay reliability",
+        yaxis_title="First Move Delay reliability",
+        template=PLOTLY_TEMPLATE,
+        margin=dict(l=80, r=40, t=80, b=70),
+        height=620,
+    )
+    _apply_cartesian_grid(fig_whisk_move)
+    st.plotly_chart(fig_whisk_move, width="stretch")
+
+
+df_corr_mode = df_corr.copy()
+if df_corr_mode.empty:
+    var_names = []
+    var_x = None
+    var_y = None
+else:
+    registry_var_names = [spec["name"] for spec in _build_corr_variables()]
+    var_names_raw = [str(v) for v in pd.unique(df_corr_mode["var1"]) if pd.notnull(v)]
+    available_var_name_set = set(var_names_raw)
+    var_names = [name for name in registry_var_names if name in available_var_name_set]
+    var_names.extend([name for name in var_names_raw if name not in set(var_names)])
+    missing_registry_vars = [name for name in registry_var_names if name not in available_var_name_set]
+    if missing_registry_vars:
+        st.warning(
+            "Some registered variables are missing from the saved region-summary cache and "
+            "will not appear until `08_batch_compute_region.py` is rerun: "
+            + ", ".join(missing_registry_vars)
+        )
+    default_var_x = var_names[0] if var_names else None
+    default_var_y = var_names[1] if len(var_names) > 1 else default_var_x
+    if default_var_x is not None:
+        if (
+            "scatter_var_x" not in st.session_state
+            or st.session_state.get("scatter_var_x") not in var_names
+        ):
+            st.session_state["scatter_var_x"] = default_var_x
+    if default_var_y is not None:
+        if (
+            "scatter_var_y" not in st.session_state
+            or st.session_state.get("scatter_var_y") not in var_names
+        ):
+            st.session_state["scatter_var_y"] = default_var_y
+    if default_var_x is not None:
+        if (
+            "region_neuron_var_x" not in st.session_state
+            or st.session_state.get("region_neuron_var_x") not in var_names
+        ):
+            st.session_state["region_neuron_var_x"] = st.session_state.get(
+                "scatter_var_x",
+                default_var_x,
+            )
+    if default_var_y is not None:
+        if (
+            "region_neuron_var_y" not in st.session_state
+            or st.session_state.get("region_neuron_var_y") not in var_names
+        ):
+            st.session_state["region_neuron_var_y"] = st.session_state.get(
+                "scatter_var_y",
+                default_var_y,
+            )
+    var_x = st.session_state.get("scatter_var_x", default_var_x)
+    var_y = st.session_state.get("scatter_var_y", default_var_y)
+
+
+# ==========================================
 # Correlation Matrices by Region
 # ==========================================
 st.subheader("Correlation Matrices by Region")
+selected_region = None
 if df_rc_filtered.empty:
     st.info("No regions available for this selection.")
 else:
@@ -852,25 +1786,120 @@ else:
                 st.markdown("**Spearman**")
                 st.plotly_chart(fig_spearman, width="stretch")
 
+        st.markdown("**Neuron Scatter for Selected Region**")
+        neuron_var_x = st.session_state.get("region_neuron_var_x")
+        neuron_var_y = st.session_state.get("region_neuron_var_y")
+        neuron_col1, neuron_col2 = st.columns(2)
+        with neuron_col1:
+            selected_neuron_var_x = neuron_var_x if neuron_var_x in var_names else var_names[0]
+            st.selectbox(
+                "Neuron scatter variable 1",
+                var_names,
+                index=var_names.index(selected_neuron_var_x),
+                key="region_neuron_var_x",
+            )
+        with neuron_col2:
+            neuron_default_idx = 1 if len(var_names) > 1 else 0
+            selected_neuron_var_y = (
+                neuron_var_y if neuron_var_y in var_names else var_names[neuron_default_idx]
+            )
+            st.selectbox(
+                "Neuron scatter variable 2",
+                var_names,
+                index=var_names.index(selected_neuron_var_y),
+                key="region_neuron_var_y",
+            )
+        neuron_var_x = st.session_state.get("region_neuron_var_x", var_names[0])
+        neuron_var_y = st.session_state.get(
+            "region_neuron_var_y",
+            var_names[1] if len(var_names) > 1 else var_names[0],
+        )
+        st.caption("These controls are independent from the global Scatter Plot Settings below.")
+        if neuron_var_x is None or neuron_var_y is None:
+            st.info("Select neuron-scatter variables above to render the neuron-level scatter.")
+        else:
+            fig_region_neuron = _build_region_neuron_scatter(
+                selected_region,
+                neuron_var_x,
+                neuron_var_y,
+                bool(good_only_toggle),
+                bool(use_good_stpr),
+            )
+            if fig_region_neuron is None:
+                st.info("No neuron-level values are available for the selected region and variables.")
+            else:
+                st.plotly_chart(fig_region_neuron, width="stretch")
+
 
 # ==========================================
 # Scatter Plot Controls (Global)
 # ==========================================
 st.subheader("Scatter Plot Settings")
-df_corr_mode = df_corr
 if df_corr_mode.empty:
     st.info("No correlation rows available.")
     st.stop()
-var_names_raw = pd.unique(df_corr_mode["var1"])
-var_names = [v for v in var_names_raw if pd.notnull(v)]
 col1, col2, col3 = st.columns(3)
 with col1:
-    var_x = st.selectbox("Variable 1", var_names, index=0)
+    st.selectbox(
+        "Variable 1",
+        var_names,
+        index=var_names.index(st.session_state.get("scatter_var_x", var_names[0])),
+        key="scatter_var_x",
+    )
 with col2:
     default_idx = 1 if len(var_names) > 1 else 0
-    var_y = st.selectbox("Variable 2", var_names, index=default_idx)
+    selected_var_y = st.session_state.get("scatter_var_y", var_names[default_idx])
+    if selected_var_y not in var_names:
+        selected_var_y = var_names[default_idx]
+    st.selectbox(
+        "Variable 2",
+        var_names,
+        index=var_names.index(selected_var_y),
+        key="scatter_var_y",
+    )
 with col3:
-    min_neurons = int(st.number_input("Min neurons per region", min_value=0, value=30, step=10))
+    min_neurons = int(
+        st.number_input(
+            "Min neurons per region",
+            min_value=0,
+            value=int(st.session_state.get("scatter_min_neurons", 30)),
+            step=10,
+            key="scatter_min_neurons",
+        )
+    )
+var_x = st.session_state.get("scatter_var_x", var_names[0])
+var_y = st.session_state.get("scatter_var_y", var_names[1] if len(var_names) > 1 else var_names[0])
+
+df_scatter_region_meta = _add_region_metadata(
+    df_rc_filtered[["region", "n_neurons"]].drop_duplicates(subset=["region"]).copy()
+)
+present_category_set = set(df_scatter_region_meta.get("category", pd.Series(dtype="object")).dropna().astype(str))
+scatter_categories = [
+    cat for cat in CANONICAL_CATEGORY_ORDER
+    if (cat in present_category_set) and (cat not in {"Unknown", "Other"})
+]
+extra_scatter_categories = sorted(
+    present_category_set.difference(CANONICAL_CATEGORY_ORDER).difference({"Unknown", "Other"})
+)
+scatter_categories.extend(extra_scatter_categories)
+
+if scatter_categories:
+    st.markdown("**Broad anatomy categories**")
+    cat_cols = st.columns(6)
+    selected_scatter_categories = []
+    for idx, cat in enumerate(scatter_categories):
+        checked = cat_cols[idx % 6].checkbox(
+            cat,
+            value=True,
+            key=f"scatter_cat_{cat}",
+        )
+        if checked:
+            selected_scatter_categories.append(cat)
+    if not selected_scatter_categories:
+        st.warning("Select at least one broad anatomy category to plot region points.")
+else:
+    selected_scatter_categories = None
+    st.caption("Broad anatomy category metadata is unavailable for the current region set.")
 
 def _prepare_scatter_df(df_source, method="pearson"):
     df_x_diag = df_source.query("var1 == @var_x and var2 == @var_x")
@@ -885,6 +1914,11 @@ def _prepare_scatter_df(df_source, method="pearson"):
     # Merge with region counts to filter by min_neurons
     df_plot = df_plot.merge(df_rc_filtered[["region", "n_neurons"]], on="region", how="inner")
     df_plot = df_plot[df_plot["n_neurons"] >= min_neurons]
+    df_plot = _apply_region_scatter_filters(
+        df_plot,
+        df_scatter_region_meta,
+        selected_categories=selected_scatter_categories,
+    )
     
     if df_plot.empty:
         return pd.DataFrame()
@@ -925,6 +1959,11 @@ def _aggregate_region_points_from_pid(df_pid_all, method="pearson"):
     )
     df_plot = df_plot.merge(df_rc_filtered[["region", "n_neurons"]], on="region", how="inner")
     df_plot = df_plot[df_plot["n_neurons"] >= min_neurons]
+    df_plot = _apply_region_scatter_filters(
+        df_plot,
+        df_scatter_region_meta,
+        selected_categories=selected_scatter_categories,
+    )
     return df_plot
 
 
@@ -935,14 +1974,12 @@ def _build_scatter_from_region_points(df_plot, method="pearson", group_title="al
         return None
 
     region_colors = _build_region_colors(df_plot["region"])
-    highlight_regions = {"VISp", "MOs", "CP", "CA1", "SCm", "ZI", "AUDp", "GRN", "PO", "VPM", "VISa", "MOp"}
-
     fig = go.Figure()
     for _, row in df_plot.sort_values("region").iterrows():
         region = row["region"]
         color = region_colors.get(region)
         marker = dict(size=8, color=color) if color else dict(size=8)
-        if region in highlight_regions:
+        if region in HIGHLIGHT_REGIONS:
             marker["line"] = dict(color="black", width=1)
 
         fig.add_trace(
@@ -952,7 +1989,7 @@ def _build_scatter_from_region_points(df_plot, method="pearson", group_title="al
                 mode="markers",
                 name=region,
                 marker=marker,
-                showlegend=region in highlight_regions,
+                showlegend=region in HIGHLIGHT_REGIONS,
                 hovertemplate=(
                     f"Region: {region}<br>"
                     f"corr={row['corr']:.2f}<br>"
@@ -975,6 +2012,7 @@ def _build_scatter_from_region_points(df_plot, method="pearson", group_title="al
         height=600,
         width=900,
     )
+    _apply_cartesian_grid(fig)
     x_range = _compute_axis_range(df_plot["reliability"].to_numpy(dtype=float))
     y_range = _compute_axis_range(df_plot["corr"].to_numpy(dtype=float))
     if x_range is not None:
@@ -995,6 +2033,12 @@ def _build_scatter_from_region_points(df_plot, method="pearson", group_title="al
                 line=dict(color="red", dash="dash"),
             )
 
+    _add_corr_rel_summary_annotation(
+        fig,
+        df_plot["corr"].to_numpy(dtype=float),
+        df_plot["reliability"].to_numpy(dtype=float),
+    )
+
     if return_meta:
         return fig, df_plot.copy(), x_range, y_range
     return fig
@@ -1008,18 +2052,16 @@ def _build_scatter(df_source, method="pearson", group_title="all", return_meta=F
         return None
 
     region_colors = _build_region_colors(df_plot["region"])
-    highlight_regions = {"VISp", "MOs", "CP", "CA1", "SCm", "ZI", "AUDp", "GRN", "PO", "VPM", "VISa", "MOp"}
-
     fig = go.Figure()
     for _, row in df_plot.sort_values("region").iterrows():
         region = row["region"]
         color = region_colors.get(region)
         marker = dict(size=8, color=color) if color else dict(size=8)
-        if region in highlight_regions: marker["line"] = dict(color="black", width=1)
+        if region in HIGHLIGHT_REGIONS: marker["line"] = dict(color="black", width=1)
         
         fig.add_trace(go.Scatter(
             x=[row["reliability"]], y=[row["corr"]], mode="markers", name=region, marker=marker,
-            showlegend=region in highlight_regions,
+            showlegend=region in HIGHLIGHT_REGIONS,
             hovertemplate=f"Region: {region}<br>corr={row['corr']:.2f}<br>rel={row['reliability']:.2f}<br>n={row['n_neurons']}<extra></extra>"
         ))
 
@@ -1031,6 +2073,7 @@ def _build_scatter(df_source, method="pearson", group_title="all", return_meta=F
         template=PLOTLY_TEMPLATE, legend=dict(x=1.02, y=1, yanchor="top"), margin=dict(l=80, r=200, t=90, b=70),
         height=600, width=900
     )
+    _apply_cartesian_grid(fig)
     x_range = _compute_axis_range(df_plot["reliability"].to_numpy(dtype=float))
     y_range = _compute_axis_range(df_plot["corr"].to_numpy(dtype=float))
     if x_range is not None:
@@ -1047,6 +2090,12 @@ def _build_scatter(df_source, method="pearson", group_title="all", return_meta=F
         max_val = float(np.nanmax([np.nanmax(x_vals), np.nanmax(y_vals)]))
     if np.isfinite(min_val) and np.isfinite(max_val) and min_val < max_val:
         fig.add_shape(type="line", x0=min_val, y0=min_val, x1=max_val, y1=max_val, line=dict(color="red", dash="dash"))
+
+    _add_corr_rel_summary_annotation(
+        fig,
+        df_plot["corr"].to_numpy(dtype=float),
+        df_plot["reliability"].to_numpy(dtype=float),
+    )
 
     if return_meta:
         return fig, df_plot.copy(), x_range, y_range
@@ -1133,6 +2182,7 @@ def _build_pid_detail_scatter(
         legend=dict(x=1.02, y=1, yanchor="top"),
         height=550,
     )
+    _apply_cartesian_grid(fig)
 
     if axis_x_range is not None:
         fig.update_xaxes(range=axis_x_range)
@@ -1151,6 +2201,11 @@ def _build_pid_detail_scatter(
                 y1=dmax,
                 line=dict(color="red", dash="dash"),
             )
+    _add_corr_rel_summary_annotation(
+        fig,
+        df_plot[corr_col].to_numpy(dtype=float),
+        df_plot[rel_col].to_numpy(dtype=float),
+    )
     return fig
 
 
@@ -1353,306 +2408,355 @@ else:
     )
     fig_arousal.update_xaxes(title_font=dict(color="blue"), tickfont=dict(color="blue"))
     fig_arousal.update_yaxes(title_font=dict(color="red"), tickfont=dict(color="red"))
+    _apply_cartesian_grid(fig_arousal)
     st.plotly_chart(fig_arousal, width="stretch")
 
 # ==========================================
 # Multi-Level Region Plot (Reference Figure)
 # ==========================================
 st.markdown("---")
-st.subheader("Region Coupling Reliability and Median Strength")
+st.subheader("Region Reliability Summary")
 st.caption(
     "Reliability aggregation: "
     + ("avg across PIDs within region" if avg_by_pid_toggle else "all neurons within region")
 )
 
 coupling_source = st.selectbox("Coupling source for regional summary", ["Spont", "ITI", "Task"], index=0, key="ml_source")
+from plotly.subplots import make_subplots
 
-@st.cache_data(show_spinner="Extracting medians from raw cache (takes ~1 min on first load)...")
-def load_raw_coupling_for_medians():
-    CACHE_DIR_RAW = BASE_PATH / "data" / "dashboard_cache"
-    if not CACHE_DIR_RAW.exists(): return None
-    cache_paths = list(CACHE_DIR_RAW.glob("*.pkl"))
-    
-    rows = []
-    
-    for path in cache_paths:
-        with open(path, "rb") as f:
-            cache = pickle.load(f)
-            
-        pid = cache.get("pid", path.stem)
-        
-        df_res = cache.get("df_res")
-        if df_res is None or df_res.empty: continue
-        if "label" not in df_res.columns: continue
-        
-        if "region" in df_res.columns: region_col = "region"
-        elif "acronym" in df_res.columns: region_col = "acronym"
-        else: continue
-        
-        df_labels = df_res[["cluster_id", "label", region_col]].copy()
-        
-        for key, name in [("df_coupling", "Spont"), ("df_coupling_iti", "ITI"), ("df_coupling_task", "Task")]:
-            df = cache.get(key)
-            if df is not None and not df.empty:
-                df = df.copy()
-                df["pid"] = pid
-                df["source"] = name
-                if name == "Spont":
-                    if "coupling_strength_h1" in df.columns and "coupling_strength_h2" in df.columns:
-                        df["strength"] = df[["coupling_strength_h1", "coupling_strength_h2"]].mean(axis=1)
-                    else: continue
-                else:
-                    if "coupling_strength_odd" in df.columns and "coupling_strength_even" in df.columns:
-                        df["strength"] = df[["coupling_strength_odd", "coupling_strength_even"]].mean(axis=1)
-                    else: continue
-                    
-                df_merged = df.merge(df_labels, on="cluster_id", how="inner")
-                # Use all good neurons (label >= label_min from meta, which user configured usually to 0.59)
-                df_merged = df_merged[pd.to_numeric(df_merged["label"], errors="coerce") >= 0.59]
-                
-                if not df_merged.empty:
-                    df_merged["cluster_id"] = pd.to_numeric(df_merged["cluster_id"])
-                    df_merged = df_merged[np.isfinite(df_merged["cluster_id"])].copy()
-                    df_merged["region"] = df_merged[region_col].astype(str)
-                    
-                    rows.append(df_merged[["pid", "cluster_id", "region", "source", "strength"]])
-                    
-    if not rows: return pd.DataFrame()
-    return pd.concat(rows, ignore_index=True)
+source_var_strength = f"Coupling Strength ({coupling_source})"
+source_var_delay = f"Coupling Delay ({coupling_source})"
 
+# Keep "all good neurons" and coupling-from-all-neuron-population settings as before,
+# but let avg_by_pid follow the global toggle. Delay/whisk event rows come from the
+# cached sequence-region comparison tables used by 17_ibl_seq_regions_dash.py.
+df_strength = df_corr.query(
+    "var1 == @source_var_strength and var2 == @source_var_strength and "
+    "arousal_group == 'all' and good_only == True and use_good_stpr == False and "
+    "avg_by_pid == @avg_by_pid_toggle"
+)
+df_delay = df_corr.query(
+    "var1 == @source_var_delay and var2 == @source_var_delay and "
+    "arousal_group == 'all' and good_only == True and use_good_stpr == False and "
+    "avg_by_pid == @avg_by_pid_toggle"
+)
+df_seq_region_pairs = (
+    seq_region_pairs_pidmean if avg_by_pid_toggle else seq_region_pairs_pooled
+).copy()
+df_first_move = _extract_seq_diag_reliability(
+    df_seq_region_pairs,
+    "first_move_delay",
+    "first_move_rel",
+)
+df_task_whisk = _extract_seq_diag_reliability(
+    df_seq_region_pairs,
+    "task_whisk_event_delay",
+    "task_whisk_rel",
+)
+df_spont_whisk = _extract_seq_diag_reliability(
+    df_seq_region_pairs,
+    "spont_whisk_event_delay",
+    "spont_whisk_rel",
+)
 
-with st.spinner("Preparing regional multilevel scatter plots (computing median)..."):
-    df_raw = load_raw_coupling_for_medians()
+df_strength = df_strength.rename(columns={"pearson_r": "strength_rel"})
+df_delay = df_delay.rename(columns={"pearson_r": "delay_rel"})
 
-if df_raw is not None and not df_raw.empty:
-    from plotly.subplots import make_subplots
-    
-    source_var_delay = f"Coupling Delay ({coupling_source})"
-    source_var_strength = f"Coupling Strength ({coupling_source})"
-    
-    # Keep "all good neurons" and coupling-from-all-neuron-population settings as before,
-    # but let avg_by_pid follow the global toggle.
-    df_f = df_corr.query(
-        "var1 == @source_var_delay and var2 == @source_var_delay and "
-        "arousal_group == 'all' and good_only == True and use_good_stpr == False and "
-        "avg_by_pid == @avg_by_pid_toggle"
+region_series = [
+    df_src["region"].astype(str)
+    for df_src in (df_strength, df_delay, df_first_move, df_task_whisk, df_spont_whisk)
+    if ("region" in df_src.columns) and (not df_src.empty)
+]
+if region_series:
+    df_merged = pd.DataFrame({"region": pd.unique(pd.concat(region_series, ignore_index=True))})
+else:
+    df_merged = pd.DataFrame(columns=["region"])
+
+if not df_merged.empty:
+    df_merged = df_merged.merge(df_strength[["region", "strength_rel"]], on="region", how="left")
+    df_merged = df_merged.merge(df_delay[["region", "delay_rel"]], on="region", how="left")
+    df_merged = df_merged.merge(df_first_move[["region", "first_move_rel"]], on="region", how="left")
+    df_merged = df_merged.merge(df_task_whisk[["region", "task_whisk_rel"]], on="region", how="left")
+    df_merged = df_merged.merge(df_spont_whisk[["region", "spont_whisk_rel"]], on="region", how="left")
+    category_order = ["Isocortex", "HPF", "OLF", "CTXsp", "Striatum", "Pallidum", "Thal.", "Hyp.", "Midbrain", "Pons", "Medulla", "Cereb.", "Unknown", "Other"]
+
+    # Apply global 'min_neurons' constraint.
+    df_rc_filtered_local = df_region_counts.query("good_only == True").rename(
+        columns={"n_neurons": "n_neurons_dashboard"}
     )
-    df_g = df_corr.query(
-        "var1 == @source_var_strength and var2 == @source_var_strength and "
-        "arousal_group == 'all' and good_only == True and use_good_stpr == False and "
-        "avg_by_pid == @avg_by_pid_toggle"
-    )
-    
-    # Strength aggregation follows avg_by_pid toggle:
-    # False: median across all neurons in region
-    # True: mean of per-PID regional medians
-    df_h_raw = df_raw[df_raw["source"] == coupling_source]
-    if avg_by_pid_toggle:
-        df_h = (
-            df_h_raw.groupby(["region", "pid"])["strength"].median().reset_index()
-            .groupby("region", as_index=False)
-            .agg(
-                strength=("strength", "mean"),
-                n_pids_strength=("pid", "nunique"),
-            )
-        )
-        strength_subplot_title = "Mean per-PID median coupling strength"
-        strength_trace_name = "Mean PID median strength"
-        strength_hover_name = "Mean PID median strength"
-        strength_yaxis_title = "Mean PID med. str."
-    else:
-        df_h = df_h_raw.groupby("region", as_index=False)["strength"].median()
-        df_h["n_pids_strength"] = (
-            df_h_raw.groupby("region")["pid"].nunique().reindex(df_h["region"]).to_numpy()
-        )
-        strength_subplot_title = "Median coupling strength"
-        strength_trace_name = "Median strength"
-        strength_hover_name = "Median strength"
-        strength_yaxis_title = "Median str."
-    
-    # Brain Region Category Map for x-axis Ordering
-    allen_lookup = _get_allen_lookup()
-    if allen_lookup is not None:
-        order_by_acr = allen_lookup.get("order_by_acr", {})
-        category_by_acr = allen_lookup.get("category_by_acr", {})
-        region_map = {}
-        region_orders = {}
-        for reg in df_h["region"].unique():
-            reg_s = str(reg)
-            region_map[reg_s] = category_by_acr.get(reg_s, "Unknown")
-            region_orders[reg_s] = int(order_by_acr.get(reg_s, 999999))
-    else:
-        region_map = {reg: "Unknown" for reg in df_h["region"].unique()}
-        region_orders = {reg: 999999 for reg in df_h["region"].unique()}
-        
-    df_f = df_f.rename(columns={"pearson_r": "delay_rel"})
-    df_g = df_g.rename(columns={"pearson_r": "strength_rel"})
-    
-    df_merged = df_h[["region", "strength", "n_pids_strength"]].merge(
-        df_f[["region", "delay_rel"]],
+    df_merged = df_merged.merge(
+        df_rc_filtered_local[["region", "n_neurons_dashboard"]],
         on="region",
         how="left",
     )
-    df_merged = df_merged.merge(df_g[["region", "strength_rel"]], on="region", how="left")
-    
-    # Apply global 'min_neurons' constraint
-    df_rc_filtered_local = df_region_counts.query("good_only == True")
-    df_merged = df_merged.merge(df_rc_filtered_local[["region", "n_neurons"]], on="region", how="inner")
-    df_merged = df_merged[df_merged["n_neurons"] >= min_neurons]
-    
-    category_order = ["Isocortex", "HPF", "OLF", "CTXsp", "Striatum", "Pallidum", "Thal.", "Hyp.", "Midbrain", "Pons", "Medulla", "Cereb.", "Unknown", "Other"]
-    df_merged["category"] = df_merged["region"].map(region_map).fillna("Unknown")
-    df_merged["allen_order"] = df_merged["region"].map(region_orders).fillna(999999)
-    if (df_merged["allen_order"] != 999999).any():
-        df_merged = df_merged[df_merged["allen_order"] != 999999]
-    df_merged = df_merged[df_merged["region"] != "root"]
-    
-    # Sort primarily by the anatomical order to ensure grouping is strict
-    category_rank = {cat: i for i, cat in enumerate(category_order)}
-    df_merged["category_rank"] = df_merged["category"].map(category_rank).fillna(len(category_rank)).astype(int)
-    df_merged = df_merged.sort_values(["category_rank", "allen_order", "region"])
-    
-    if not df_merged.empty:
-        fig_multi = make_subplots(
-            rows=3,
-            cols=1,
-            shared_xaxes=True,
-            vertical_spacing=0.08,
-            subplot_titles=("Coupling delay reliability", "Coupling strength reliability", strength_subplot_title),
+    if not seq_region_counts_seq.empty:
+        df_seq_region_meta = seq_region_counts_seq.rename(
+            columns={"n_units_total": "n_neurons_seq"}
         )
-        
-        regions = df_merged["region"].tolist()
-        x_vals = list(range(len(regions)))
-        n_neurons_list = df_merged["n_neurons"].tolist()
-        region_colors_dict = _build_region_colors(regions)
-        marker_colors = [region_colors_dict.get(r, "whitesmoke") for r in regions]
-        
-        
-        fig_multi.add_trace(go.Scatter(x=x_vals, y=df_merged["delay_rel"], mode="markers", 
-                                       marker={"color": marker_colors, "size": 8}, name="Delay Rel", showlegend=False,
-                                       hovertemplate="Region: %{customdata[0]}<br>Delay Rel: %{y:.2f}<br>Neurons: %{customdata[1]}<extra></extra>",
-                                       customdata=np.stack((df_merged["region"], df_merged["n_neurons"]), axis=-1)), row=1, col=1)
-        fig_multi.add_trace(go.Scatter(x=x_vals, y=df_merged["strength_rel"], mode="markers", 
-                                       marker={"color": marker_colors, "size": 8}, name="Strength Rel", showlegend=False,
-                                       hovertemplate="Region: %{customdata[0]}<br>Strength Rel: %{y:.2f}<br>Neurons: %{customdata[1]}<extra></extra>",
-                                       customdata=np.stack((df_merged["region"], df_merged["n_neurons"]), axis=-1)), row=2, col=1)
-        fig_multi.add_trace(go.Scatter(x=x_vals, y=df_merged["strength"], mode="markers", 
-                                       marker={"color": marker_colors, "size": 8}, name=strength_trace_name, showlegend=False,
-                                       hovertemplate=(
-                                           f"Region: %{{customdata[0]}}<br>{strength_hover_name}: %{{y:.2f}}<br>"
-                                           "Neurons: %{customdata[1]}<br>PIDs: %{customdata[2]}<extra></extra>"
-                                       ),
-                                       customdata=np.stack(
-                                           (
-                                               df_merged["region"],
-                                               df_merged["n_neurons"],
-                                               df_merged["n_pids_strength"],
-                                           ),
-                                           axis=-1,
-                                       )), row=3, col=1)
-        
-        fig_multi.add_hline(y=0, line_dash="dash", line_color="gray", row=1, col=1)
-        fig_multi.add_hline(y=0, line_dash="dash", line_color="gray", row=2, col=1)
-        fig_multi.add_hline(y=0, line_dash="dash", line_color="gray", row=3, col=1)
-        
-        # Add broad region x-axis group labels as annotations
-        df_merged_reset = df_merged.reset_index(drop=True)
-        cat_positions = df_merged_reset.groupby("category", sort=False).apply(lambda x: x.index.to_numpy().mean())
-        
-        # Pre-resolve true acronyms for broad groups so they get the generic Allen broad-level color
-        cat_to_acronym = {"Isocortex": "Isocortex", "HPF": "HPF", "Striatum": "STR", "Pallidum": "PAL", 
-                          "Thal.": "TH", "Hyp.": "HY", "Midbrain": "MB", "Pons": "P", "Medulla": "MY", 
-                          "Cereb.": "CB", "OLF": "OLF", "CTXsp": "CTXsp"}
-        cat_acronyms_list = [cat_to_acronym.get(c, c) for c in cat_positions.index]
-        cat_colors_dict = _build_region_colors(cat_acronyms_list)
-        
-        for cat, pos in cat_positions.items():
-            if cat not in ["Unknown", "Other"]:
-                acronym = cat_to_acronym.get(cat, cat)
-                font_color = cat_colors_dict.get(acronym, "gray")
-                if font_color == "rgb(255,255,255)": font_color = "gray"
-                fig_multi.add_annotation(x=pos, y=-0.15, xref="x", yref="paper", text=cat, 
-                                         showarrow=False, font={"color": font_color, "size": 14}, xanchor="center")
+        seq_meta_cols = [
+            col
+            for col in ["region", "n_neurons_seq", "allen_color", "allen_order", "category", "category_rank"]
+            if col in df_seq_region_meta.columns
+        ]
+        df_merged = df_merged.merge(df_seq_region_meta[seq_meta_cols], on="region", how="left")
+    df_merged["n_neurons_plot"] = pd.to_numeric(
+        df_merged.get("n_neurons_dashboard"), errors="coerce"
+    ).fillna(pd.to_numeric(df_merged.get("n_neurons_seq"), errors="coerce"))
+    df_merged = df_merged[
+        np.isfinite(df_merged["n_neurons_plot"].to_numpy(dtype=float))
+        & (df_merged["n_neurons_plot"].to_numpy(dtype=float) >= float(min_neurons))
+    ].copy()
 
-        # Draw per-region x labels as annotations so each label can match its marker color.
-        for xi, reg in enumerate(regions):
-            label_color = region_colors_dict.get(reg, "gray")
-            if label_color == "rgb(255,255,255)":
-                label_color = "gray"
+    has_seq_order = (
+        "allen_order" in df_merged.columns
+        and pd.to_numeric(df_merged["allen_order"], errors="coerce").notna().any()
+    )
+    if has_seq_order:
+        df_merged["allen_order"] = pd.to_numeric(df_merged["allen_order"], errors="coerce").fillna(999999)
+        if "category" not in df_merged.columns:
+            df_merged["category"] = "Unknown"
+        df_merged["category"] = df_merged["category"].fillna("Unknown")
+        if "category_rank" in df_merged.columns:
+            df_merged["category_rank"] = pd.to_numeric(
+                df_merged["category_rank"], errors="coerce"
+            ).fillna(len(category_order)).astype(int)
+        else:
+            category_rank = {cat: i for i, cat in enumerate(category_order)}
+            df_merged["category_rank"] = df_merged["category"].map(category_rank).fillna(len(category_rank)).astype(int)
+    else:
+        allen_lookup = _get_allen_lookup()
+        if allen_lookup is not None:
+            order_by_acr = allen_lookup.get("order_by_acr", {})
+            category_by_acr = allen_lookup.get("category_by_acr", {})
+            region_map = {}
+            region_orders = {}
+            for reg in df_merged["region"].astype(str).unique():
+                region_map[reg] = category_by_acr.get(reg, "Unknown")
+                region_orders[reg] = int(order_by_acr.get(reg, 999999))
+        else:
+            region_map = {reg: "Unknown" for reg in df_merged["region"].astype(str).unique()}
+            region_orders = {reg: 999999 for reg in df_merged["region"].astype(str).unique()}
+
+        df_merged["category"] = df_merged["region"].map(region_map).fillna("Unknown")
+        df_merged["allen_order"] = df_merged["region"].map(region_orders).fillna(999999)
+        category_rank = {cat: i for i, cat in enumerate(category_order)}
+        df_merged["category_rank"] = df_merged["category"].map(category_rank).fillna(len(category_rank)).astype(int)
+
+    if (pd.to_numeric(df_merged["allen_order"], errors="coerce") != 999999).any():
+        df_merged = df_merged[pd.to_numeric(df_merged["allen_order"], errors="coerce") != 999999]
+    df_merged = df_merged[df_merged["region"] != "root"]
+    df_merged = df_merged.sort_values(["category_rank", "allen_order", "region"])
+
+if not df_merged.empty:
+    fig_multi = make_subplots(
+        rows=5,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.08,
+        subplot_titles=(
+            "Coupling strength reliability",
+            "Coupling delay reliability",
+            "First Move Delay reliability",
+            "Task Whisk Delay reliability",
+            "Spont Whisk Delay reliability",
+        ),
+    )
+
+    regions = df_merged["region"].tolist()
+    x_vals = list(range(len(regions)))
+    region_colors_dict = _build_region_colors(regions)
+    marker_colors = [region_colors_dict.get(r, "whitesmoke") for r in regions]
+    region_customdata = np.stack((df_merged["region"], df_merged["n_neurons_plot"].astype(int)), axis=-1)
+
+    fig_multi.add_trace(
+        go.Scatter(
+            x=x_vals,
+            y=df_merged["strength_rel"],
+            mode="markers",
+            marker={"color": marker_colors, "size": 8},
+            name="Strength Rel",
+            showlegend=False,
+            hovertemplate="Region: %{customdata[0]}<br>Strength Rel: %{y:.2f}<br>Neurons: %{customdata[1]}<extra></extra>",
+            customdata=region_customdata,
+        ),
+        row=1,
+        col=1,
+    )
+    fig_multi.add_trace(
+        go.Scatter(
+            x=x_vals,
+            y=df_merged["delay_rel"],
+            mode="markers",
+            marker={"color": marker_colors, "size": 8},
+            name="Delay Rel",
+            showlegend=False,
+            hovertemplate="Region: %{customdata[0]}<br>Delay Rel: %{y:.2f}<br>Neurons: %{customdata[1]}<extra></extra>",
+            customdata=region_customdata,
+        ),
+        row=2,
+        col=1,
+    )
+    fig_multi.add_trace(
+        go.Scatter(
+            x=x_vals,
+            y=df_merged["first_move_rel"],
+            mode="markers",
+            marker={"color": marker_colors, "size": 8},
+            name="First-Move Rel",
+            showlegend=False,
+            hovertemplate="Region: %{customdata[0]}<br>First-Move Rel: %{y:.2f}<br>Neurons: %{customdata[1]}<extra></extra>",
+            customdata=region_customdata,
+        ),
+        row=3,
+        col=1,
+    )
+    fig_multi.add_trace(
+        go.Scatter(
+            x=x_vals,
+            y=df_merged["task_whisk_rel"],
+            mode="markers",
+            marker={"color": marker_colors, "size": 8},
+            name="Task Whisk Rel",
+            showlegend=False,
+            hovertemplate="Region: %{customdata[0]}<br>Task Whisk Rel: %{y:.2f}<br>Neurons: %{customdata[1]}<extra></extra>",
+            customdata=region_customdata,
+        ),
+        row=4,
+        col=1,
+    )
+    fig_multi.add_trace(
+        go.Scatter(
+            x=x_vals,
+            y=df_merged["spont_whisk_rel"],
+            mode="markers",
+            marker={"color": marker_colors, "size": 8},
+            name="Spont Whisk Rel",
+            showlegend=False,
+            hovertemplate="Region: %{customdata[0]}<br>Spont Whisk Rel: %{y:.2f}<br>Neurons: %{customdata[1]}<extra></extra>",
+            customdata=region_customdata,
+        ),
+        row=5,
+        col=1,
+    )
+
+    fig_multi.add_hline(y=0, line_dash="dash", line_color="gray", row=1, col=1)
+    fig_multi.add_hline(y=0, line_dash="dash", line_color="gray", row=2, col=1)
+    fig_multi.add_hline(y=0, line_dash="dash", line_color="gray", row=3, col=1)
+    fig_multi.add_hline(y=0, line_dash="dash", line_color="gray", row=4, col=1)
+    fig_multi.add_hline(y=0, line_dash="dash", line_color="gray", row=5, col=1)
+
+    df_merged_reset = df_merged.reset_index(drop=True)
+    cat_positions = df_merged_reset.groupby("category", sort=False).apply(lambda x: x.index.to_numpy().mean())
+
+    cat_to_acronym = {"Isocortex": "Isocortex", "HPF": "HPF", "Striatum": "STR", "Pallidum": "PAL",
+                      "Thal.": "TH", "Hyp.": "HY", "Midbrain": "MB", "Pons": "P", "Medulla": "MY",
+                      "Cereb.": "CB", "OLF": "OLF", "CTXsp": "CTXsp"}
+    cat_acronyms_list = [cat_to_acronym.get(c, c) for c in cat_positions.index]
+    cat_colors_dict = _build_region_colors(cat_acronyms_list)
+
+    for cat, pos in cat_positions.items():
+        if cat not in ["Unknown", "Other"]:
+            acronym = cat_to_acronym.get(cat, cat)
+            font_color = cat_colors_dict.get(acronym, "gray")
+            if font_color == "rgb(255,255,255)":
+                font_color = "gray"
             fig_multi.add_annotation(
-                x=xi,
-                y=-0.06,
+                x=pos,
+                y=-0.15,
                 xref="x",
                 yref="paper",
-                text=reg,
+                text=cat,
                 showarrow=False,
-                textangle=90,
-                font={"color": label_color, "size": 11},
-                xanchor="right",
-                yanchor="middle",
+                font={"color": font_color, "size": 14},
+                xanchor="center",
             )
 
-        fig_multi.update_layout(height=750, template=PLOTLY_TEMPLATE, margin=dict(b=180, t=50))
-        fig_multi.update_yaxes(range=[-1.1, 1.1], title_text="Delay rel.", row=1, col=1)
-        fig_multi.update_yaxes(range=[-1.1, 1.1], title_text="Strength rel.", row=2, col=1)
-        fig_multi.update_yaxes(title_text=strength_yaxis_title, row=3, col=1)
-        fig_multi.update_xaxes(title_text="", tickmode="array", tickvals=x_vals, showticklabels=False)
-        fig_multi.update_layout(xaxis=dict(tickmode='array', tickvals=x_vals, showticklabels=False))
-        
-        st.plotly_chart(fig_multi, use_container_width=True)
+    for xi, reg in enumerate(regions):
+        label_color = region_colors_dict.get(reg, "gray")
+        if label_color == "rgb(255,255,255)":
+            label_color = "gray"
+        fig_multi.add_annotation(
+            x=xi,
+            y=-0.06,
+            xref="x",
+            yref="paper",
+            text=reg,
+            showarrow=False,
+            textangle=90,
+            font={"color": label_color, "size": 11},
+            xanchor="right",
+            yanchor="middle",
+        )
 
-        df_rel = df_merged[["region", "delay_rel", "strength_rel", "n_neurons"]].copy()
-        df_rel = df_rel[
-            np.isfinite(df_rel["delay_rel"].to_numpy(dtype=float))
-            & np.isfinite(df_rel["strength_rel"].to_numpy(dtype=float))
-        ].copy()
+    fig_multi.update_layout(height=1080, template=PLOTLY_TEMPLATE, margin=dict(b=180, t=50))
+    _apply_cartesian_grid(fig_multi)
+    fig_multi.update_yaxes(range=[-0.05, 1.0], title_text="Strength rel.", row=1, col=1)
+    fig_multi.update_yaxes(range=[-0.05, 1.0], title_text="Delay rel.", row=2, col=1)
+    fig_multi.update_yaxes(range=[-0.05, 1.0], title_text="First-move rel.", row=3, col=1)
+    fig_multi.update_yaxes(range=[-0.05, 1.0], title_text="Task whisk rel.", row=4, col=1)
+    fig_multi.update_yaxes(range=[-0.05, 1.0], title_text="Spont whisk rel.", row=5, col=1)
+    fig_multi.update_xaxes(title_text="", tickmode="array", tickvals=x_vals, showticklabels=False)
+    fig_multi.update_layout(xaxis=dict(tickmode="array", tickvals=x_vals, showticklabels=False))
 
-        if not df_rel.empty:
-            rel_colors = [region_colors_dict.get(str(r), "whitesmoke") for r in df_rel["region"]]
-            fig_rel = go.Figure()
-            fig_rel.add_trace(
-                go.Scatter(
-                    x=df_rel["delay_rel"],
-                    y=df_rel["strength_rel"],
-                    mode="markers",
-                    marker=dict(color=rel_colors, size=9),
-                    showlegend=False,
-                    customdata=np.stack(
-                        (df_rel["region"].astype(str), df_rel["n_neurons"].astype(int)),
-                        axis=-1,
-                    ),
-                    hovertemplate=(
-                        "Region: %{customdata[0]}<br>"
-                        "Delay rel: %{x:.2f}<br>"
-                        "Strength rel: %{y:.2f}<br>"
-                        "Neurons: %{customdata[1]}<extra></extra>"
-                    ),
-                )
+    st.plotly_chart(fig_multi, use_container_width=True)
+
+    df_rel = df_merged[["region", "delay_rel", "strength_rel", "n_neurons_plot"]].copy()
+    df_rel = df_rel[
+        np.isfinite(df_rel["delay_rel"].to_numpy(dtype=float))
+        & np.isfinite(df_rel["strength_rel"].to_numpy(dtype=float))
+    ].copy()
+
+    if not df_rel.empty:
+        rel_colors = [region_colors_dict.get(str(r), "whitesmoke") for r in df_rel["region"]]
+        fig_rel = go.Figure()
+        fig_rel.add_trace(
+            go.Scatter(
+                x=df_rel["delay_rel"],
+                y=df_rel["strength_rel"],
+                mode="markers",
+                marker=dict(color=rel_colors, size=9),
+                showlegend=False,
+                customdata=np.stack(
+                    (df_rel["region"].astype(str), df_rel["n_neurons_plot"].astype(int)),
+                    axis=-1,
+                ),
+                hovertemplate=(
+                    "Region: %{customdata[0]}<br>"
+                    "Delay rel: %{x:.2f}<br>"
+                    "Strength rel: %{y:.2f}<br>"
+                    "Neurons: %{customdata[1]}<extra></extra>"
+                ),
             )
-            fig_rel.add_vline(x=0, line_dash="dash", line_color="gray")
-            fig_rel.add_hline(y=0, line_dash="dash", line_color="gray")
-            fig_rel.add_shape(
-                type="line",
-                x0=-1.1,
-                y0=-1.1,
-                x1=1.1,
-                y1=1.1,
-                line=dict(color="gray", dash="dot"),
-            )
-            fig_rel.update_layout(
-                title="Delay Reliability vs Strength Reliability",
-                xaxis_title="Delay rel.",
-                yaxis_title="Strength rel.",
-                template=PLOTLY_TEMPLATE,
-                height=520,
-                margin=dict(l=70, r=40, t=70, b=60),
-            )
-            fig_rel.update_xaxes(range=[-1.1, 1.1])
-            fig_rel.update_yaxes(range=[-1.1, 1.1])
-            st.plotly_chart(fig_rel, use_container_width=True)
-        else:
-            st.info("No finite delay/strength reliability pairs available for the added scatter plot.")
+        )
+        fig_rel.add_vline(x=0, line_dash="dash", line_color="gray")
+        fig_rel.add_hline(y=0, line_dash="dash", line_color="gray")
+        fig_rel.add_shape(
+            type="line",
+            x0=-1.1,
+            y0=-1.1,
+            x1=1.1,
+            y1=1.1,
+            line=dict(color="gray", dash="dot"),
+        )
+        fig_rel.update_layout(
+            title="Delay Reliability vs Strength Reliability",
+            xaxis_title="Delay rel.",
+            yaxis_title="Strength rel.",
+            template=PLOTLY_TEMPLATE,
+            height=520,
+            margin=dict(l=70, r=40, t=70, b=60),
+        )
+        _apply_cartesian_grid(fig_rel)
+        fig_rel.update_xaxes(range=[-1.1, 1.1])
+        fig_rel.update_yaxes(range=[-1.1, 1.1])
+        st.plotly_chart(fig_rel, use_container_width=True)
     else:
-        st.info("No matching data found for the multi-level plot.")
+        st.info("No finite delay/strength reliability pairs available for the added scatter plot.")
 else:
-    st.info("Raw coupling strength medians could not be extracted.")
+    if seq_region_err:
+        st.info(
+            "No matching data found for the regional reliability plot. "
+            f"Sequence-region source error: {seq_region_err}"
+        )
+    else:
+        st.info("No matching data found for the regional reliability plot.")

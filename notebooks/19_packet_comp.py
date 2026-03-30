@@ -1,5 +1,6 @@
 # %%
 from pathlib import Path
+import os
 import sys
 
 import pandas as pd
@@ -13,11 +14,14 @@ except Exception:  # pragma: no cover
 BASE_PATH = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BASE_PATH))
 
+# Force a non-Qt backend before Matplotlib is imported anywhere else.
+MATPLOTLIB_BACKEND = "TkAgg"
+os.environ["MPLBACKEND"] = MATPLOTLIB_BACKEND
+
 from utils.io import setup_paths, init_one
 from utils.packet_dashboard import (
     BASE_CACHE_DIR,
     PACKET_CACHE_DIR,
-    DEFAULT_PACKET_CONFIG,
     compute_packet_dashboard_cache,
     list_available_pids,
     load_base_cache,
@@ -30,14 +34,70 @@ from utils.packet_dashboard import (
 COMPUTE_ALL = False  # If True, ignore PIDS/SUBJECT/REGIONS and process all insertions for TAG.
 PIDS = [
     "c9664185-d3fd-4e0e-89cf-77c402038938",
-    # "49c2ea3d-2b50-4e8a-b124-9e190960784e",
+    # "f967a527-257f-404a-871d-b91575dca3b4",
 ]
 SUBJECT = None  # "CSH_ZAD_029"
 REGIONS = None  # ["VISp", "MOp", "PO", "CA1", "AUDp", "CP", "VPM"]
 TAG = None  # "2025_Q3_IBL_et_al_BWM"
 
 FORCE_RECOMPUTE = True
-PACKET_CONFIG = dict(DEFAULT_PACKET_CONFIG)
+MIN_NEURON_LABEL = 0.6  # Minimum neuron label kept for packet calculations.
+TARGET_REGION = "VISp"  # None -> calculate all regions, otherwise only this region/prefix.
+PROMPT_PCA_CLUSTER_COUNT = True  # Show PCA figures and ask for k for raw/normalized/residual PCA clustering.
+
+# Edit packet parameters here directly.
+# Example knobs:
+# - PACKET_THRESHOLD: packet detection threshold
+# - MIN_PACKET_GAP_S: minimum separation between detected packets
+# - MIN_NEURON_LABEL: minimum neuron label included in the packet calculations
+# - TARGET_REGION: None for all packet regions, or a specific region like "SSp-ul"
+# - PROMPT_PCA_CLUSTER_COUNT: open PCA figures and manually choose k for PCA-based clustering
+# - MATPLOTLIB_BACKEND: backend used for those PCA selection figures
+# - CLUSTER_MIN_K / CLUSTER_MAX_K: k-means model-selection range
+# - CLUSTER_METHODS: which packet clustering outputs to compute
+PACKET_CONFIG = {
+    "TEMPLATE_SOURCE": "spont",
+    "USE_SPLIT_TEMPLATES": True,
+    "SPONT_SPLIT_SEGMENTS": 10,
+    "STPR_STRENGTH_MIN": 0.01,
+    "WEIGHT_BY_COUPLING": False,
+    "RECTIFY_MATCH_SCORES": True,
+    "DETECTION_BIN_SIZE": 0.005,
+    "SMOOTH_SIGMA_S": 0.005,
+    "TEMPLATE_TIME_SCALE": 1.0,
+    "PACKET_SCORE_ZSCORE": True,
+    "PACKET_THRESHOLD": 1.0,
+    "MIN_PACKET_GAP_S": 0.1,
+    "LABEL_MIN": float(MIN_NEURON_LABEL),
+    "TARGET_REGION": TARGET_REGION,
+    "PCA_CLUSTER_K_SELECTION": "prompt" if PROMPT_PCA_CLUSTER_COUNT else "auto",
+    "SORT_METRIC_KEY": "spont",
+    "PACKET_PERIOD_MIN_OVERLAP_S": 0.05,
+    "FEATURES_MAIN": [
+        "packet_fraction",
+        "peak_rate",
+        "template_dot",
+        "t_com",
+        "relative_rank_order",
+        "temporal_width",
+        "other_unit_mean_activity_at_t_com",
+        "packet_rate_over_recording_rate",
+    ],
+    "CLUSTER_METHODS": [
+        "raw_kmeans",
+        "normalized_kmeans",
+        "residual_kmeans",
+        "raw_pca_kmeans",
+        "normalized_pca_kmeans",
+        "residual_pca_kmeans",
+    ],
+    "CLUSTER_MIN_K": 2,
+    "CLUSTER_MAX_K": 4,
+    "KMEANS_N_INIT": 20,
+    "KMEANS_MAX_ITER": 100,
+    "PCA_COMPONENTS": 6,
+    "WHISK_EVENT_CONTEXT": "all",
+}
 
 
 def _tag_search_kwargs(tag):
