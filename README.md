@@ -21,6 +21,10 @@ The main analysis pipeline computes coupling properties from `stPR` curves, even
 - Are coupling strength and event-response magnitude related within a region?
 - Which regions show reliable positive or negative structure across animals and sessions?
 
+The example below shows one representative case from auditory cortex (`AUDp`), where sorting neurons by event-response delay and by coupling delay produces a similar sequence-like ordering.
+
+![Example AUDp sequence comparison](sample_similar_AUDp_sequence.png)
+
 In addition to the main coupling analyses, the repository also includes passive auditory and visual analyses, whisking detection and whisking-aligned analyses, a dashboard for sequence-region comparisons, and preliminary work on packet detection / single-sequence extraction.
 
 ## What Is In This Repo
